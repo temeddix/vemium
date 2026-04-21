@@ -411,7 +411,7 @@ async fn request_agent_turn(
       AnthropicOutputBlock::Text { text } => Some(text),
       AnthropicOutputBlock::Other => None,
     })
-    .ok_or_else(|| anyhow!("Anthropic response contained no text block"))?;
+    .context("Anthropic response contained no text block")?;
 
   Ok(text.trim().to_string())
 }

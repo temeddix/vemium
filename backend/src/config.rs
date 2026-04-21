@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result};
 use std::env;
 use std::net::SocketAddr;
 
@@ -17,14 +17,12 @@ impl AppConfig {
     let port = env::var("BACKEND_PORT").unwrap_or_else(|_| "8080".to_string());
     let bind_addr: SocketAddr = format!("{host}:{port}")
       .parse()
-      .map_err(|error| anyhow!("invalid BACKEND_HOST/BACKEND_PORT: {error}"))?;
+      .context("invalid BACKEND_HOST/BACKEND_PORT")?;
 
-    let anthropic_api_key = env::var("ANTHROPIC_API_KEY")
-      .map_err(|_| anyhow!("ANTHROPIC_API_KEY is required"))?;
-    let anthropic_model = env::var("ANTHROPIC_MODEL")
-      .unwrap_or_else(|_| "claude-3-5-sonnet-latest".to_string());
-    let database_url = env::var("DATABASE_URL")
-      .unwrap_or_else(|_| "sqlite:///data/vemium.db".to_string());
+    let anthropic_api_key =
+      env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is required")?;
+    let anthropic_model = "claude-sonnet-4-6".to_string();
+    let database_url = "sqlite:///data/vemium.db".to_string();
 
     Ok(Self {
       bind_addr,
