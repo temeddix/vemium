@@ -6,12 +6,12 @@ use tokio::{
   sync::broadcast,
   time::{Duration, sleep},
 };
-use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{
   app_state::AppState,
   db,
+  error::ReportError,
   models::{RunEvent, RunKind, RunStatus},
 };
 
@@ -95,8 +95,11 @@ enum AnthropicOutputBlock {
 
 pub fn spawn_run(state: AppState, run_id: Uuid, kind: RunKind) {
   tokio::spawn(async move {
-    if let Err(error) = run_orchestration(&state, run_id, kind).await {
-      warn!(run_id = %run_id, %error, "run orchestration failed");
+    if run_orchestration(&state, run_id, kind)
+      .await
+      .report()
+      .is_none()
+    {
       update_status(&state, run_id, RunStatus::Failed).await;
     }
   });
@@ -115,7 +118,7 @@ async fn run_orchestration(
   };
 
   let Some(sender) = sender else {
-    warn!(run_id = %run_id, "missing sender for run");
+    tracing::warn!(run_id = %run_id, "missing sender for run");
     update_status(state, run_id, RunStatus::Failed).await;
     return Ok(());
   };
@@ -312,12 +315,12 @@ fn emit(
   let event_clone = event.clone();
   tokio::spawn(async move {
     if let Err(error) = db::insert_event(&db_clone, &event_clone).await {
-      warn!(run_id = %run_id, %error, "failed to persist event to database");
+      tracing::warn!(run_id = %run_id, %error, "failed to persist event to database");
     }
   });
 
   if sender.send(event).is_err() {
-    debug!(run_id = %run_id, "no websocket subscribers for event");
+    tracing::debug!(run_id = %run_id, "no websocket subscribers for event");
   }
 
   next_sequence
@@ -478,7 +481,7 @@ async fn update_status(state: &AppState, run_id: Uuid, status: RunStatus) {
   if let Err(error) =
     db::update_run_status(&state.db, run_id, &status, &updated_at).await
   {
-    warn!(run_id = %run_id, %error, "failed to persist status update to database");
+    tracing::warn!(run_id = %run_id, %error, "failed to persist status update to database");
   }
 
   if matches!(status, RunStatus::Completed | RunStatus::Failed) {

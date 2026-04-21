@@ -1,18 +1,17 @@
 mod app_state;
 mod config;
 mod db;
+mod error;
 mod models;
 mod routes;
 mod runtime;
 
+use crate::{app_state::AppState, config::AppConfig, models::RunStatus};
 use anyhow::Result;
 use axum::Router;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::info;
-
-use crate::{app_state::AppState, config::AppConfig, models::RunStatus};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,7 +22,7 @@ async fn main() -> Result<()> {
 
   let db = db::init_pool(&config.database_url).await?;
   let initial_runs = db::load_all_runs(&db).await?;
-  info!(count = initial_runs.len(), "loaded runs from database");
+  tracing::info!(count = initial_runs.len(), "loaded runs from database");
 
   let state = AppState::new(
     config.anthropic_api_key.clone(),
@@ -37,7 +36,7 @@ async fn main() -> Result<()> {
   let app = build_router(state);
 
   let listener = TcpListener::bind(config.bind_addr).await?;
-  info!(address = %config.bind_addr, "backend server listening");
+  tracing::info!(address = %config.bind_addr, "backend server listening");
 
   axum::serve(listener, app).await?;
 
@@ -61,7 +60,7 @@ fn build_router(state: AppState) -> Router {
 }
 
 fn log_model_config(config: &AppConfig) {
-  info!(
+  tracing::info!(
       anthropic = "set",
       model = %config.anthropic_model,
       "anthropic configuration loaded"
@@ -95,6 +94,6 @@ async fn restore_active_run(state: &AppState) {
     streams.insert(run.id, sender);
   }
 
-  info!(run_id = %run.id, "restoring active run from database state");
+  tracing::info!(run_id = %run.id, "restoring active run from database state");
   runtime::spawn_run(state.clone(), run.id, run.kind);
 }

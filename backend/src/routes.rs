@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::{
   app_state::AppState,
   db,
+  error::ReportError,
   models::{
     CreateRunRequest, CreateRunResponse, RunKind, RunRecord,
     RunSettingsResponse, RunStatus, SettingsKind, UpsertRunSettingsRequest,
@@ -86,7 +87,7 @@ async fn create_run(
   let saved_settings =
     db::load_settings_by_kind(&state.db, to_settings_kind(&kind))
       .await
-      .ok()
+      .report()
       .flatten();
 
   let run_id = Uuid::new_v4();
