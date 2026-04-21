@@ -1,10 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
-
+use crate::models::{RunEvent, RunRecord};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
-
-use crate::models::{RunEvent, RunRecord};
 
 #[derive(Clone)]
 pub struct AppState {

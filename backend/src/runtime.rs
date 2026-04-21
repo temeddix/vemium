@@ -1,19 +1,14 @@
+use crate::app_state::AppState;
+use crate::db;
+use crate::error::ReportError;
+use crate::models::{RunEvent, RunKind, RunStatus};
 use anyhow::{Context, anyhow};
 use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::{
-  sync::broadcast,
-  time::{Duration, sleep},
-};
+use tokio::sync::broadcast;
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
-
-use crate::{
-  app_state::AppState,
-  db,
-  error::ReportError,
-  models::{RunEvent, RunKind, RunStatus},
-};
 
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";

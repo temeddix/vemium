@@ -1,14 +1,13 @@
-use anyhow::{Context, Result, anyhow};
-use sqlx::{
-  Row, SqlitePool,
-  sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
-};
-use uuid::Uuid;
-
 use crate::models::{
   RunEvent, RunKind, RunLaunchSettings, RunRecord, RunStatus, SettingsKind,
   UpsertRunSettingsRequest,
 };
+use anyhow::{Context, Result, anyhow};
+use sqlx::sqlite::{
+  SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions,
+};
+use sqlx::{Row, SqlitePool};
+use uuid::Uuid;
 
 pub async fn init_pool(database_url: &str) -> Result<SqlitePool> {
   let options = database_url

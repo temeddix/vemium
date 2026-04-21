@@ -1,6 +1,6 @@
-use std::{env, net::SocketAddr};
-
 use anyhow::{Result, anyhow};
+use std::env;
+use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
