@@ -8,10 +8,11 @@ mod runtime;
 use anyhow::Result;
 use axum::Router;
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use crate::{app_state::AppState, config::AppConfig};
+use crate::{app_state::AppState, config::AppConfig, models::RunStatus};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -30,6 +31,9 @@ async fn main() -> Result<()> {
     db,
     initial_runs,
   );
+
+  restore_active_run(&state).await;
+
   let app = build_router(state);
 
   let listener = TcpListener::bind(config.bind_addr).await?;
@@ -62,4 +66,35 @@ fn log_model_config(config: &AppConfig) {
       model = %config.anthropic_model,
       "anthropic configuration loaded"
   );
+}
+
+async fn restore_active_run(state: &AppState) {
+  let run_to_restore = {
+    let runs = state.runs.read().await;
+    runs
+      .values()
+      .filter(|run| {
+        matches!(run.status, RunStatus::Queued | RunStatus::Running)
+      })
+      .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+      .cloned()
+  };
+
+  let Some(run) = run_to_restore else {
+    return;
+  };
+
+  {
+    let mut active_run_id = state.active_run_id.write().await;
+    *active_run_id = Some(run.id);
+  }
+
+  {
+    let (sender, _receiver) = broadcast::channel(256);
+    let mut streams = state.run_streams.write().await;
+    streams.insert(run.id, sender);
+  }
+
+  info!(run_id = %run.id, "restoring active run from database state");
+  runtime::spawn_run(state.clone(), run.id, run.kind);
 }

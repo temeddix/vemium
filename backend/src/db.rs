@@ -5,7 +5,10 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use crate::models::{RunEvent, RunKind, RunRecord, RunStatus};
+use crate::models::{
+  RunEvent, RunKind, RunLaunchSettings, RunRecord, RunStatus, SettingsKind,
+  UpsertRunSettingsRequest,
+};
 
 pub async fn init_pool(database_url: &str) -> Result<SqlitePool> {
   let options = database_url
@@ -34,11 +37,12 @@ pub async fn insert_run(pool: &SqlitePool, run: &RunRecord) -> Result<()> {
   let status = run_status_to_str(&run.status);
   let interval = run.interval_seconds as i64;
   let rounds = run.rounds as i64;
+  let run_forever = bool_to_sqlite(run.run_forever);
 
   sqlx::query(
         "INSERT INTO runs \
-         (id, kind, status, topic, goal, instruction, background, interval_seconds, rounds, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, kind, status, topic, goal, instruction, background, interval_seconds, rounds, run_forever, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(kind)
@@ -49,6 +53,7 @@ pub async fn insert_run(pool: &SqlitePool, run: &RunRecord) -> Result<()> {
     .bind(&run.background)
     .bind(interval)
     .bind(rounds)
+    .bind(run_forever)
     .bind(&run.created_at)
     .bind(&run.updated_at)
     .execute(pool)
@@ -102,8 +107,8 @@ pub async fn insert_event(pool: &SqlitePool, event: &RunEvent) -> Result<()> {
 pub async fn load_all_runs(pool: &SqlitePool) -> Result<Vec<RunRecord>> {
   let rows = sqlx::query(
     "SELECT id, kind, status, topic, goal, instruction, background, \
-         interval_seconds, rounds, created_at, updated_at \
-         FROM runs ORDER BY created_at ASC",
+         interval_seconds, rounds, run_forever, created_at, updated_at \
+         FROM runs ORDER BY created_at DESC",
   )
   .fetch_all(pool)
   .await
@@ -124,6 +129,9 @@ pub async fn load_all_runs(pool: &SqlitePool) -> Result<Vec<RunRecord>> {
     let rounds: i64 = row
       .try_get("rounds")
       .context("runs.rounds: invalid value")?;
+    let run_forever: i64 = row
+      .try_get("run_forever")
+      .context("runs.run_forever: invalid value")?;
 
     runs.push(RunRecord {
       id,
@@ -139,6 +147,7 @@ pub async fn load_all_runs(pool: &SqlitePool) -> Result<Vec<RunRecord>> {
         .context("runs.background: invalid value")?,
       interval_seconds: interval_seconds as u64,
       rounds: rounds as u32,
+      run_forever: sqlite_to_bool(run_forever),
       created_at: row
         .try_get("created_at")
         .context("runs.created_at: invalid value")?,
@@ -149,6 +158,203 @@ pub async fn load_all_runs(pool: &SqlitePool) -> Result<Vec<RunRecord>> {
   }
 
   Ok(runs)
+}
+
+pub async fn load_run_events(
+  pool: &SqlitePool,
+  run_id: Uuid,
+) -> Result<Vec<RunEvent>> {
+  let run_id_str = run_id.to_string();
+  let rows = sqlx::query(
+    "SELECT run_id, sequence, event_type, agent, content, timestamp \
+     FROM run_events WHERE run_id = ? ORDER BY sequence ASC",
+  )
+  .bind(&run_id_str)
+  .fetch_all(pool)
+  .await
+  .context("failed to load run events from database")?;
+
+  let mut events = Vec::with_capacity(rows.len());
+  for row in rows {
+    let run_id_raw: String = row
+      .try_get("run_id")
+      .context("run_events.run_id: invalid value")?;
+    let parsed_run_id: Uuid = run_id_raw
+      .parse()
+      .context("run_events.run_id: invalid UUID")?;
+    let sequence: i64 = row
+      .try_get("sequence")
+      .context("run_events.sequence: invalid value")?;
+
+    events.push(RunEvent {
+      run_id: parsed_run_id,
+      sequence: sequence as u64,
+      event_type: row
+        .try_get("event_type")
+        .context("run_events.event_type: invalid value")?,
+      agent: row
+        .try_get("agent")
+        .context("run_events.agent: invalid value")?,
+      content: row
+        .try_get("content")
+        .context("run_events.content: invalid value")?,
+      timestamp: row
+        .try_get("timestamp")
+        .context("run_events.timestamp: invalid value")?,
+    });
+  }
+
+  Ok(events)
+}
+
+pub async fn load_all_settings(
+  pool: &SqlitePool,
+) -> Result<Vec<RunLaunchSettings>> {
+  let rows = sqlx::query(
+    "SELECT kind, topic, goal, instruction, background, interval_seconds, \
+     duration_minutes, run_forever, updated_at FROM run_settings ORDER BY kind ASC",
+  )
+  .fetch_all(pool)
+  .await
+  .context("failed to load run settings")?;
+
+  let mut settings = Vec::with_capacity(rows.len());
+  for row in rows {
+    let kind_raw: String = row
+      .try_get("kind")
+      .context("run_settings.kind: invalid value")?;
+    let interval_seconds: i64 = row
+      .try_get("interval_seconds")
+      .context("run_settings.interval_seconds: invalid value")?;
+    let duration_minutes: i64 = row
+      .try_get("duration_minutes")
+      .context("run_settings.duration_minutes: invalid value")?;
+    let run_forever: i64 = row
+      .try_get("run_forever")
+      .context("run_settings.run_forever: invalid value")?;
+
+    settings.push(RunLaunchSettings {
+      kind: parse_settings_kind(&kind_raw)?,
+      topic: row
+        .try_get("topic")
+        .context("run_settings.topic: invalid value")?,
+      goal: row
+        .try_get("goal")
+        .context("run_settings.goal: invalid value")?,
+      instruction: row
+        .try_get("instruction")
+        .context("run_settings.instruction: invalid value")?,
+      background: row
+        .try_get("background")
+        .context("run_settings.background: invalid value")?,
+      interval_seconds: interval_seconds as u64,
+      duration_minutes: duration_minutes as u32,
+      run_forever: sqlite_to_bool(run_forever),
+      updated_at: row
+        .try_get("updated_at")
+        .context("run_settings.updated_at: invalid value")?,
+    });
+  }
+
+  Ok(settings)
+}
+
+pub async fn upsert_settings(
+  pool: &SqlitePool,
+  kind: SettingsKind,
+  request: &UpsertRunSettingsRequest,
+  updated_at: &str,
+) -> Result<RunLaunchSettings> {
+  let kind_str = settings_kind_to_str(&kind);
+  let interval_seconds = request.interval_seconds as i64;
+  let duration_minutes = request.duration_minutes as i64;
+  let run_forever = bool_to_sqlite(request.run_forever);
+
+  sqlx::query(
+    "INSERT INTO run_settings \
+     (kind, topic, goal, instruction, background, interval_seconds, duration_minutes, run_forever, updated_at) \
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+     ON CONFLICT(kind) DO UPDATE SET \
+     topic=excluded.topic, goal=excluded.goal, instruction=excluded.instruction, \
+     background=excluded.background, interval_seconds=excluded.interval_seconds, \
+     duration_minutes=excluded.duration_minutes, run_forever=excluded.run_forever, \
+     updated_at=excluded.updated_at",
+  )
+  .bind(kind_str)
+  .bind(&request.topic)
+  .bind(&request.goal)
+  .bind(&request.instruction)
+  .bind(&request.background)
+  .bind(interval_seconds)
+  .bind(duration_minutes)
+  .bind(run_forever)
+  .bind(updated_at)
+  .execute(pool)
+  .await
+  .context("failed to upsert run settings")?;
+
+  Ok(RunLaunchSettings {
+    kind,
+    topic: request.topic.clone(),
+    goal: request.goal.clone(),
+    instruction: request.instruction.clone(),
+    background: request.background.clone(),
+    interval_seconds: request.interval_seconds,
+    duration_minutes: request.duration_minutes,
+    run_forever: request.run_forever,
+    updated_at: updated_at.to_string(),
+  })
+}
+
+pub async fn load_settings_by_kind(
+  pool: &SqlitePool,
+  kind: SettingsKind,
+) -> Result<Option<RunLaunchSettings>> {
+  let kind_str = settings_kind_to_str(&kind);
+  let row = sqlx::query(
+    "SELECT kind, topic, goal, instruction, background, interval_seconds, \
+     duration_minutes, run_forever, updated_at FROM run_settings WHERE kind = ?",
+  )
+  .bind(kind_str)
+  .fetch_optional(pool)
+  .await
+  .context("failed to load run settings by kind")?;
+
+  let Some(row) = row else {
+    return Ok(None);
+  };
+
+  let interval_seconds: i64 = row
+    .try_get("interval_seconds")
+    .context("run_settings.interval_seconds: invalid value")?;
+  let duration_minutes: i64 = row
+    .try_get("duration_minutes")
+    .context("run_settings.duration_minutes: invalid value")?;
+  let run_forever: i64 = row
+    .try_get("run_forever")
+    .context("run_settings.run_forever: invalid value")?;
+
+  Ok(Some(RunLaunchSettings {
+    kind,
+    topic: row
+      .try_get("topic")
+      .context("run_settings.topic: invalid value")?,
+    goal: row
+      .try_get("goal")
+      .context("run_settings.goal: invalid value")?,
+    instruction: row
+      .try_get("instruction")
+      .context("run_settings.instruction: invalid value")?,
+    background: row
+      .try_get("background")
+      .context("run_settings.background: invalid value")?,
+    interval_seconds: interval_seconds as u64,
+    duration_minutes: duration_minutes as u32,
+    run_forever: sqlite_to_bool(run_forever),
+    updated_at: row
+      .try_get("updated_at")
+      .context("run_settings.updated_at: invalid value")?,
+  }))
 }
 
 fn run_kind_to_str(kind: &RunKind) -> &'static str {
@@ -182,5 +388,28 @@ fn parse_run_status(s: &str) -> Result<RunStatus> {
     "completed" => Ok(RunStatus::Completed),
     "failed" => Ok(RunStatus::Failed),
     _ => Err(anyhow!("unknown run status: {s}")),
+  }
+}
+
+fn bool_to_sqlite(value: bool) -> i64 {
+  if value { 1 } else { 0 }
+}
+
+fn sqlite_to_bool(value: i64) -> bool {
+  value != 0
+}
+
+fn settings_kind_to_str(kind: &SettingsKind) -> &'static str {
+  match kind {
+    SettingsKind::Discussion => "discussion",
+    SettingsKind::WeeklyReport => "weekly_report",
+  }
+}
+
+fn parse_settings_kind(value: &str) -> Result<SettingsKind> {
+  match value {
+    "discussion" => Ok(SettingsKind::Discussion),
+    "weekly_report" => Ok(SettingsKind::WeeklyReport),
+    _ => Err(anyhow!("unknown settings kind: {value}")),
   }
 }

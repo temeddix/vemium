@@ -1,9 +1,16 @@
 import { BACKEND_BASE_URL } from "@/app/config";
 import type {
+  ActiveRunResponse,
   CreateRunResponse,
   DashboardState,
   RunEvent,
   RunKind,
+  RunSettings,
+  RunSettingsResponse,
+  RunsResponse,
+  SaveRunSettingsRequest,
+  SaveRunSettingsResponse,
+  StartRunRequest,
 } from "@/app/types";
 import { RunClient } from "./run-client.ts";
 
@@ -11,6 +18,7 @@ type Listener = () => void;
 
 const INITIAL_STATE: DashboardState = {
   activeRun: null,
+  runs: [],
   events: [],
   wsConnected: false,
   reconnectAttempt: 0,
@@ -30,11 +38,19 @@ export class DashboardStore {
     },
     onEvent: (event: RunEvent): void => {
       this.#setState({ events: [...this.#state.events, event] });
+      if (event.eventType === "run_completed") {
+        void this.loadRuns();
+      }
     },
     onError: (message: string): void => {
       this.#setState({ errorMessage: message });
     },
   });
+
+  constructor() {
+    void this.loadRuns();
+    void this.#resumeActiveRun();
+  }
 
   subscribe(listener: Listener): () => void {
     this.#listeners.add(listener);
@@ -47,14 +63,19 @@ export class DashboardStore {
     return this.#state;
   }
 
-  async startRun(kind: RunKind): Promise<void> {
+  async startRun(kind: RunKind, request?: StartRunRequest): Promise<void> {
     this.#setState({ isStartingRun: true, errorMessage: null, events: [] });
 
     const endpoint = kind === "discussion" ? "discussion" : "weekly-report";
 
     try {
+      const requestPayload = this.#buildRequestPayload(request);
       const response = await fetch(`${BACKEND_BASE_URL}/v1/runs/${endpoint}`, {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestPayload),
       });
 
       if (!response.ok) {
@@ -65,13 +86,14 @@ export class DashboardStore {
         return;
       }
 
-      const payload = (await response.json()) as CreateRunResponse;
+      const responsePayload = (await response.json()) as CreateRunResponse;
       this.#setState({
-        activeRun: payload.run,
+        activeRun: responsePayload.run,
         isStartingRun: false,
         wsConnected: false,
       });
-      this.#client.connect(payload.run.id);
+      this.#client.connect(responsePayload.run.id);
+      void this.loadRuns();
     } catch {
       this.#setState({
         isStartingRun: false,
@@ -80,9 +102,144 @@ export class DashboardStore {
     }
   }
 
+  async loadRuns(): Promise<void> {
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/v1/runs`);
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = (await response.json()) as RunsResponse;
+      this.#setState({ runs: payload.runs });
+    } catch {
+      this.#setState({ errorMessage: "Failed to load run history." });
+    }
+  }
+
+  async loadSettings(): Promise<RunSettings[]> {
+    const response = await fetch(`${BACKEND_BASE_URL}/v1/settings`);
+    if (!response.ok) {
+      throw new Error("Failed to load settings");
+    }
+
+    const payload = (await response.json()) as RunSettingsResponse;
+    return payload.settings;
+  }
+
+  async saveSettings(
+    kind: RunKind,
+    request: SaveRunSettingsRequest,
+  ): Promise<RunSettings> {
+    const endpoint = kind === "discussion" ? "discussion" : "weekly-report";
+    const response = await fetch(
+      `${BACKEND_BASE_URL}/v1/settings/${endpoint}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(request),
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to save settings");
+    }
+
+    const payload = (await response.json()) as SaveRunSettingsResponse;
+    return payload.setting;
+  }
+
+  selectRun(runId: string): void {
+    const selectedRun = this.#state.runs.find((run) => run.id === runId);
+    if (selectedRun === undefined) {
+      this.#setState({ errorMessage: "Selected run was not found." });
+      return;
+    }
+
+    this.#setState({
+      activeRun: selectedRun,
+      events: [],
+      wsConnected: false,
+      reconnectAttempt: 0,
+      errorMessage: null,
+    });
+    this.#client.connect(selectedRun.id);
+  }
+
   dispose(): void {
     this.#client.disconnect();
     this.#listeners.clear();
+  }
+
+  async #resumeActiveRun(): Promise<void> {
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/v1/runs/active`);
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = (await response.json()) as ActiveRunResponse;
+      if (payload.run === null) {
+        return;
+      }
+
+      this.#setState({
+        activeRun: payload.run,
+        events: [],
+        wsConnected: false,
+      });
+      this.#client.connect(payload.run.id);
+      void this.loadRuns();
+    } catch {
+      this.#setState({
+        errorMessage: "Could not restore active run session.",
+      });
+    }
+  }
+
+  #buildRequestPayload(request?: StartRunRequest): StartRunRequest {
+    if (request === undefined) {
+      return {};
+    }
+
+    const nextRequest: StartRunRequest = {};
+
+    if (request.topic !== undefined && request.topic.trim().length > 0) {
+      nextRequest.topic = request.topic.trim();
+    }
+    if (request.goal !== undefined && request.goal.trim().length > 0) {
+      nextRequest.goal = request.goal.trim();
+    }
+    if (
+      request.instruction !== undefined &&
+      request.instruction.trim().length > 0
+    ) {
+      nextRequest.instruction = request.instruction.trim();
+    }
+    if (
+      request.background !== undefined &&
+      request.background.trim().length > 0
+    ) {
+      nextRequest.background = request.background.trim();
+    }
+    if (
+      request.intervalSeconds !== undefined &&
+      Number.isFinite(request.intervalSeconds)
+    ) {
+      nextRequest.intervalSeconds = Math.max(
+        0,
+        Math.floor(request.intervalSeconds),
+      );
+    }
+    if (request.rounds !== undefined && Number.isFinite(request.rounds)) {
+      nextRequest.rounds = Math.max(1, Math.floor(request.rounds));
+    }
+    if (request.runForever !== undefined) {
+      nextRequest.runForever = request.runForever;
+    }
+
+    return nextRequest;
   }
 
   #setState(nextState: Partial<DashboardState>): void {

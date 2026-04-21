@@ -10,6 +10,13 @@ pub enum RunKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SettingsKind {
+  Discussion,
+  WeeklyReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
   Queued,
   Running,
@@ -29,6 +36,7 @@ pub struct RunRecord {
   pub background: Option<String>,
   pub interval_seconds: u64,
   pub rounds: u32,
+  pub run_forever: bool,
   pub created_at: String,
   pub updated_at: String,
 }
@@ -42,6 +50,33 @@ pub struct CreateRunRequest {
   pub background: Option<String>,
   pub interval_seconds: Option<u64>,
   pub rounds: Option<u32>,
+  pub run_forever: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunLaunchSettings {
+  pub kind: SettingsKind,
+  pub topic: String,
+  pub goal: String,
+  pub instruction: String,
+  pub background: String,
+  pub interval_seconds: u64,
+  pub duration_minutes: u32,
+  pub run_forever: bool,
+  pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertRunSettingsRequest {
+  pub topic: String,
+  pub goal: String,
+  pub instruction: String,
+  pub background: String,
+  pub interval_seconds: u64,
+  pub duration_minutes: u32,
+  pub run_forever: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,4 +93,9 @@ pub struct RunEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRunResponse {
   pub run: RunRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSettingsResponse {
+  pub settings: Vec<RunLaunchSettings>,
 }

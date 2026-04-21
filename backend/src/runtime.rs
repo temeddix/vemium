@@ -39,6 +39,7 @@ struct RunContext {
   background: Option<String>,
   interval_seconds: u64,
   rounds: u32,
+  run_forever: bool,
 }
 
 const PERSONAS: [AgentPersona; 5] = [
@@ -126,13 +127,30 @@ async fn run_orchestration(
 
   let mut sequence = 0_u64;
   let mut discussion_log: Vec<(String, String)> = Vec::new();
+  let mut round_index: u64 = 0;
 
-  for round_index in 0..run_context.rounds {
-    let round_label = format!(
-      "Debate round {}/{} started: proposal phase.",
-      round_index + 1,
-      run_context.rounds
+  if run_context.run_forever {
+    sequence = emit(
+      db,
+      &sender,
+      run_id,
+      sequence,
+      "run_mode",
+      None,
+      "Run configured to continue indefinitely.",
     );
+  }
+
+  loop {
+    round_index = round_index.saturating_add(1);
+    let round_label = if run_context.run_forever {
+      format!("Debate round {round_index} started: proposal phase.")
+    } else {
+      format!(
+        "Debate round {}/{} started: proposal phase.",
+        round_index, run_context.rounds
+      )
+    };
 
     sequence = emit(
       db,
@@ -204,8 +222,13 @@ async fn run_orchestration(
       discussion_log.push((persona.name.to_string(), turn));
     }
 
-    if round_index + 1 < run_context.rounds && run_context.interval_seconds > 0
-    {
+    let reached_end =
+      !run_context.run_forever && round_index >= u64::from(run_context.rounds);
+    if reached_end {
+      break;
+    }
+
+    if run_context.interval_seconds > 0 {
       let wait_message = format!(
         "Waiting {} seconds before next round.",
         run_context.interval_seconds
@@ -223,6 +246,10 @@ async fn run_orchestration(
 
       sleep(Duration::from_secs(run_context.interval_seconds)).await;
     }
+  }
+
+  if run_context.run_forever {
+    return Ok(());
   }
 
   let summary = request_agent_turn(
@@ -413,6 +440,7 @@ async fn load_run_context(
       background: run.background.clone(),
       interval_seconds: run.interval_seconds,
       rounds: run.rounds,
+      run_forever: run.run_forever,
     };
   }
 
@@ -423,6 +451,7 @@ async fn load_run_context(
     background: None,
     interval_seconds: 0,
     rounds: 1,
+    run_forever: false,
   }
 }
 
@@ -450,5 +479,12 @@ async fn update_status(state: &AppState, run_id: Uuid, status: RunStatus) {
     db::update_run_status(&state.db, run_id, &status, &updated_at).await
   {
     warn!(run_id = %run_id, %error, "failed to persist status update to database");
+  }
+
+  if matches!(status, RunStatus::Completed | RunStatus::Failed) {
+    let mut active_run_id = state.active_run_id.write().await;
+    if active_run_id.as_ref() == Some(&run_id) {
+      *active_run_id = None;
+    }
   }
 }
