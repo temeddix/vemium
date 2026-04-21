@@ -10,6 +10,7 @@ import { formatTimestamp } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
 
 interface RunSettingsForm {
   topic: string;
@@ -30,6 +31,11 @@ const EMPTY_SETTINGS: RunSettingsForm = {
   turns: 1,
   autorun: false,
 };
+
+function mdSlot(content: string) {
+  const escaped = content.replace(/<\/script/gi, "<\\/script");
+  return unsafeHTML(`<script type="text/markdown">${escaped}</script>`);
+}
 
 function readInputValue(target: EventTarget | null): string | null {
   if (!(target instanceof HTMLElement)) {
@@ -284,10 +290,7 @@ export class DashboardView extends LitElement {
     }
 
     .event-text {
-      margin: 0;
       font-size: 0.875rem;
-      line-height: 1.5;
-      white-space: pre-wrap;
     }
 
     .no-events {
@@ -311,10 +314,7 @@ export class DashboardView extends LitElement {
     }
 
     .agent-card-last {
-      margin: 0;
       font-size: 0.825rem;
-      line-height: 1.45;
-      white-space: pre-wrap;
     }
 
     /* -- Settings tab -- */
@@ -538,7 +538,9 @@ export class DashboardView extends LitElement {
                     <span>${event.agent ?? "None"}</span>
                     <span>${formatTimestamp(event.timestamp)}</span>
                   </div>
-                  <p class="event-text">${event.content}</p>
+                  <wa-markdown class="event-text">${mdSlot(
+                    event.content,
+                  )}</wa-markdown>
                 </wa-card>
               </li>
             `,
@@ -568,9 +570,9 @@ export class DashboardView extends LitElement {
         html`
           <wa-card>
             <h3 class="agent-card-name">${name}</h3>
-            <p class="agent-card-last">
-              ${latestByAgent.get(name) ?? "No update yet."}
-            </p>
+            <wa-markdown class="agent-card-last">${mdSlot(
+              latestByAgent.get(name) ?? "No update yet.",
+            )}</wa-markdown>
           </wa-card>
         `,
     );
@@ -695,8 +697,8 @@ export class DashboardView extends LitElement {
   async #loadSettingsFromBackend(): Promise<void> {
     try {
       const all = await this.store.loadSettings();
-      const s = all.find((x) => x.kind === "discussion");
-      if (s) {
+      const s = all[0];
+      if (s !== undefined) {
         this.settings = {
           topic: s.topic,
           goal: s.goal,

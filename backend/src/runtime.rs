@@ -347,40 +347,54 @@ async fn request_agent_turn(
     }],
   };
 
-  let response = client
-    .post(ANTHROPIC_MESSAGES_URL)
-    .header("x-api-key", state.anthropic_api_key.as_ref())
-    .header("anthropic-version", ANTHROPIC_VERSION)
-    .header("anthropic-beta", ANTHROPIC_BETA_WEB_SEARCH)
-    .json(&request_body)
-    .send()
-    .await
-    .context("failed to send Anthropic request")?;
-
-  if !response.status().is_success() {
-    let status = response.status();
-    let body = response
-      .text()
+  let mut attempt = 0u32;
+  loop {
+    let response = client
+      .post(ANTHROPIC_MESSAGES_URL)
+      .header("x-api-key", state.anthropic_api_key.as_ref())
+      .header("anthropic-version", ANTHROPIC_VERSION)
+      .header("anthropic-beta", ANTHROPIC_BETA_WEB_SEARCH)
+      .json(&request_body)
+      .send()
       .await
-      .unwrap_or_else(|_| "<unreadable response body>".to_string());
-    return Err(anyhow!("Anthropic API error {status}: {body}"));
+      .context("failed to send Anthropic request")?;
+
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+      attempt += 1;
+      if attempt > 5 {
+        return Err(anyhow!("Anthropic rate limit exceeded after {attempt} retries"));
+      }
+      let wait = 30 * attempt;
+      tracing::warn!(attempt, wait_secs = wait, "rate limited, retrying");
+      sleep(Duration::from_secs(u64::from(wait))).await;
+      continue;
+    }
+
+    if !response.status().is_success() {
+      let status = response.status();
+      let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "<unreadable response body>".to_string());
+      return Err(anyhow!("Anthropic API error {status}: {body}"));
+    }
+
+    let payload: AnthropicMessagesResponse = response
+      .json()
+      .await
+      .context("failed to decode Anthropic response")?;
+
+    let text = payload
+      .content
+      .into_iter()
+      .find_map(|block| match block {
+        AnthropicOutputBlock::Text { text } => Some(text),
+        AnthropicOutputBlock::Other => None,
+      })
+      .context("Anthropic response contained no text block")?;
+
+    return Ok(text.trim().to_string());
   }
-
-  let payload: AnthropicMessagesResponse = response
-    .json()
-    .await
-    .context("failed to decode Anthropic response")?;
-
-  let text = payload
-    .content
-    .into_iter()
-    .find_map(|block| match block {
-      AnthropicOutputBlock::Text { text } => Some(text),
-      AnthropicOutputBlock::Other => None,
-    })
-    .context("Anthropic response contained no text block")?;
-
-  Ok(text.trim().to_string())
 }
 
 async fn load_run_context(state: &AppState, run_id: Uuid) -> RunContext {

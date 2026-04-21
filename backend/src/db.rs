@@ -1,6 +1,5 @@
 use crate::models::{
-  RunEvent, RunKind, RunLaunchSettings, RunRecord, RunStatus, SettingsKind,
-  UpsertRunSettingsRequest,
+  RunEvent, RunLaunchSettings, RunRecord, RunStatus, UpsertRunSettingsRequest,
 };
 use anyhow::{Context, Result, anyhow};
 use sqlx::sqlite::{
@@ -32,7 +31,6 @@ pub async fn init_pool(database_url: &str) -> Result<SqlitePool> {
 
 pub async fn insert_run(pool: &SqlitePool, run: &RunRecord) -> Result<()> {
   let id = run.id.to_string();
-  let kind = run_kind_to_str(&run.kind);
   let status = run_status_to_str(&run.status);
   let interval = run.interval_seconds as i64;
   let rounds = run.rounds as i64;
@@ -44,7 +42,7 @@ pub async fn insert_run(pool: &SqlitePool, run: &RunRecord) -> Result<()> {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
-    .bind(kind)
+    .bind("discussion")
     .bind(status)
     .bind(&run.topic)
     .bind(&run.goal)
@@ -117,8 +115,6 @@ pub async fn load_all_runs(pool: &SqlitePool) -> Result<Vec<RunRecord>> {
   for row in rows {
     let id_str: String = row.try_get("id").context("runs.id: invalid value")?;
     let id: Uuid = id_str.parse().context("runs.id: invalid UUID")?;
-    let kind_str: String =
-      row.try_get("kind").context("runs.kind: invalid value")?;
     let status_str: String = row
       .try_get("status")
       .context("runs.status: invalid value")?;
@@ -134,7 +130,6 @@ pub async fn load_all_runs(pool: &SqlitePool) -> Result<Vec<RunRecord>> {
 
     runs.push(RunRecord {
       id,
-      kind: parse_run_kind(&kind_str)?,
       status: parse_run_status(&status_str)?,
       topic: row.try_get("topic").context("runs.topic: invalid value")?,
       goal: row.try_get("goal").context("runs.goal: invalid value")?,
@@ -219,9 +214,6 @@ pub async fn load_all_settings(
 
   let mut settings = Vec::with_capacity(rows.len());
   for row in rows {
-    let kind_raw: String = row
-      .try_get("kind")
-      .context("run_settings.kind: invalid value")?;
     let interval_minutes: i64 = row
       .try_get("interval_minutes")
       .context("run_settings.interval_minutes: invalid value")?;
@@ -233,7 +225,6 @@ pub async fn load_all_settings(
       .context("run_settings.autorun: invalid value")?;
 
     settings.push(RunLaunchSettings {
-      kind: parse_settings_kind(&kind_raw)?,
       topic: row
         .try_get("topic")
         .context("run_settings.topic: invalid value")?,
@@ -260,11 +251,9 @@ pub async fn load_all_settings(
 
 pub async fn upsert_settings(
   pool: &SqlitePool,
-  kind: SettingsKind,
   request: &UpsertRunSettingsRequest,
   updated_at: &str,
 ) -> Result<RunLaunchSettings> {
-  let kind_str = settings_kind_to_str(&kind);
   let interval_minutes = request.interval_minutes as i64;
   let turns = request.turns as i64;
   let autorun = bool_to_sqlite(request.autorun);
@@ -279,7 +268,7 @@ pub async fn upsert_settings(
      turns=excluded.turns, autorun=excluded.autorun, \
      updated_at=excluded.updated_at",
   )
-  .bind(kind_str)
+  .bind("discussion")
   .bind(&request.topic)
   .bind(&request.goal)
   .bind(&request.instruction)
@@ -293,7 +282,6 @@ pub async fn upsert_settings(
   .context("failed to upsert run settings")?;
 
   Ok(RunLaunchSettings {
-    kind,
     topic: request.topic.clone(),
     goal: request.goal.clone(),
     instruction: request.instruction.clone(),
@@ -305,16 +293,13 @@ pub async fn upsert_settings(
   })
 }
 
-pub async fn load_settings_by_kind(
+pub async fn load_settings(
   pool: &SqlitePool,
-  kind: SettingsKind,
 ) -> Result<Option<RunLaunchSettings>> {
-  let kind_str = settings_kind_to_str(&kind);
   let row = sqlx::query(
-    "SELECT kind, topic, goal, instruction, background, interval_minutes, \
-     turns, autorun, updated_at FROM run_settings WHERE kind = ?",
+    "SELECT topic, goal, instruction, background, interval_minutes, \
+     turns, autorun, updated_at FROM run_settings WHERE kind = 'discussion'",
   )
-  .bind(kind_str)
   .fetch_optional(pool)
   .await
   .context("failed to load run settings by kind")?;
@@ -334,7 +319,6 @@ pub async fn load_settings_by_kind(
     .context("run_settings.autorun: invalid value")?;
 
   Ok(Some(RunLaunchSettings {
-    kind,
     topic: row
       .try_get("topic")
       .context("run_settings.topic: invalid value")?,
@@ -356,23 +340,12 @@ pub async fn load_settings_by_kind(
   }))
 }
 
-fn run_kind_to_str(_kind: &RunKind) -> &'static str {
-  "discussion"
-}
-
 fn run_status_to_str(status: &RunStatus) -> &'static str {
   match status {
     RunStatus::Queued => "queued",
     RunStatus::Running => "running",
     RunStatus::Completed => "completed",
     RunStatus::Failed => "failed",
-  }
-}
-
-fn parse_run_kind(s: &str) -> Result<RunKind> {
-  match s {
-    "discussion" | "weekly_report" => Ok(RunKind::Discussion),
-    _ => Err(anyhow!("unknown run kind: {s}")),
   }
 }
 
@@ -394,13 +367,3 @@ fn sqlite_to_bool(value: i64) -> bool {
   value != 0
 }
 
-fn settings_kind_to_str(_kind: &SettingsKind) -> &'static str {
-  "discussion"
-}
-
-fn parse_settings_kind(value: &str) -> Result<SettingsKind> {
-  match value {
-    "discussion" => Ok(SettingsKind::Discussion),
-    _ => Err(anyhow!("unknown settings kind: {value}")),
-  }
-}

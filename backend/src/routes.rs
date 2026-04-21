@@ -1,8 +1,8 @@
 use crate::app_state::AppState;
 use crate::error::ReportError;
 use crate::models::{
-  CreateRunRequest, CreateRunResponse, RunKind, RunRecord, RunSettingsResponse,
-  RunStatus, SettingsKind, UpsertRunSettingsRequest,
+  CreateRunRequest, CreateRunResponse, RunRecord, RunSettingsResponse,
+  RunStatus, UpsertRunSettingsRequest,
 };
 use crate::{db, runtime};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -67,10 +67,7 @@ async fn create_run(
   }
 
   let saved_settings =
-    db::load_settings_by_kind(&state.db, SettingsKind::Discussion)
-      .await
-      .report()
-      .flatten();
+    db::load_settings(&state.db).await.report().flatten();
 
   let run_id = Uuid::new_v4();
   let now = Utc::now().to_rfc3339();
@@ -125,7 +122,6 @@ async fn create_run(
 
   let record = RunRecord {
     id: run_id,
-    kind: RunKind::Discussion,
     status: RunStatus::Queued,
     topic,
     goal,
@@ -222,7 +218,7 @@ async fn upsert_discussion_settings(
   Json(payload): Json<UpsertRunSettingsRequest>,
 ) -> impl IntoResponse {
   let now = Utc::now().to_rfc3339();
-  match db::upsert_settings(&state.db, SettingsKind::Discussion, &payload, &now)
+  match db::upsert_settings(&state.db, &payload, &now)
     .await
   {
     Ok(setting) => {

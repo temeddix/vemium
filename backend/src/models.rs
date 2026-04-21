@@ -3,18 +3,6 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RunKind {
-  Discussion,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SettingsKind {
-  Discussion,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
   Queued,
   Running,
@@ -26,7 +14,6 @@ pub enum RunStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RunRecord {
   pub id: Uuid,
-  pub kind: RunKind,
   pub status: RunStatus,
   pub topic: String,
   pub goal: String,
@@ -54,7 +41,6 @@ pub struct CreateRunRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLaunchSettings {
-  pub kind: SettingsKind,
   pub topic: String,
   pub goal: String,
   pub instruction: String,

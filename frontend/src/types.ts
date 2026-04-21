@@ -1,10 +1,7 @@
-export type RunKind = "discussion";
-
 export type RunStatus = "queued" | "running" | "completed" | "failed";
 
 export interface RunRecord {
   id: string;
-  kind: RunKind;
   status: RunStatus;
   topic: string;
   goal: string;
@@ -40,7 +37,6 @@ export interface StartRunRequest {
 }
 
 export interface RunSettings {
-  kind: RunKind;
   topic: string;
   goal: string;
   instruction: string;
