@@ -182,6 +182,7 @@ async fn run_orchestration(
 
       sequence = emit(db, &sender, run_id, sequence, "agent_response_created", Some(persona.name), &turn);
       discussion_log.push((persona.name.to_string(), turn));
+      sleep(Duration::from_secs(10)).await;
     }
 
     sequence = emit(db, &sender, run_id, sequence, "phase_started", None, "Round moved to critique phase.");
@@ -201,6 +202,7 @@ async fn run_orchestration(
 
       sequence = emit(db, &sender, run_id, sequence, "agent_response_revised", Some(persona.name), &turn);
       discussion_log.push((persona.name.to_string(), turn));
+      sleep(Duration::from_secs(10)).await;
     }
 
     let reached_end =
