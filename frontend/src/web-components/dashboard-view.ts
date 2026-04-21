@@ -426,8 +426,7 @@ export class DashboardView extends LitElement {
 
           <wa-tab-panel name="settings">
             <div class="settings-body">
-              ${this.#renderSettingsMessage()}
-              ${this.#renderSettingsCard()}
+              ${this.#renderSettingsMessage()} ${this.#renderSettingsCard()}
             </div>
           </wa-tab-panel>
         </wa-tab-group>
@@ -437,25 +436,35 @@ export class DashboardView extends LitElement {
 
   #renderWsStatus() {
     if (this.dashboardState === null) {
-      return html``;
+      return html`
+
+      `;
     }
     const connected = this.dashboardState.wsConnected;
     const reconnect = this.dashboardState.reconnectAttempt;
     const variant = connected ? "success" : "warning";
     const label = connected ? "Connected" : `Reconnecting #${reconnect}`;
-    return html`<wa-badge variant="${variant}">${label}</wa-badge>`;
+    return html`
+      <wa-badge variant="${variant}">${label}</wa-badge>
+    `;
   }
 
   #renderSettingsMessage() {
     if (this.settingsMessage === null) {
-      return html``;
+      return html`
+
+      `;
     }
-    return html`<div class="message-banner">${this.settingsMessage}</div>`;
+    return html`
+      <div class="message-banner">${this.settingsMessage}</div>
+    `;
   }
 
   #renderRoomList() {
     if (!this.dashboardState?.runs.length) {
-      return html`<p class="no-rooms">No rooms yet.<br />Start one in Settings.</p>`;
+      return html`
+        <p class="no-rooms">No rooms yet.<br />Start one in Settings.</p>
+      `;
     }
 
     return html`
@@ -470,8 +479,12 @@ export class DashboardView extends LitElement {
               >
                 <span class="room-title">${this.#roomLabel(run)}</span>
                 <span class="room-meta">
-                  <span class="room-time">${formatTimestamp(run.createdAt)}</span>
-                  <wa-badge variant="${this.#statusVariant(run.status)}" size="small">
+                  <span class="room-time">${formatTimestamp(
+                    run.createdAt,
+                  )}</span>
+                  <wa-badge variant="${this.#statusVariant(
+                    run.status,
+                  )}" size="small">
                     ${run.status}
                   </wa-badge>
                 </span>
@@ -486,7 +499,9 @@ export class DashboardView extends LitElement {
   #renderRoomDetail() {
     const st = this.dashboardState;
     if (st === null) {
-      return html``;
+      return html`
+
+      `;
     }
 
     return html`
@@ -505,23 +520,28 @@ export class DashboardView extends LitElement {
 
   #renderEvents(st: DashboardState) {
     if (st.events.length === 0) {
-      return html`<p class="no-events">No events yet.</p>`;
+      return html`
+        <p class="no-events">No events yet.</p>
+      `;
     }
 
     return html`
       <ul class="event-list">
         ${st.events.map(
-          (event) => html`
-            <li class="event-item ${event.eventType === "final_report" ? "is-final-report" : ""}">
-              <wa-card>
-                <div class="event-meta">
-                  <span>${event.eventType}${event.agent ? ` - ${event.agent}` : ""}</span>
-                  <span>${formatTimestamp(event.timestamp)}</span>
-                </div>
-                <p class="event-text">${event.content}</p>
-              </wa-card>
-            </li>
-          `,
+          (event) =>
+            html`
+              <li class="event-item ${event.eventType === "final_report"
+                ? "is-final-report"
+                : ""}">
+                <wa-card>
+                  <div class="event-meta">
+                    <span>${event.agent ?? "None"}</span>
+                    <span>${formatTimestamp(event.timestamp)}</span>
+                  </div>
+                  <p class="event-text">${event.content}</p>
+                </wa-card>
+              </li>
+            `,
         )}
       </ul>
     `;
@@ -544,14 +564,15 @@ export class DashboardView extends LitElement {
     ];
 
     return agentNames.map(
-      (name) => html`
-        <wa-card>
-          <h3 class="agent-card-name">${name}</h3>
-          <p class="agent-card-last">
-            ${latestByAgent.get(name) ?? "No update yet."}
-          </p>
-        </wa-card>
-      `,
+      (name) =>
+        html`
+          <wa-card>
+            <h3 class="agent-card-name">${name}</h3>
+            <p class="agent-card-last">
+              ${latestByAgent.get(name) ?? "No update yet."}
+            </p>
+          </wa-card>
+        `,
     );
   }
 
@@ -587,7 +608,8 @@ export class DashboardView extends LitElement {
               size="small"
               rows="3"
               .value="${s.instruction}"
-              @input="${(e: InputEvent): void => this.#onTextField("instruction", e)}"
+              @input="${(e: InputEvent): void =>
+                this.#onTextField("instruction", e)}"
             ></wa-textarea>
           </label>
 
@@ -597,7 +619,8 @@ export class DashboardView extends LitElement {
               size="small"
               rows="3"
               .value="${s.background}"
-              @input="${(e: InputEvent): void => this.#onTextField("background", e)}"
+              @input="${(e: InputEvent): void =>
+                this.#onTextField("background", e)}"
             ></wa-textarea>
           </label>
 
@@ -609,7 +632,8 @@ export class DashboardView extends LitElement {
                 size="small"
                 min="0"
                 .value="${String(s.intervalMinutes)}"
-                @input="${(e: InputEvent): void => this.#onNumberField("intervalMinutes", e, 0)}"
+                @input="${(e: InputEvent): void =>
+                  this.#onNumberField("intervalMinutes", e, 0)}"
               ></wa-input>
             </label>
 
@@ -620,7 +644,8 @@ export class DashboardView extends LitElement {
                 size="small"
                 min="1"
                 .value="${String(s.turns)}"
-                @input="${(e: InputEvent): void => this.#onNumberField("turns", e, 1)}"
+                @input="${(e: InputEvent): void =>
+                  this.#onNumberField("turns", e, 1)}"
               ></wa-input>
             </label>
           </div>
