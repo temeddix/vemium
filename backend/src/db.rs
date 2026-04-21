@@ -210,8 +210,8 @@ pub async fn load_all_settings(
   pool: &SqlitePool,
 ) -> Result<Vec<RunLaunchSettings>> {
   let rows = sqlx::query(
-    "SELECT kind, topic, goal, instruction, background, interval_seconds, \
-     duration_minutes, run_forever, updated_at FROM run_settings ORDER BY kind ASC",
+    "SELECT kind, topic, goal, instruction, background, interval_minutes, \
+     turns, autorun, updated_at FROM run_settings ORDER BY kind ASC",
   )
   .fetch_all(pool)
   .await
@@ -222,15 +222,15 @@ pub async fn load_all_settings(
     let kind_raw: String = row
       .try_get("kind")
       .context("run_settings.kind: invalid value")?;
-    let interval_seconds: i64 = row
-      .try_get("interval_seconds")
-      .context("run_settings.interval_seconds: invalid value")?;
-    let duration_minutes: i64 = row
-      .try_get("duration_minutes")
-      .context("run_settings.duration_minutes: invalid value")?;
-    let run_forever: i64 = row
-      .try_get("run_forever")
-      .context("run_settings.run_forever: invalid value")?;
+    let interval_minutes: i64 = row
+      .try_get("interval_minutes")
+      .context("run_settings.interval_minutes: invalid value")?;
+    let turns: i64 = row
+      .try_get("turns")
+      .context("run_settings.turns: invalid value")?;
+    let autorun: i64 = row
+      .try_get("autorun")
+      .context("run_settings.autorun: invalid value")?;
 
     settings.push(RunLaunchSettings {
       kind: parse_settings_kind(&kind_raw)?,
@@ -246,9 +246,9 @@ pub async fn load_all_settings(
       background: row
         .try_get("background")
         .context("run_settings.background: invalid value")?,
-      interval_seconds: interval_seconds as u64,
-      duration_minutes: duration_minutes as u32,
-      run_forever: sqlite_to_bool(run_forever),
+      interval_minutes: interval_minutes as u32,
+      turns: turns as u32,
+      autorun: sqlite_to_bool(autorun),
       updated_at: row
         .try_get("updated_at")
         .context("run_settings.updated_at: invalid value")?,
@@ -265,18 +265,18 @@ pub async fn upsert_settings(
   updated_at: &str,
 ) -> Result<RunLaunchSettings> {
   let kind_str = settings_kind_to_str(&kind);
-  let interval_seconds = request.interval_seconds as i64;
-  let duration_minutes = request.duration_minutes as i64;
-  let run_forever = bool_to_sqlite(request.run_forever);
+  let interval_minutes = request.interval_minutes as i64;
+  let turns = request.turns as i64;
+  let autorun = bool_to_sqlite(request.autorun);
 
   sqlx::query(
     "INSERT INTO run_settings \
-     (kind, topic, goal, instruction, background, interval_seconds, duration_minutes, run_forever, updated_at) \
+     (kind, topic, goal, instruction, background, interval_minutes, turns, autorun, updated_at) \
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
      ON CONFLICT(kind) DO UPDATE SET \
      topic=excluded.topic, goal=excluded.goal, instruction=excluded.instruction, \
-     background=excluded.background, interval_seconds=excluded.interval_seconds, \
-     duration_minutes=excluded.duration_minutes, run_forever=excluded.run_forever, \
+     background=excluded.background, interval_minutes=excluded.interval_minutes, \
+     turns=excluded.turns, autorun=excluded.autorun, \
      updated_at=excluded.updated_at",
   )
   .bind(kind_str)
@@ -284,9 +284,9 @@ pub async fn upsert_settings(
   .bind(&request.goal)
   .bind(&request.instruction)
   .bind(&request.background)
-  .bind(interval_seconds)
-  .bind(duration_minutes)
-  .bind(run_forever)
+  .bind(interval_minutes)
+  .bind(turns)
+  .bind(autorun)
   .bind(updated_at)
   .execute(pool)
   .await
@@ -298,9 +298,9 @@ pub async fn upsert_settings(
     goal: request.goal.clone(),
     instruction: request.instruction.clone(),
     background: request.background.clone(),
-    interval_seconds: request.interval_seconds,
-    duration_minutes: request.duration_minutes,
-    run_forever: request.run_forever,
+    interval_minutes: request.interval_minutes,
+    turns: request.turns,
+    autorun: request.autorun,
     updated_at: updated_at.to_string(),
   })
 }
@@ -311,8 +311,8 @@ pub async fn load_settings_by_kind(
 ) -> Result<Option<RunLaunchSettings>> {
   let kind_str = settings_kind_to_str(&kind);
   let row = sqlx::query(
-    "SELECT kind, topic, goal, instruction, background, interval_seconds, \
-     duration_minutes, run_forever, updated_at FROM run_settings WHERE kind = ?",
+    "SELECT kind, topic, goal, instruction, background, interval_minutes, \
+     turns, autorun, updated_at FROM run_settings WHERE kind = ?",
   )
   .bind(kind_str)
   .fetch_optional(pool)
@@ -323,15 +323,15 @@ pub async fn load_settings_by_kind(
     return Ok(None);
   };
 
-  let interval_seconds: i64 = row
-    .try_get("interval_seconds")
-    .context("run_settings.interval_seconds: invalid value")?;
-  let duration_minutes: i64 = row
-    .try_get("duration_minutes")
-    .context("run_settings.duration_minutes: invalid value")?;
-  let run_forever: i64 = row
-    .try_get("run_forever")
-    .context("run_settings.run_forever: invalid value")?;
+  let interval_minutes: i64 = row
+    .try_get("interval_minutes")
+    .context("run_settings.interval_minutes: invalid value")?;
+  let turns: i64 = row
+    .try_get("turns")
+    .context("run_settings.turns: invalid value")?;
+  let autorun: i64 = row
+    .try_get("autorun")
+    .context("run_settings.autorun: invalid value")?;
 
   Ok(Some(RunLaunchSettings {
     kind,
@@ -347,20 +347,17 @@ pub async fn load_settings_by_kind(
     background: row
       .try_get("background")
       .context("run_settings.background: invalid value")?,
-    interval_seconds: interval_seconds as u64,
-    duration_minutes: duration_minutes as u32,
-    run_forever: sqlite_to_bool(run_forever),
+    interval_minutes: interval_minutes as u32,
+    turns: turns as u32,
+    autorun: sqlite_to_bool(autorun),
     updated_at: row
       .try_get("updated_at")
       .context("run_settings.updated_at: invalid value")?,
   }))
 }
 
-fn run_kind_to_str(kind: &RunKind) -> &'static str {
-  match kind {
-    RunKind::Discussion => "discussion",
-    RunKind::WeeklyReport => "weekly_report",
-  }
+fn run_kind_to_str(_kind: &RunKind) -> &'static str {
+  "discussion"
 }
 
 fn run_status_to_str(status: &RunStatus) -> &'static str {
@@ -374,8 +371,7 @@ fn run_status_to_str(status: &RunStatus) -> &'static str {
 
 fn parse_run_kind(s: &str) -> Result<RunKind> {
   match s {
-    "discussion" => Ok(RunKind::Discussion),
-    "weekly_report" => Ok(RunKind::WeeklyReport),
+    "discussion" | "weekly_report" => Ok(RunKind::Discussion),
     _ => Err(anyhow!("unknown run kind: {s}")),
   }
 }
@@ -398,17 +394,13 @@ fn sqlite_to_bool(value: i64) -> bool {
   value != 0
 }
 
-fn settings_kind_to_str(kind: &SettingsKind) -> &'static str {
-  match kind {
-    SettingsKind::Discussion => "discussion",
-    SettingsKind::WeeklyReport => "weekly_report",
-  }
+fn settings_kind_to_str(_kind: &SettingsKind) -> &'static str {
+  "discussion"
 }
 
 fn parse_settings_kind(value: &str) -> Result<SettingsKind> {
   match value {
     "discussion" => Ok(SettingsKind::Discussion),
-    "weekly_report" => Ok(SettingsKind::WeeklyReport),
     _ => Err(anyhow!("unknown settings kind: {value}")),
   }
 }

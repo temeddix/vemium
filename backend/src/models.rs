@@ -5,14 +5,12 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
   Discussion,
-  WeeklyReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettingsKind {
   Discussion,
-  WeeklyReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,9 +59,9 @@ pub struct RunLaunchSettings {
   pub goal: String,
   pub instruction: String,
   pub background: String,
-  pub interval_seconds: u64,
-  pub duration_minutes: u32,
-  pub run_forever: bool,
+  pub interval_minutes: u32,
+  pub turns: u32,
+  pub autorun: bool,
   pub updated_at: String,
 }
 
@@ -74,9 +72,9 @@ pub struct UpsertRunSettingsRequest {
   pub goal: String,
   pub instruction: String,
   pub background: String,
-  pub interval_seconds: u64,
-  pub duration_minutes: u32,
-  pub run_forever: bool,
+  pub interval_minutes: u32,
+  pub turns: u32,
+  pub autorun: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

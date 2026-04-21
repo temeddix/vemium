@@ -97,5 +97,5 @@ async fn restore_active_run(state: &AppState) {
   }
 
   tracing::info!(run_id = %run.id, "restoring active run from database state");
-  runtime::spawn_run(state.clone(), run.id, run.kind);
+  runtime::spawn_run(state.clone(), run.id);
 }

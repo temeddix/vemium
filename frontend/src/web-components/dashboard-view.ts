@@ -2,7 +2,6 @@ import { dashboardContext } from "@/app/context";
 import type { DashboardStore } from "@/app/state";
 import type {
   DashboardState,
-  RunKind,
   RunRecord,
   SaveRunSettingsRequest,
   StartRunRequest,
@@ -17,14 +16,9 @@ interface RunSettingsForm {
   goal: string;
   instruction: string;
   background: string;
-  intervalSeconds: number;
-  durationMinutes: number;
-  runForever: boolean;
-}
-
-interface LaunchSettings {
-  discussion: RunSettingsForm;
-  weeklyReport: RunSettingsForm;
+  intervalMinutes: number;
+  turns: number;
+  autorun: boolean;
 }
 
 const EMPTY_SETTINGS: RunSettingsForm = {
@@ -32,9 +26,9 @@ const EMPTY_SETTINGS: RunSettingsForm = {
   goal: "",
   instruction: "",
   background: "",
-  intervalSeconds: 0,
-  durationMinutes: 1,
-  runForever: false,
+  intervalMinutes: 0,
+  turns: 1,
+  autorun: false,
 };
 
 function readInputValue(target: EventTarget | null): string | null {
@@ -75,10 +69,7 @@ export class DashboardView extends LitElement {
   private accessor dashboardState: DashboardState | null = null;
 
   @state()
-  private accessor launchSettings: LaunchSettings = {
-    discussion: { ...EMPTY_SETTINGS },
-    weeklyReport: { ...EMPTY_SETTINGS },
-  };
+  private accessor settings: RunSettingsForm = { ...EMPTY_SETTINGS };
 
   @state()
   private accessor settingsMessage: string | null = null;
@@ -101,6 +92,7 @@ export class DashboardView extends LitElement {
       padding: 0.6rem 1.25rem;
       border-bottom: var(--wa-border-width-s) solid var(--wa-color-border-normal);
       flex-shrink: 0;
+      background: var(--wa-color-surface-default);
     }
 
     .app-logo {
@@ -168,6 +160,7 @@ export class DashboardView extends LitElement {
       border-inline-end: var(--wa-border-width-s) solid
         var(--wa-color-border-normal);
       overflow: hidden;
+      background: var(--wa-color-surface-default);
     }
 
     .sidebar-label {
@@ -243,13 +236,14 @@ export class DashboardView extends LitElement {
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      background: var(--wa-color-surface-sunken);
     }
 
     .content-body {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
-      padding: 1rem 1.25rem;
+      padding: 1.25rem;
       display: grid;
       gap: 1.25rem;
       align-content: start;
@@ -272,11 +266,13 @@ export class DashboardView extends LitElement {
       gap: 0.5rem;
     }
 
-    .event-item {
-      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      border-radius: 0.5rem;
+    .event-item wa-card::part(base) {
       padding: 0.6rem 0.75rem;
-      background: var(--wa-color-surface-raised);
+    }
+
+    .event-item.is-final-report wa-card::part(base) {
+      border-color: var(--wa-color-brand-border-normal);
+      background: var(--wa-color-brand-fill-quiet);
     }
 
     .event-meta {
@@ -284,7 +280,7 @@ export class DashboardView extends LitElement {
       justify-content: space-between;
       font-size: 0.72rem;
       color: var(--wa-color-text-quiet);
-      margin-bottom: 0.25rem;
+      margin-bottom: 0.3rem;
     }
 
     .event-text {
@@ -307,21 +303,14 @@ export class DashboardView extends LitElement {
       gap: 0.75rem;
     }
 
-    .agent-card {
-      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      border-radius: 0.5rem;
-      padding: 0.75rem;
-      background: var(--wa-color-surface-raised);
-    }
-
-    .agent-name {
+    .agent-card-name {
       margin: 0 0 0.35rem;
       font-size: 0.8rem;
       font-weight: 600;
       color: var(--wa-color-brand);
     }
 
-    .agent-last {
+    .agent-card-last {
       margin: 0;
       font-size: 0.825rem;
       line-height: 1.45;
@@ -333,27 +322,7 @@ export class DashboardView extends LitElement {
       height: 100%;
       overflow-y: auto;
       padding: 1.5rem;
-    }
-
-    .settings-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1.5rem;
-    }
-
-    .settings-card {
-      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      border-radius: 0.75rem;
-      padding: 1.25rem;
-      display: grid;
-      gap: 0.875rem;
-      background: var(--wa-color-surface-raised);
-    }
-
-    .settings-card-title {
-      margin: 0;
-      font-size: 0.95rem;
-      font-weight: 600;
+      background: var(--wa-color-surface-sunken);
     }
 
     .field {
@@ -380,10 +349,9 @@ export class DashboardView extends LitElement {
       gap: 0.75rem;
     }
 
-    .round-hint {
-      margin: 0;
-      font-size: 0.72rem;
-      color: var(--wa-color-text-quiet);
+    .card-fields {
+      display: grid;
+      gap: 0.875rem;
     }
 
     .card-actions {
@@ -406,10 +374,6 @@ export class DashboardView extends LitElement {
       .debates-layout {
         grid-template-columns: 1fr;
         grid-template-rows: 12rem 1fr;
-      }
-
-      .settings-grid {
-        grid-template-columns: 1fr;
       }
     }
   `;
@@ -463,10 +427,7 @@ export class DashboardView extends LitElement {
           <wa-tab-panel name="settings">
             <div class="settings-body">
               ${this.#renderSettingsMessage()}
-              <div class="settings-grid">
-                ${this.#renderSettingsCard("discussion")} ${this
-                  .#renderSettingsCard("weekly_report")}
-              </div>
+              ${this.#renderSettingsCard()}
             </div>
           </wa-tab-panel>
         </wa-tab-group>
@@ -476,38 +437,25 @@ export class DashboardView extends LitElement {
 
   #renderWsStatus() {
     if (this.dashboardState === null) {
-      return html`
-
-      `;
+      return html``;
     }
     const connected = this.dashboardState.wsConnected;
     const reconnect = this.dashboardState.reconnectAttempt;
     const variant = connected ? "success" : "warning";
     const label = connected ? "Connected" : `Reconnecting #${reconnect}`;
-    return html`
-      <wa-badge variant="${variant}">${label}</wa-badge>
-    `;
+    return html`<wa-badge variant="${variant}">${label}</wa-badge>`;
   }
 
   #renderSettingsMessage() {
     if (this.settingsMessage === null) {
-      return html`
-
-      `;
+      return html``;
     }
-    return html`
-      <div class="message-banner">${this.settingsMessage}</div>
-    `;
+    return html`<div class="message-banner">${this.settingsMessage}</div>`;
   }
 
   #renderRoomList() {
-    if (
-      this.dashboardState === null ||
-      this.dashboardState.runs.length === 0
-    ) {
-      return html`
-        <p class="no-rooms">No rooms yet.<br />Start one in Settings.</p>
-      `;
+    if (!this.dashboardState?.runs.length) {
+      return html`<p class="no-rooms">No rooms yet.<br />Start one in Settings.</p>`;
     }
 
     return html`
@@ -522,12 +470,8 @@ export class DashboardView extends LitElement {
               >
                 <span class="room-title">${this.#roomLabel(run)}</span>
                 <span class="room-meta">
-                  <span class="room-time">${formatTimestamp(
-                    run.createdAt,
-                  )}</span>
-                  <wa-badge variant="${this.#statusVariant(
-                    run.status,
-                  )}" size="small">
+                  <span class="room-time">${formatTimestamp(run.createdAt)}</span>
+                  <wa-badge variant="${this.#statusVariant(run.status)}" size="small">
                     ${run.status}
                   </wa-badge>
                 </span>
@@ -540,55 +484,52 @@ export class DashboardView extends LitElement {
   }
 
   #renderRoomDetail() {
-    const state = this.dashboardState;
-    if (state === null) {
-      return html`
-
-      `;
+    const st = this.dashboardState;
+    if (st === null) {
+      return html``;
     }
 
     return html`
       <div class="content-body">
         <div>
           <p class="section-label">Events</p>
-          ${this.#renderEvents(state)}
+          ${this.#renderEvents(st)}
         </div>
         <div>
           <p class="section-label">Agent Snapshot</p>
-          <div class="agents-grid">${this.#renderAgents(state)}</div>
+          <div class="agents-grid">${this.#renderAgents(st)}</div>
         </div>
       </div>
     `;
   }
 
-  #renderEvents(state: DashboardState) {
-    if (state.events.length === 0) {
-      return html`
-        <p class="no-events">No events yet.</p>
-      `;
+  #renderEvents(st: DashboardState) {
+    if (st.events.length === 0) {
+      return html`<p class="no-events">No events yet.</p>`;
     }
 
     return html`
       <ul class="event-list">
-        ${state.events.map(
-          (event) =>
-            html`
-              <li class="event-item">
+        ${st.events.map(
+          (event) => html`
+            <li class="event-item ${event.eventType === "final_report" ? "is-final-report" : ""}">
+              <wa-card>
                 <div class="event-meta">
-                  <span>${event.agent ? event.agent : "None"}</span>
+                  <span>${event.eventType}${event.agent ? ` - ${event.agent}` : ""}</span>
                   <span>${formatTimestamp(event.timestamp)}</span>
                 </div>
                 <p class="event-text">${event.content}</p>
-              </li>
-            `,
+              </wa-card>
+            </li>
+          `,
         )}
       </ul>
     `;
   }
 
-  #renderAgents(state: DashboardState) {
+  #renderAgents(st: DashboardState) {
     const latestByAgent = new Map<string, string>();
-    for (const event of state.events) {
+    for (const event of st.events) {
       if (event.agent !== null) {
         latestByAgent.set(event.agent, event.content);
       }
@@ -603,121 +544,103 @@ export class DashboardView extends LitElement {
     ];
 
     return agentNames.map(
-      (name) =>
-        html`
-          <article class="agent-card">
-            <h3 class="agent-name">${name}</h3>
-            <p class="agent-last">
-              ${latestByAgent.get(name) ?? "No update yet."}
-            </p>
-          </article>
-        `,
+      (name) => html`
+        <wa-card>
+          <h3 class="agent-card-name">${name}</h3>
+          <p class="agent-card-last">
+            ${latestByAgent.get(name) ?? "No update yet."}
+          </p>
+        </wa-card>
+      `,
     );
   }
 
-  #renderSettingsCard(kind: RunKind) {
-    const key = kind === "discussion" ? "discussion" : "weeklyReport";
-    const settings = this.launchSettings[key];
-    const rounds = this.#calculateRounds(settings);
+  #renderSettingsCard() {
+    const s = this.settings;
     const busy = this.dashboardState?.isStartingRun ?? false;
 
     return html`
-      <section class="settings-card">
-        <h3 class="settings-card-title">
-          ${kind === "discussion"
-            ? "Debate Settings"
-            : "Weekly Report Settings"}
-        </h3>
-
-        <label class="field">
-          <span class="field-label">Topic</span>
-          <wa-input
-            size="small"
-            .value="${settings.topic}"
-            @input="${(e: InputEvent): void =>
-              this.#onTextField(key, "topic", e)}"
-          ></wa-input>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Goal</span>
-          <wa-input
-            size="small"
-            .value="${settings.goal}"
-            @input="${(e: InputEvent): void =>
-              this.#onTextField(key, "goal", e)}"
-          ></wa-input>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Instruction</span>
-          <wa-textarea
-            size="small"
-            rows="3"
-            .value="${settings.instruction}"
-            @input="${(e: InputEvent): void =>
-              this.#onTextField(key, "instruction", e)}"
-          ></wa-textarea>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Background</span>
-          <wa-textarea
-            size="small"
-            rows="3"
-            .value="${settings.background}"
-            @input="${(e: InputEvent): void =>
-              this.#onTextField(key, "background", e)}"
-          ></wa-textarea>
-        </label>
-
-        <div class="toggle-row">
-          <wa-checkbox
-            .checked="${settings.runForever}"
-            @change="${(e: Event): void => this.#onForever(key, e)}"
-          >
-            Run forever in background
-          </wa-checkbox>
-        </div>
-
-        <div class="numeric-row">
+      <wa-card style="max-width: 48rem;">
+        <div slot="header">Debate Settings</div>
+        <div class="card-fields">
           <label class="field">
-            <span class="field-label">Interval (seconds)</span>
+            <span class="field-label">Topic</span>
             <wa-input
-              type="number"
               size="small"
-              min="0"
-              .value="${String(settings.intervalSeconds)}"
-              @input="${(e: InputEvent): void =>
-                this.#onNumberField(key, "intervalSeconds", e, 0)}"
+              .value="${s.topic}"
+              @input="${(e: InputEvent): void => this.#onTextField("topic", e)}"
             ></wa-input>
           </label>
 
           <label class="field">
-            <span class="field-label">Duration (minutes)</span>
+            <span class="field-label">Goal</span>
             <wa-input
-              type="number"
               size="small"
-              min="1"
-              .value="${String(settings.durationMinutes)}"
-              @input="${(e: InputEvent): void =>
-                this.#onNumberField(key, "durationMinutes", e, 1)}"
+              .value="${s.goal}"
+              @input="${(e: InputEvent): void => this.#onTextField("goal", e)}"
             ></wa-input>
           </label>
+
+          <label class="field">
+            <span class="field-label">Instruction</span>
+            <wa-textarea
+              size="small"
+              rows="3"
+              .value="${s.instruction}"
+              @input="${(e: InputEvent): void => this.#onTextField("instruction", e)}"
+            ></wa-textarea>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Background</span>
+            <wa-textarea
+              size="small"
+              rows="3"
+              .value="${s.background}"
+              @input="${(e: InputEvent): void => this.#onTextField("background", e)}"
+            ></wa-textarea>
+          </label>
+
+          <div class="numeric-row">
+            <label class="field">
+              <span class="field-label">Interval (minutes)</span>
+              <wa-input
+                type="number"
+                size="small"
+                min="0"
+                .value="${String(s.intervalMinutes)}"
+                @input="${(e: InputEvent): void => this.#onNumberField("intervalMinutes", e, 0)}"
+              ></wa-input>
+            </label>
+
+            <label class="field">
+              <span class="field-label">Turns</span>
+              <wa-input
+                type="number"
+                size="small"
+                min="1"
+                .value="${String(s.turns)}"
+                @input="${(e: InputEvent): void => this.#onNumberField("turns", e, 1)}"
+              ></wa-input>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <wa-checkbox
+              .checked="${s.autorun}"
+              @change="${(e: Event): void => this.#onAutorun(e)}"
+            >
+              Autorun
+            </wa-checkbox>
+          </div>
         </div>
 
-        <p class="round-hint">
-          ${settings.runForever
-            ? "Mode: infinite loop"
-            : `Derived rounds: ${rounds}`}
-        </p>
-
-        <div class="card-actions">
+        <div slot="footer" class="card-actions">
           <wa-button
             size="small"
             variant="neutral"
             ?disabled="${busy}"
-            @click="${(): Promise<void> => this.#saveSettings(kind)}"
+            @click="${(): Promise<void> => this.#saveSettings()}"
           >
             Save Settings
           </wa-button>
@@ -725,14 +648,12 @@ export class DashboardView extends LitElement {
             size="small"
             variant="brand"
             ?disabled="${busy}"
-            @click="${kind === "discussion"
-              ? this.#onStartDiscussion
-              : this.#onStartWeeklyReport}"
+            @click="${this.#onStartDebate}"
           >
-            ${kind === "discussion" ? "Start Debate" : "Start Report"}
+            Start Debate
           </wa-button>
         </div>
-      </section>
+      </wa-card>
     `;
   }
 
@@ -748,22 +669,17 @@ export class DashboardView extends LitElement {
 
   async #loadSettingsFromBackend(): Promise<void> {
     try {
-      const settings = await this.store.loadSettings();
-      for (const setting of settings) {
-        const key = setting.kind === "discussion"
-          ? "discussion"
-          : "weeklyReport";
-        this.launchSettings = {
-          ...this.launchSettings,
-          [key]: {
-            topic: setting.topic,
-            goal: setting.goal,
-            instruction: setting.instruction,
-            background: setting.background,
-            intervalSeconds: setting.intervalSeconds,
-            durationMinutes: setting.durationMinutes,
-            runForever: setting.runForever,
-          },
+      const all = await this.store.loadSettings();
+      const s = all.find((x) => x.kind === "discussion");
+      if (s) {
+        this.settings = {
+          topic: s.topic,
+          goal: s.goal,
+          instruction: s.instruction,
+          background: s.background,
+          intervalMinutes: s.intervalMinutes,
+          turns: s.turns,
+          autorun: s.autorun,
         };
       }
     } catch {
@@ -772,7 +688,6 @@ export class DashboardView extends LitElement {
   }
 
   #onTextField(
-    key: "discussion" | "weeklyReport",
     field: "topic" | "goal" | "instruction" | "background",
     event: InputEvent,
   ): void {
@@ -780,15 +695,11 @@ export class DashboardView extends LitElement {
     if (value === null) {
       return;
     }
-    this.launchSettings = {
-      ...this.launchSettings,
-      [key]: { ...this.launchSettings[key], [field]: value },
-    };
+    this.settings = { ...this.settings, [field]: value };
   }
 
   #onNumberField(
-    key: "discussion" | "weeklyReport",
-    field: "intervalSeconds" | "durationMinutes",
+    field: "intervalMinutes" | "turns",
     event: InputEvent,
     minValue: number,
   ): void {
@@ -800,102 +711,65 @@ export class DashboardView extends LitElement {
     const value = Number.isFinite(parsed)
       ? Math.max(minValue, parsed)
       : minValue;
-    this.launchSettings = {
-      ...this.launchSettings,
-      [key]: { ...this.launchSettings[key], [field]: value },
-    };
+    this.settings = { ...this.settings, [field]: value };
   }
 
-  #onForever(key: "discussion" | "weeklyReport", event: Event): void {
+  #onAutorun(event: Event): void {
     const checked = readChecked(event.target);
     if (checked === null) {
       return;
     }
-    this.launchSettings = {
-      ...this.launchSettings,
-      [key]: { ...this.launchSettings[key], runForever: checked },
-    };
+    this.settings = { ...this.settings, autorun: checked };
   }
 
-  #calculateRounds(settings: RunSettingsForm): number {
-    if (settings.runForever) {
-      return 1;
-    }
-    const durationSeconds = Math.max(60, settings.durationMinutes * 60);
-    if (settings.intervalSeconds <= 0) {
-      return 1;
-    }
-    return Math.max(
-      1,
-      Math.min(24, Math.round(durationSeconds / settings.intervalSeconds)),
-    );
-  }
-
-  #toSaveRequest(settings: RunSettingsForm): SaveRunSettingsRequest {
-    return {
-      topic: settings.topic,
-      goal: settings.goal,
-      instruction: settings.instruction,
-      background: settings.background,
-      intervalSeconds: settings.intervalSeconds,
-      durationMinutes: settings.durationMinutes,
-      runForever: settings.runForever,
-    };
-  }
-
-  #toStartRequest(settings: RunSettingsForm): StartRunRequest {
-    return {
-      topic: settings.topic,
-      goal: settings.goal,
-      instruction: settings.instruction,
-      background: settings.background,
-      intervalSeconds: settings.intervalSeconds,
-      rounds: this.#calculateRounds(settings),
-      runForever: settings.runForever,
-    };
-  }
-
-  async #saveSettings(kind: RunKind): Promise<void> {
-    const key = kind === "discussion" ? "discussion" : "weeklyReport";
+  async #saveSettings(): Promise<void> {
     try {
-      await this.store.saveSettings(
-        kind,
-        this.#toSaveRequest(this.launchSettings[key]),
-      );
-      this.settingsMessage = `${
-        kind === "discussion" ? "Debate" : "Report"
-      } settings saved.`;
+      await this.store.saveSettings(this.#toSaveRequest());
+      this.settingsMessage = "Settings saved.";
     } catch {
       this.settingsMessage = "Failed to save settings.";
     }
   }
 
-  #onStartDiscussion = (): void => {
-    void this.store.startRun(
-      "discussion",
-      this.#toStartRequest(this.launchSettings.discussion),
-    );
+  #onStartDebate = (): void => {
+    void this.store.startRun(this.#toStartRequest());
   };
 
-  #onStartWeeklyReport = (): void => {
-    void this.store.startRun(
-      "weekly_report",
-      this.#toStartRequest(this.launchSettings.weeklyReport),
-    );
-  };
+  #toSaveRequest(): SaveRunSettingsRequest {
+    return {
+      topic: this.settings.topic,
+      goal: this.settings.goal,
+      instruction: this.settings.instruction,
+      background: this.settings.background,
+      intervalMinutes: this.settings.intervalMinutes,
+      turns: this.settings.turns,
+      autorun: this.settings.autorun,
+    };
+  }
+
+  #toStartRequest(): StartRunRequest {
+    return {
+      topic: this.settings.topic,
+      goal: this.settings.goal,
+      instruction: this.settings.instruction,
+      background: this.settings.background,
+      intervalSeconds: this.settings.intervalMinutes * 60,
+      rounds: this.settings.turns,
+      runForever: this.settings.autorun,
+    };
+  }
 
   #roomLabel(run: RunRecord | null): string {
     if (run === null) {
       return "Select a room";
     }
-    const kindLabel = run.kind === "discussion" ? "Debate" : "Report";
     const tag = new Date(run.createdAt).toLocaleString("en-US", {
       month: "short",
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
     });
-    return `${kindLabel} - ${tag}`;
+    return `Debate - ${tag}`;
   }
 
   #statusVariant(status: string): string {

@@ -1,4 +1,4 @@
-export type RunKind = "discussion" | "weekly_report";
+export type RunKind = "discussion";
 
 export type RunStatus = "queued" | "running" | "completed" | "failed";
 
@@ -45,9 +45,9 @@ export interface RunSettings {
   goal: string;
   instruction: string;
   background: string;
-  intervalSeconds: number;
-  durationMinutes: number;
-  runForever: boolean;
+  intervalMinutes: number;
+  turns: number;
+  autorun: boolean;
   updatedAt: string;
 }
 
@@ -60,9 +60,9 @@ export interface SaveRunSettingsRequest {
   goal: string;
   instruction: string;
   background: string;
-  intervalSeconds: number;
-  durationMinutes: number;
-  runForever: boolean;
+  intervalMinutes: number;
+  turns: number;
+  autorun: boolean;
 }
 
 export interface SaveRunSettingsResponse {

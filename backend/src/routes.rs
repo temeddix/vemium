@@ -18,7 +18,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 const DEFAULT_INTERVAL_SECONDS: u64 = 0;
-const DEFAULT_FOREVER_INTERVAL_SECONDS: u64 = 30;
+const DEFAULT_AUTORUN_INTERVAL_SECONDS: u64 = 60;
 const DEFAULT_ROUNDS: u32 = 1;
 const MAX_INTERVAL_SECONDS: u64 = 86_400;
 const MAX_ROUNDS: u32 = 24;
@@ -29,9 +29,8 @@ pub fn create_router(state: AppState) -> Router {
     .route("/v1/runs/active", get(get_active_run))
     .route("/v1/runs", get(list_runs))
     .route("/v1/settings", get(get_settings))
-    .route("/v1/settings/:kind", post(upsert_settings))
+    .route("/v1/settings/discussion", post(upsert_discussion_settings))
     .route("/v1/runs/discussion", post(create_discussion_run))
-    .route("/v1/runs/weekly-report", post(create_weekly_report_run))
     .route("/v1/runs/:run_id", get(get_run))
     .route("/v1/runs/:run_id/stream", get(stream_run_events))
     .fallback_service(
@@ -55,20 +54,11 @@ async fn create_discussion_run(
   payload: Option<Json<CreateRunRequest>>,
 ) -> impl IntoResponse {
   let request = payload.map(|Json(body)| body).unwrap_or_default();
-  create_run(state, RunKind::Discussion, request).await
-}
-
-async fn create_weekly_report_run(
-  State(state): State<AppState>,
-  payload: Option<Json<CreateRunRequest>>,
-) -> impl IntoResponse {
-  let request = payload.map(|Json(body)| body).unwrap_or_default();
-  create_run(state, RunKind::WeeklyReport, request).await
+  create_run(state, request).await
 }
 
 async fn create_run(
   state: AppState,
-  kind: RunKind,
   request: CreateRunRequest,
 ) -> impl IntoResponse {
   if let Some(active_run) = get_current_active_run(&state).await {
@@ -77,7 +67,7 @@ async fn create_run(
   }
 
   let saved_settings =
-    db::load_settings_by_kind(&state.db, to_settings_kind(&kind))
+    db::load_settings_by_kind(&state.db, SettingsKind::Discussion)
       .await
       .report()
       .flatten();
@@ -86,61 +76,56 @@ async fn create_run(
   let now = Utc::now().to_rfc3339();
   let topic = request
     .topic
-    .or_else(|| saved_settings.as_ref().map(|value| value.topic.clone()))
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty())
+    .or_else(|| saved_settings.as_ref().map(|s| s.topic.clone()))
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty())
     .unwrap_or_else(|| "general research".to_string());
   let goal = request
     .goal
-    .or_else(|| saved_settings.as_ref().map(|value| value.goal.clone()))
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty())
-    .unwrap_or_else(|| default_goal_for_kind(&kind).to_string());
+    .or_else(|| saved_settings.as_ref().map(|s| s.goal.clone()))
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty())
+    .unwrap_or_else(|| {
+      "Analyze the topic with evidence and produce a balanced recommendation."
+        .to_string()
+    });
   let background = request
     .background
-    .or_else(|| {
-      saved_settings
-        .as_ref()
-        .map(|value| value.background.clone())
-    })
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty());
+    .or_else(|| saved_settings.as_ref().map(|s| s.background.clone()))
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty());
   let instruction = request
     .instruction
+    .or_else(|| saved_settings.as_ref().map(|s| s.instruction.clone()))
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty());
+  let run_forever = request
+    .run_forever
+    .or_else(|| saved_settings.as_ref().map(|s| s.autorun))
+    .unwrap_or(false);
+  let interval_seconds = request
+    .interval_seconds
     .or_else(|| {
       saved_settings
         .as_ref()
-        .map(|value| value.instruction.clone())
+        .map(|s| u64::from(s.interval_minutes) * 60)
     })
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty());
-  let interval_seconds = request
-    .interval_seconds
-    .or_else(|| saved_settings.as_ref().map(|value| value.interval_seconds))
-    .map(|value| value.min(MAX_INTERVAL_SECONDS))
+    .map(|v| v.min(MAX_INTERVAL_SECONDS))
     .unwrap_or(DEFAULT_INTERVAL_SECONDS);
-  let run_forever = request
-    .run_forever
-    .or_else(|| saved_settings.as_ref().map(|value| value.run_forever))
-    .unwrap_or(false);
-  let interval_seconds = if run_forever {
-    interval_seconds.max(DEFAULT_FOREVER_INTERVAL_SECONDS)
+  let interval_seconds = if run_forever && interval_seconds == 0 {
+    DEFAULT_AUTORUN_INTERVAL_SECONDS
   } else {
     interval_seconds
   };
   let rounds = request
     .rounds
-    .or_else(|| {
-      saved_settings.as_ref().map(|value| {
-        derive_rounds(value.duration_minutes, value.interval_seconds)
-      })
-    })
-    .map(|value| value.clamp(DEFAULT_ROUNDS, MAX_ROUNDS))
+    .or_else(|| saved_settings.as_ref().map(|s| s.turns))
+    .map(|v| v.clamp(DEFAULT_ROUNDS, MAX_ROUNDS))
     .unwrap_or(DEFAULT_ROUNDS);
 
   let record = RunRecord {
     id: run_id,
-    kind: kind.clone(),
+    kind: RunKind::Discussion,
     status: RunStatus::Queued,
     topic,
     goal,
@@ -173,24 +158,13 @@ async fn create_run(
     streams.insert(run_id, sender);
   }
 
-  runtime::spawn_run(state, run_id, kind);
+  runtime::spawn_run(state, run_id);
 
   (
     StatusCode::ACCEPTED,
     Json(CreateRunResponse { run: record }),
   )
     .into_response()
-}
-
-fn default_goal_for_kind(kind: &RunKind) -> &'static str {
-  match kind {
-    RunKind::Discussion => {
-      "Analyze the topic with evidence and produce a balanced recommendation."
-    }
-    RunKind::WeeklyReport => {
-      "Produce a concise weekly report with key developments, risks, and next actions."
-    }
-  }
 }
 
 async fn get_run(
@@ -243,24 +217,14 @@ async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
   }
 }
 
-async fn upsert_settings(
-  Path(kind): Path<String>,
+async fn upsert_discussion_settings(
   State(state): State<AppState>,
   Json(payload): Json<UpsertRunSettingsRequest>,
 ) -> impl IntoResponse {
-  let settings_kind = match parse_settings_kind_path(&kind) {
-    Some(value) => value,
-    None => {
-      return (
-        StatusCode::BAD_REQUEST,
-        Json(json!({ "error": "Invalid settings kind." })),
-      )
-        .into_response();
-    }
-  };
-
   let now = Utc::now().to_rfc3339();
-  match db::upsert_settings(&state.db, settings_kind, &payload, &now).await {
+  match db::upsert_settings(&state.db, SettingsKind::Discussion, &payload, &now)
+    .await
+  {
     Ok(setting) => {
       (StatusCode::OK, Json(json!({ "setting": setting }))).into_response()
     }
@@ -370,29 +334,4 @@ async fn get_current_active_run(state: &AppState) -> Option<RunRecord> {
       None
     }
   }
-}
-
-fn parse_settings_kind_path(value: &str) -> Option<SettingsKind> {
-  match value {
-    "discussion" => Some(SettingsKind::Discussion),
-    "weekly_report" | "weekly-report" => Some(SettingsKind::WeeklyReport),
-    _ => None,
-  }
-}
-
-fn to_settings_kind(kind: &RunKind) -> SettingsKind {
-  match kind {
-    RunKind::Discussion => SettingsKind::Discussion,
-    RunKind::WeeklyReport => SettingsKind::WeeklyReport,
-  }
-}
-
-fn derive_rounds(duration_minutes: u32, interval_seconds: u64) -> u32 {
-  let seconds = u64::from(duration_minutes).saturating_mul(60);
-  if interval_seconds == 0 {
-    return DEFAULT_ROUNDS;
-  }
-
-  let estimate = (seconds / interval_seconds).max(1);
-  estimate.clamp(u64::from(DEFAULT_ROUNDS), u64::from(MAX_ROUNDS)) as u32
 }

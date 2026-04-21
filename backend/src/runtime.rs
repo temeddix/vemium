@@ -1,7 +1,7 @@
 use crate::app_state::AppState;
 use crate::db;
 use crate::error::ReportError;
-use crate::models::{RunEvent, RunKind, RunStatus};
+use crate::models::{RunEvent, RunStatus};
 use anyhow::{Context, anyhow};
 use chrono::Utc;
 use reqwest::Client;
@@ -12,13 +12,15 @@ use uuid::Uuid;
 
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_BETA_WEB_SEARCH: &str = "web-search-2025-03-05";
 const MAX_TOKENS_PER_TURN: u32 = 700;
+const MAX_TOKENS_FINAL_REPORT: u32 = 1500;
 
-const DATA_SCAVENGER_PROMPT: &str = "You are DataScavenger, an internet-source analyst. Focus on concrete facts, catalyst events, source quality, and timeliness.";
-const MACRO_STRATEGIST_PROMPT: &str = "You are MacroStrategist. Focus on macro context, ecosystem forces, and second-order impacts relevant to the topic.";
-const QUANT_ENGINEER_PROMPT: &str = "You are QuantEngineer. Focus on structured reasoning, scenario comparison, and measurable assumptions.";
-const COMPLIANCE_LAWYER_PROMPT: &str = "You are ComplianceLawyer. Focus on regulatory, legal, policy, and governance constraints and uncertainties.";
-const CHIEF_EDITOR_PROMPT: &str = "You are ChiefEditor. Synthesize discussion into a coherent brief with practical recommendations, key risks, and confidence notes.";
+const DATA_SCAVENGER_PROMPT: &str = "You are DataScavenger, an internet-source analyst. Focus on concrete facts, catalyst events, source quality, and timeliness. Use web search to find the latest relevant information.";
+const MACRO_STRATEGIST_PROMPT: &str = "You are MacroStrategist. Focus on macro context, ecosystem forces, and second-order impacts relevant to the topic. Use web search to verify current market conditions.";
+const QUANT_ENGINEER_PROMPT: &str = "You are QuantEngineer. Focus on structured reasoning, scenario comparison, and measurable assumptions. Use web search to find quantitative data.";
+const COMPLIANCE_LAWYER_PROMPT: &str = "You are ComplianceLawyer. Focus on regulatory, legal, policy, and governance constraints and uncertainties. Use web search to find current regulatory developments.";
+const CHIEF_EDITOR_FINAL_REPORT_PROMPT: &str = "You are ChiefEditor writing the final authoritative report for this debate. Produce a well-structured document covering: (1) Executive Summary, (2) Key Findings per perspective, (3) Areas of consensus and disagreement, (4) Final Recommendation with reasoning, (5) Confidence Level, (6) Key Risks to monitor. Be thorough, definitive, and analytical. Use web search to verify any critical facts before finalizing.";
 
 #[derive(Clone, Copy)]
 struct AgentPersona {
@@ -37,7 +39,7 @@ struct RunContext {
   run_forever: bool,
 }
 
-const PERSONAS: [AgentPersona; 5] = [
+const DEBATE_PERSONAS: [AgentPersona; 4] = [
   AgentPersona {
     name: "DataScavenger",
     system_prompt: DATA_SCAVENGER_PROMPT,
@@ -54,11 +56,24 @@ const PERSONAS: [AgentPersona; 5] = [
     name: "ComplianceLawyer",
     system_prompt: COMPLIANCE_LAWYER_PROMPT,
   },
-  AgentPersona {
-    name: "ChiefEditor",
-    system_prompt: CHIEF_EDITOR_PROMPT,
-  },
 ];
+
+const CHIEF_EDITOR: AgentPersona = AgentPersona {
+  name: "ChiefEditor",
+  system_prompt: CHIEF_EDITOR_FINAL_REPORT_PROMPT,
+};
+
+#[derive(Debug, Serialize)]
+struct AnthropicTool {
+  #[serde(rename = "type")]
+  kind: &'static str,
+  name: &'static str,
+}
+
+const WEB_SEARCH_TOOL: AnthropicTool = AnthropicTool {
+  kind: "web_search_20250305",
+  name: "web_search",
+};
 
 #[derive(Debug, Serialize)]
 struct AnthropicMessagesRequest {
@@ -66,6 +81,7 @@ struct AnthropicMessagesRequest {
   max_tokens: u32,
   system: String,
   messages: Vec<AnthropicInputMessage>,
+  tools: Vec<AnthropicTool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,9 +104,9 @@ enum AnthropicOutputBlock {
   Other,
 }
 
-pub fn spawn_run(state: AppState, run_id: Uuid, kind: RunKind) {
+pub fn spawn_run(state: AppState, run_id: Uuid) {
   tokio::spawn(async move {
-    if run_orchestration(&state, run_id, kind)
+    if run_orchestration(&state, run_id)
       .await
       .report()
       .is_none()
@@ -103,7 +119,6 @@ pub fn spawn_run(state: AppState, run_id: Uuid, kind: RunKind) {
 async fn run_orchestration(
   state: &AppState,
   run_id: Uuid,
-  kind: RunKind,
 ) -> anyhow::Result<()> {
   update_status(state, run_id, RunStatus::Running).await;
 
@@ -118,7 +133,7 @@ async fn run_orchestration(
     return Ok(());
   };
 
-  let run_context = load_run_context(state, run_id, &kind).await;
+  let run_context = load_run_context(state, run_id).await;
 
   let client = Client::new();
   let db = &state.db;
@@ -150,73 +165,41 @@ async fn run_orchestration(
       )
     };
 
-    sequence = emit(
-      db,
-      &sender,
-      run_id,
-      sequence,
-      "phase_started",
-      None,
-      &round_label,
-    );
+    sequence = emit(db, &sender, run_id, sequence, "phase_started", None, &round_label);
 
-    for persona in first_round_personas() {
+    for persona in &DEBATE_PERSONAS {
       let turn = request_agent_turn(
         client.clone(),
         state,
-        &kind,
         &run_context,
         "proposal",
+        MAX_TOKENS_PER_TURN,
         *persona,
         &discussion_log,
       )
       .await
       .with_context(|| format!("failed proposal turn for {}", persona.name))?;
 
-      sequence = emit(
-        db,
-        &sender,
-        run_id,
-        sequence,
-        "agent_response_created",
-        Some(persona.name),
-        &turn,
-      );
+      sequence = emit(db, &sender, run_id, sequence, "agent_response_created", Some(persona.name), &turn);
       discussion_log.push((persona.name.to_string(), turn));
     }
 
-    sequence = emit(
-      db,
-      &sender,
-      run_id,
-      sequence,
-      "phase_started",
-      None,
-      "Round moved to critique phase.",
-    );
+    sequence = emit(db, &sender, run_id, sequence, "phase_started", None, "Round moved to critique phase.");
 
-    for persona in first_round_personas() {
+    for persona in &DEBATE_PERSONAS {
       let turn = request_agent_turn(
         client.clone(),
         state,
-        &kind,
         &run_context,
         "critique",
+        MAX_TOKENS_PER_TURN,
         *persona,
         &discussion_log,
       )
       .await
       .with_context(|| format!("failed critique turn for {}", persona.name))?;
 
-      sequence = emit(
-        db,
-        &sender,
-        run_id,
-        sequence,
-        "agent_response_revised",
-        Some(persona.name),
-        &turn,
-      );
+      sequence = emit(db, &sender, run_id, sequence, "agent_response_revised", Some(persona.name), &turn);
       discussion_log.push((persona.name.to_string(), turn));
     }
 
@@ -231,17 +214,7 @@ async fn run_orchestration(
         "Waiting {} seconds before next round.",
         run_context.interval_seconds
       );
-
-      sequence = emit(
-        db,
-        &sender,
-        run_id,
-        sequence,
-        "round_waiting",
-        None,
-        &wait_message,
-      );
-
+      sequence = emit(db, &sender, run_id, sequence, "round_waiting", None, &wait_message);
       sleep(Duration::from_secs(run_context.interval_seconds)).await;
     }
   }
@@ -250,37 +223,23 @@ async fn run_orchestration(
     return Ok(());
   }
 
-  let summary = request_agent_turn(
+  sequence = emit(db, &sender, run_id, sequence, "phase_started", None, "Generating final report.");
+
+  let report = request_agent_turn(
     client,
     state,
-    &kind,
     &run_context,
-    "synthesis",
-    chief_editor_persona(),
+    "final_report",
+    MAX_TOKENS_FINAL_REPORT,
+    CHIEF_EDITOR,
     &discussion_log,
   )
   .await
-  .context("failed synthesis for ChiefEditor")?;
+  .context("failed final report for ChiefEditor")?;
 
-  sequence = emit(
-    db,
-    &sender,
-    run_id,
-    sequence,
-    "synthesis_updated",
-    Some("ChiefEditor"),
-    &summary,
-  );
+  sequence = emit(db, &sender, run_id, sequence, "final_report", Some("ChiefEditor"), &report);
 
-  let _ = emit(
-    db,
-    &sender,
-    run_id,
-    sequence,
-    "run_completed",
-    None,
-    "Run completed successfully.",
-  );
+  let _ = emit(db, &sender, run_id, sequence, "run_completed", None, "Run completed successfully.");
 
   update_status(state, run_id, RunStatus::Completed).await;
 
@@ -324,9 +283,9 @@ fn emit(
 async fn request_agent_turn(
   client: Client,
   state: &AppState,
-  kind: &RunKind,
   run_context: &RunContext,
   phase: &str,
+  max_tokens: u32,
   persona: AgentPersona,
   discussion_log: &[(String, String)],
 ) -> anyhow::Result<String> {
@@ -336,48 +295,53 @@ async fn request_agent_turn(
     .collect::<Vec<String>>()
     .join("\n\n");
 
-  let run_type = match kind {
-    RunKind::Discussion => "discussion",
-    RunKind::WeeklyReport => "weekly_report",
-  };
-
   let background_line = run_context
     .background
     .as_ref()
-    .map(|value| format!("Background: {value}\n"))
+    .map(|v| format!("Background: {v}\n"))
     .unwrap_or_default();
   let instruction_line = run_context
     .instruction
     .as_ref()
-    .map(|value| format!("Instruction: {value}\n"))
+    .map(|v| format!("Instruction: {v}\n"))
     .unwrap_or_default();
+
+  let word_limit = if phase == "final_report" {
+    "Be thorough and comprehensive."
+  } else {
+    "Respond in under 180 words."
+  };
 
   let user_prompt = if transcript.is_empty() {
     format!(
-      "Run kind: {run_type}.\nPhase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}Provide your contribution in under 180 words.",
-      topic = run_context.topic,
-      goal = run_context.goal,
-      instruction = instruction_line,
-      background = background_line
-    )
-  } else {
-    format!(
-      "Run kind: {run_type}.\nPhase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}Prior discussion:\n{transcript}\n\nRespond as {name} in under 180 words.",
+      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}{word_limit}",
       topic = run_context.topic,
       goal = run_context.goal,
       instruction = instruction_line,
       background = background_line,
-      name = persona.name
+    )
+  } else {
+    format!(
+      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}Prior discussion:\n{transcript}\n\nRespond as {name}. {word_limit}",
+      topic = run_context.topic,
+      goal = run_context.goal,
+      instruction = instruction_line,
+      background = background_line,
+      name = persona.name,
     )
   };
 
   let request_body = AnthropicMessagesRequest {
     model: state.anthropic_model.as_ref().clone(),
-    max_tokens: MAX_TOKENS_PER_TURN,
+    max_tokens,
     system: persona.system_prompt.to_string(),
     messages: vec![AnthropicInputMessage {
       role: "user".to_string(),
       content: user_prompt,
+    }],
+    tools: vec![AnthropicTool {
+      kind: WEB_SEARCH_TOOL.kind,
+      name: WEB_SEARCH_TOOL.name,
     }],
   };
 
@@ -385,6 +349,7 @@ async fn request_agent_turn(
     .post(ANTHROPIC_MESSAGES_URL)
     .header("x-api-key", state.anthropic_api_key.as_ref())
     .header("anthropic-version", ANTHROPIC_VERSION)
+    .header("anthropic-beta", ANTHROPIC_BETA_WEB_SEARCH)
     .json(&request_body)
     .send()
     .await
@@ -416,19 +381,7 @@ async fn request_agent_turn(
   Ok(text.trim().to_string())
 }
 
-fn first_round_personas() -> &'static [AgentPersona] {
-  &PERSONAS[..PERSONAS.len().saturating_sub(1)]
-}
-
-fn chief_editor_persona() -> AgentPersona {
-  PERSONAS[PERSONAS.len().saturating_sub(1)]
-}
-
-async fn load_run_context(
-  state: &AppState,
-  run_id: Uuid,
-  kind: &RunKind,
-) -> RunContext {
+async fn load_run_context(state: &AppState, run_id: Uuid) -> RunContext {
   let runs = state.runs.read().await;
   if let Some(run) = runs.get(&run_id) {
     return RunContext {
@@ -444,23 +397,12 @@ async fn load_run_context(
 
   RunContext {
     topic: "general research".to_string(),
-    goal: default_goal_for_kind(kind).to_string(),
+    goal: "Analyze the topic with evidence and produce a balanced recommendation.".to_string(),
     instruction: None,
     background: None,
     interval_seconds: 0,
     rounds: 1,
     run_forever: false,
-  }
-}
-
-fn default_goal_for_kind(kind: &RunKind) -> &'static str {
-  match kind {
-    RunKind::Discussion => {
-      "Analyze the topic with evidence and provide balanced recommendations."
-    }
-    RunKind::WeeklyReport => {
-      "Produce a concise weekly report with major developments, risks, and next actions."
-    }
   }
 }
 
