@@ -1,4 +1,5 @@
 {
+  "editor.formatOnSave": true,
   "[markdown]": {
     "editor.defaultFormatter": "denoland.vscode-deno"
   }

@@ -7,6 +7,11 @@ This repository is a Rust backend web server with a Lit SPA frontend.
 - Backend architecture is REST API only. Do not add server-side template
   rendering.
 - Frontend architecture is SPA only. SEO-oriented SSR or SSG is out of scope.
+- Frontend UI text must be English only.
+- Real-time UI updates must use WebSocket only. Do not implement API polling for
+  live agent events.
+- Client reconnection logic is required when WebSocket disconnects. Use
+  backoff/interval retry attempts for reconnect handling.
 - Keep solutions minimal: remove unnecessary code and reuse existing functions,
   types, and constants before adding new ones.
 - After UI changes, verify behavior in browser tooling and resolve all lint/type
@@ -47,7 +52,14 @@ available.
 ## Web Components
 
 - Build UI with Lit web components.
+- Extend the global interface `HTMLElementTagNameMap` after registering a custom
+  web component. Put it right over the web component declaration.
+- Never use Redux-like state management patterns.
+- If shared state is needed, use Lit provider-consumer patterns.
+- Prefer composition-first UI design over monolithic component structures.
 - Use Web Awesome as the design system and theming foundation.
+- The UI should feel sleek and intentional with the Web Awesome theme system.
+  Use clear typography hierarchy, spacing rhythm, and tokenized color usage.
 - Use CSS variables for theme tokens and visual consistency.
 - Register custom elements with the `te-` prefix.
 - Extend `HTMLElementTagNameMap` for each registered custom element.
@@ -76,6 +88,14 @@ available.
 
 - Use `rem` for typography, spacing, and most layout sizing.
 - Use `px` for borders, fine-grained shadows, and precise one-off pixel control.
+
+## TypeScript Module Structure
+
+- Follow the intro_server-style frontend module organization pattern.
+- Keep a single frontend bundle entry module (for example: `frontend/mod.ts`).
+- Use structured exports with local `mod.ts` files for internal module groups.
+- Use `deno bundle` to produce browser-consumable JavaScript from TypeScript.
+- Keep bundling commands in Deno tasks (for example: `deno task bundle`).
 
 # Backend Guidelines
 

@@ -1,0 +1,1 @@
+import "@/app/web-components";

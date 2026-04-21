@@ -1,0 +1,45 @@
+{
+  "name": "@/app",
+  "exports": {
+    "./context": "./src/context/mod.ts",
+    "./state": "./src/state/mod.ts",
+    "./web-components": "./src/web-components/mod.ts",
+    "./config": "./src/config.ts",
+    "./entry": "./src/entry.ts",
+    "./types": "./src/types.ts",
+    "./utils": "./src/utils.ts"
+  },
+  "tasks": {
+    "bundle": "deno bundle src/entry.ts --output dist/js/bundle.js --minify",
+    "import-check": "deno run -A jsr:@cunarist/deno-circular-deps src/entry.ts"
+  },
+  "compilerOptions": {
+    "lib": ["dom", "es2024"]
+  },
+  "lint": {
+    "plugins": [
+      "jsr:@hugoalh/deno-lint-rules@0.8.3/recommended",
+      "jsr:@ayk/lint-import-order@0.1.0"
+    ],
+    "rules": {
+      "include": [
+        "eqeqeq",
+        "camelcase",
+        "guard-for-in",
+        "no-console",
+        "no-const-assign",
+        "no-eval",
+        "no-external-import",
+        "no-non-null-asserted-optional-chain",
+        "no-non-null-assertion",
+        "no-throw-literal",
+        "prefer-ascii",
+        "verbatim-module-syntax"
+      ]
+    }
+  },
+  "imports": {
+    "lit": "npm:lit@^3.2.0",
+    "@lit/context": "npm:@lit/context@^1.1.0"
+  }
+}

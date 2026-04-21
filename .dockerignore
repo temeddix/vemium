@@ -1,0 +1,8 @@
+.git
+.gitignore
+.vscode
+**/target
+**/node_modules
+**/.DS_Store
+**/*.log
+frontend/deno_dir
