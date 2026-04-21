@@ -13,8 +13,8 @@ use uuid::Uuid;
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA_WEB_SEARCH: &str = "web-search-2025-03-05";
-const MAX_TOKENS_PER_TURN: u32 = 700;
-const MAX_TOKENS_FINAL_REPORT: u32 = 1500;
+const MAX_TOKENS_PER_TURN: u32 = 4096;
+const MAX_TOKENS_FINAL_REPORT: u32 = 8192;
 
 const DATA_SCAVENGER_PROMPT: &str = "You are DataScavenger, an internet-source analyst. Focus on concrete facts, catalyst events, source quality, and timeliness. Use web search to find the latest relevant information.";
 const MACRO_STRATEGIST_PROMPT: &str = "You are MacroStrategist. Focus on macro context, ecosystem forces, and second-order impacts relevant to the topic. Use web search to verify current market conditions.";
@@ -311,7 +311,7 @@ async fn request_agent_turn(
   let word_limit = if phase == "final_report" {
     "Be thorough and comprehensive."
   } else {
-    "Respond in under 180 words."
+    "Respond in under 300 words."
   };
 
   let user_prompt = if transcript.is_empty() {
