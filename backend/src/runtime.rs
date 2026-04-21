@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
+    db,
     models::{RunEvent, RunKind, RunStatus},
 };
 
@@ -117,6 +118,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
     let run_context = load_run_context(state, run_id, &kind).await;
 
     let client = Client::new();
+    let db = &state.db;
 
     let mut sequence = 0_u64;
     let mut discussion_log: Vec<(String, String)> = Vec::new();
@@ -129,6 +131,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
         );
 
         sequence = emit(
+            db,
             &sender,
             run_id,
             sequence,
@@ -151,6 +154,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
             .with_context(|| format!("failed proposal turn for {}", persona.name))?;
 
             sequence = emit(
+                db,
                 &sender,
                 run_id,
                 sequence,
@@ -162,6 +166,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
         }
 
         sequence = emit(
+            db,
             &sender,
             run_id,
             sequence,
@@ -184,6 +189,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
             .with_context(|| format!("failed critique turn for {}", persona.name))?;
 
             sequence = emit(
+                db,
                 &sender,
                 run_id,
                 sequence,
@@ -201,6 +207,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
             );
 
             sequence = emit(
+                db,
                 &sender,
                 run_id,
                 sequence,
@@ -226,6 +233,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
     .context("failed synthesis for ChiefEditor")?;
 
     sequence = emit(
+        db,
         &sender,
         run_id,
         sequence,
@@ -235,6 +243,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
     );
 
     let _ = emit(
+        db,
         &sender,
         run_id,
         sequence,
@@ -249,6 +258,7 @@ async fn run_orchestration(state: &AppState, run_id: Uuid, kind: RunKind) -> any
 }
 
 fn emit(
+    db: &sqlx::SqlitePool,
     sender: &broadcast::Sender<RunEvent>,
     run_id: Uuid,
     previous_sequence: u64,
@@ -265,6 +275,14 @@ fn emit(
         content: content.to_string(),
         timestamp: Utc::now().to_rfc3339(),
     };
+
+    let db_clone = db.clone();
+    let event_clone = event.clone();
+    tokio::spawn(async move {
+        if let Err(error) = db::insert_event(&db_clone, &event_clone).await {
+            warn!(run_id = %run_id, %error, "failed to persist event to database");
+        }
+    });
 
     if sender.send(event).is_err() {
         debug!(run_id = %run_id, "no websocket subscribers for event");
@@ -411,9 +429,15 @@ fn default_goal_for_kind(kind: &RunKind) -> &'static str {
 }
 
 async fn update_status(state: &AppState, run_id: Uuid, status: RunStatus) {
-    let mut runs = state.runs.write().await;
-    if let Some(run) = runs.get_mut(&run_id) {
-        run.status = status;
-        run.updated_at = Utc::now().to_rfc3339();
+    let updated_at = Utc::now().to_rfc3339();
+    {
+        let mut runs = state.runs.write().await;
+        if let Some(run) = runs.get_mut(&run_id) {
+            run.status = status.clone();
+            run.updated_at = updated_at.clone();
+        }
+    }
+    if let Err(error) = db::update_run_status(&state.db, run_id, &status, &updated_at).await {
+        warn!(run_id = %run_id, %error, "failed to persist status update to database");
     }
 }

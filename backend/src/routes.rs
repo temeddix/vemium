@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
+    db,
     models::{CreateRunRequest, CreateRunResponse, RunKind, RunRecord, RunStatus},
     runtime,
 };
@@ -114,6 +115,10 @@ async fn create_run(
     {
         let mut runs = state.runs.write().await;
         runs.insert(run_id, record.clone());
+    }
+
+    if let Err(error) = db::insert_run(&state.db, &record).await {
+        tracing::warn!(run_id = %run_id, %error, "failed to persist run to database");
     }
 
     {

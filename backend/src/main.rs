@@ -1,5 +1,6 @@
 mod app_state;
 mod config;
+mod db;
 mod models;
 mod routes;
 mod runtime;
@@ -19,9 +20,15 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env()?;
     log_model_config(&config);
 
+    let db = db::init_pool(&config.database_url).await?;
+    let initial_runs = db::load_all_runs(&db).await?;
+    info!(count = initial_runs.len(), "loaded runs from database");
+
     let state = AppState::new(
         config.anthropic_api_key.clone(),
         config.anthropic_model.clone(),
+        db,
+        initial_runs,
     );
     let app = build_router(state);
 
