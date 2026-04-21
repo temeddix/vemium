@@ -99,7 +99,7 @@ export class DashboardView extends LitElement {
       align-items: center;
       gap: 0.75rem;
       padding: 0.6rem 1.25rem;
-      border-bottom: 1px solid var(--wa-color-neutral-200);
+      border-bottom: var(--wa-border-width-s) solid var(--wa-color-border-normal);
       flex-shrink: 0;
     }
 
@@ -111,7 +111,7 @@ export class DashboardView extends LitElement {
 
     .app-tagline {
       font-size: 0.8rem;
-      color: var(--wa-color-neutral-600);
+      color: var(--wa-color-text-quiet);
     }
 
     .ws-status {
@@ -122,11 +122,13 @@ export class DashboardView extends LitElement {
     .tabs-wrap {
       flex: 1;
       min-height: 0;
-      overflow: hidden;
+      display: flex;
+      flex-direction: column;
     }
 
     wa-tab-group {
-      height: 100%;
+      flex: 1;
+      min-height: 0;
     }
 
     wa-tab-group::part(base) {
@@ -141,6 +143,10 @@ export class DashboardView extends LitElement {
       overflow: hidden;
     }
 
+    wa-tab-panel {
+      height: 100%;
+    }
+
     wa-tab-panel::part(base) {
       height: 100%;
       padding: 0;
@@ -151,6 +157,7 @@ export class DashboardView extends LitElement {
     .debates-layout {
       display: grid;
       grid-template-columns: 22rem 1fr;
+      grid-template-rows: 1fr;
       height: 100%;
       overflow: hidden;
     }
@@ -158,7 +165,8 @@ export class DashboardView extends LitElement {
     .room-sidebar {
       display: flex;
       flex-direction: column;
-      border-inline-end: 1px solid var(--wa-color-neutral-200);
+      border-inline-end: var(--wa-border-width-s) solid
+        var(--wa-color-border-normal);
       overflow: hidden;
     }
 
@@ -168,7 +176,7 @@ export class DashboardView extends LitElement {
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.1em;
-      color: var(--wa-color-neutral-500);
+      color: var(--wa-color-text-quiet);
       flex-shrink: 0;
     }
 
@@ -187,7 +195,7 @@ export class DashboardView extends LitElement {
       width: 100%;
       text-align: left;
       background: none;
-      border: 1px solid transparent;
+      border: var(--wa-border-width-s) solid transparent;
       border-radius: 0.5rem;
       padding: 0.55rem 0.75rem;
       cursor: pointer;
@@ -198,12 +206,12 @@ export class DashboardView extends LitElement {
     }
 
     .room-btn:hover {
-      background: var(--wa-color-neutral-100);
+      background: var(--wa-color-fill-quiet);
     }
 
     .room-btn.is-active {
-      background: var(--wa-color-primary-50);
-      border-color: var(--wa-color-primary-300);
+      background: var(--wa-color-brand-fill-quiet);
+      border-color: var(--wa-color-brand-border-normal);
     }
 
     .room-title {
@@ -220,13 +228,13 @@ export class DashboardView extends LitElement {
 
     .room-time {
       font-size: 0.72rem;
-      color: var(--wa-color-neutral-500);
+      color: var(--wa-color-text-quiet);
     }
 
     .no-rooms {
       padding: 2rem 1rem;
       text-align: center;
-      color: var(--wa-color-neutral-500);
+      color: var(--wa-color-text-quiet);
       font-size: 0.875rem;
     }
 
@@ -237,23 +245,9 @@ export class DashboardView extends LitElement {
       overflow: hidden;
     }
 
-    .content-header {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.65rem 1.25rem;
-      border-bottom: 1px solid var(--wa-color-neutral-200);
-      flex-shrink: 0;
-    }
-
-    .content-title {
-      margin: 0;
-      font-size: 0.9rem;
-      font-weight: 600;
-    }
-
     .content-body {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 1rem 1.25rem;
       display: grid;
@@ -266,7 +260,7 @@ export class DashboardView extends LitElement {
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.1em;
-      color: var(--wa-color-neutral-500);
+      color: var(--wa-color-text-quiet);
       margin: 0 0 0.5rem;
     }
 
@@ -279,16 +273,17 @@ export class DashboardView extends LitElement {
     }
 
     .event-item {
-      border: 1px solid var(--wa-color-neutral-200);
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
       border-radius: 0.5rem;
       padding: 0.6rem 0.75rem;
+      background: var(--wa-color-surface-raised);
     }
 
     .event-meta {
       display: flex;
       justify-content: space-between;
       font-size: 0.72rem;
-      color: var(--wa-color-neutral-500);
+      color: var(--wa-color-text-quiet);
       margin-bottom: 0.25rem;
     }
 
@@ -302,7 +297,7 @@ export class DashboardView extends LitElement {
     .no-events {
       padding: 2rem;
       text-align: center;
-      color: var(--wa-color-neutral-500);
+      color: var(--wa-color-text-quiet);
       font-size: 0.875rem;
     }
 
@@ -313,16 +308,17 @@ export class DashboardView extends LitElement {
     }
 
     .agent-card {
-      border: 1px solid var(--wa-color-neutral-200);
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
       border-radius: 0.5rem;
       padding: 0.75rem;
+      background: var(--wa-color-surface-raised);
     }
 
     .agent-name {
       margin: 0 0 0.35rem;
       font-size: 0.8rem;
       font-weight: 600;
-      color: var(--wa-color-primary-600);
+      color: var(--wa-color-brand);
     }
 
     .agent-last {
@@ -346,11 +342,12 @@ export class DashboardView extends LitElement {
     }
 
     .settings-card {
-      border: 1px solid var(--wa-color-neutral-200);
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
       border-radius: 0.75rem;
       padding: 1.25rem;
       display: grid;
       gap: 0.875rem;
+      background: var(--wa-color-surface-raised);
     }
 
     .settings-card-title {
@@ -367,7 +364,7 @@ export class DashboardView extends LitElement {
     .field-label {
       font-size: 0.78rem;
       font-weight: 500;
-      color: var(--wa-color-neutral-600);
+      color: var(--wa-color-text-quiet);
     }
 
     .toggle-row {
@@ -386,7 +383,7 @@ export class DashboardView extends LitElement {
     .round-hint {
       margin: 0;
       font-size: 0.72rem;
-      color: var(--wa-color-neutral-500);
+      color: var(--wa-color-text-quiet);
     }
 
     .card-actions {
@@ -399,10 +396,10 @@ export class DashboardView extends LitElement {
       margin-bottom: 1rem;
       padding: 0.6rem 0.75rem;
       border-radius: 0.5rem;
-      border: 1px solid var(--wa-color-primary-300);
-      background: var(--wa-color-primary-50);
+      border: var(--wa-border-width-s) solid var(--wa-color-brand-border-normal);
+      background: var(--wa-color-brand-fill-quiet);
       font-size: 0.875rem;
-      color: var(--wa-color-primary-700);
+      color: var(--wa-color-brand-on-quiet);
     }
 
     @media (max-width: 900px) {
@@ -551,9 +548,6 @@ export class DashboardView extends LitElement {
     }
 
     return html`
-      <div class="content-header">
-        <h2 class="content-title">${this.#roomLabel(state.activeRun)}</h2>
-      </div>
       <div class="content-body">
         <div>
           <p class="section-label">Events</p>
@@ -581,9 +575,7 @@ export class DashboardView extends LitElement {
             html`
               <li class="event-item">
                 <div class="event-meta">
-                  <span>${event.eventType}${event.agent
-                    ? ` - ${event.agent}`
-                    : ""}</span>
+                  <span>${event.agent ? event.agent : "None"}</span>
                   <span>${formatTimestamp(event.timestamp)}</span>
                 </div>
                 <p class="event-text">${event.content}</p>
