@@ -1,6 +1,6 @@
 use crate::models::{RunEvent, RunRecord};
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
@@ -10,6 +10,7 @@ pub struct AppState {
   pub runs: Arc<RwLock<HashMap<Uuid, RunRecord>>>,
   pub active_run_id: Arc<RwLock<Option<Uuid>>>,
   pub run_streams: Arc<RwLock<HashMap<Uuid, broadcast::Sender<RunEvent>>>>,
+  pub cancelled_runs: Arc<RwLock<HashSet<Uuid>>>,
   pub anthropic_api_key: Arc<String>,
   pub anthropic_model: Arc<String>,
   pub db: SqlitePool,
@@ -42,6 +43,7 @@ impl AppState {
       runs: Arc::new(RwLock::new(runs_map)),
       active_run_id: Arc::new(RwLock::new(active_run_id)),
       run_streams: Arc::new(RwLock::new(HashMap::new())),
+      cancelled_runs: Arc::new(RwLock::new(HashSet::new())),
       anthropic_api_key: Arc::new(anthropic_api_key),
       anthropic_model: Arc::new(anthropic_model),
       db,

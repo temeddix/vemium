@@ -32,6 +32,7 @@ pub fn create_router(state: AppState) -> Router {
     .route("/v1/settings/discussion", post(upsert_discussion_settings))
     .route("/v1/runs/discussion", post(create_discussion_run))
     .route("/v1/runs/:run_id", get(get_run))
+    .route("/v1/runs/:run_id/cancel", post(cancel_run))
     .route("/v1/runs/:run_id/stream", get(stream_run_events))
     .fallback_service(
       ServeDir::new("dist")
@@ -66,8 +67,7 @@ async fn create_run(
       .into_response();
   }
 
-  let saved_settings =
-    db::load_settings(&state.db).await.report().flatten();
+  let saved_settings = db::load_settings(&state.db).await.report().flatten();
 
   let run_id = Uuid::new_v4();
   let now = Utc::now().to_rfc3339();
@@ -163,6 +163,30 @@ async fn create_run(
     .into_response()
 }
 
+async fn cancel_run(
+  Path(run_id): Path<Uuid>,
+  State(state): State<AppState>,
+) -> impl IntoResponse {
+  let is_active = {
+    let runs = state.runs.read().await;
+    runs
+      .get(&run_id)
+      .map(|r| matches!(r.status, RunStatus::Queued | RunStatus::Running))
+      .unwrap_or(false)
+  };
+
+  if !is_active {
+    return (
+      StatusCode::CONFLICT,
+      Json(json!({ "error": "Run is not active." })),
+    )
+      .into_response();
+  }
+
+  state.cancelled_runs.write().await.insert(run_id);
+  (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+}
+
 async fn get_run(
   Path(run_id): Path<Uuid>,
   State(state): State<AppState>,
@@ -218,9 +242,7 @@ async fn upsert_discussion_settings(
   Json(payload): Json<UpsertRunSettingsRequest>,
 ) -> impl IntoResponse {
   let now = Utc::now().to_rfc3339();
-  match db::upsert_settings(&state.db, &payload, &now)
-    .await
-  {
+  match db::upsert_settings(&state.db, &payload, &now).await {
     Ok(setting) => {
       (StatusCode::OK, Json(json!({ "setting": setting }))).into_response()
     }

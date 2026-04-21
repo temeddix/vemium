@@ -142,6 +142,16 @@ export class DashboardStore {
     return payload.setting;
   }
 
+  async cancelRun(runId: string): Promise<void> {
+    try {
+      await fetch(`${BACKEND_BASE_URL}/v1/runs/${runId}/cancel`, {
+        method: "POST",
+      });
+    } catch {
+      this.#setState({ errorMessage: "Failed to cancel run." });
+    }
+  }
+
   selectRun(runId: string): void {
     const selectedRun = this.#state.runs.find((run) => run.id === runId);
     if (selectedRun === undefined) {

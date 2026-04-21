@@ -264,6 +264,13 @@ export class DashboardView extends LitElement {
       margin: 0 0 0.5rem;
     }
 
+    .events-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.5rem;
+    }
+
     .event-list {
       margin: 0;
       padding: 0;
@@ -504,12 +511,28 @@ export class DashboardView extends LitElement {
       `;
     }
 
+    const isRunning = st.activeRun !== null &&
+      (st.activeRun.status === "running" || st.activeRun.status === "queued");
+
     return html`
       <div class="content-body">
-        <div>
-          <p class="section-label">Events</p>
-          ${this.#renderEvents(st)}
+        <div class="events-header">
+          <p class="section-label" style="margin:0">Events</p>
+          ${isRunning
+            ? html`
+              <wa-button
+                size="small"
+                variant="danger"
+                @click="${(): void => {
+                  if (st.activeRun) {
+                    this.store.cancelRun(st.activeRun.id);
+                  }
+                }}"
+              >Cancel</wa-button>
+            `
+            : ""}
         </div>
+        ${this.#renderEvents(st)}
         <div>
           <p class="section-label">Agent Snapshot</p>
           <div class="agents-grid">${this.#renderAgents(st)}</div>

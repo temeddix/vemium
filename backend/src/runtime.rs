@@ -13,8 +13,7 @@ use uuid::Uuid;
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA_WEB_SEARCH: &str = "web-search-2025-03-05";
-const MAX_TOKENS_PER_TURN: u32 = 4096;
-const MAX_TOKENS_FINAL_REPORT: u32 = 8192;
+const MAX_TOKENS_PER_TURN: u32 = 8192;
 
 const DATA_SCAVENGER_PROMPT: &str = "You are DataScavenger, an internet-source analyst. Focus on concrete facts, catalyst events, source quality, and timeliness. Use web search to find the latest relevant information.";
 const MACRO_STRATEGIST_PROMPT: &str = "You are MacroStrategist. Focus on macro context, ecosystem forces, and second-order impacts relevant to the topic. Use web search to verify current market conditions.";
@@ -81,6 +80,7 @@ struct AnthropicMessagesRequest {
   max_tokens: u32,
   system: String,
   messages: Vec<AnthropicInputMessage>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   tools: Vec<AnthropicTool>,
 }
 
@@ -106,11 +106,7 @@ enum AnthropicOutputBlock {
 
 pub fn spawn_run(state: AppState, run_id: Uuid) {
   tokio::spawn(async move {
-    if run_orchestration(&state, run_id)
-      .await
-      .report()
-      .is_none()
-    {
+    if run_orchestration(&state, run_id).await.report().is_none() {
       update_status(&state, run_id, RunStatus::Failed).await;
     }
   });
@@ -155,6 +151,11 @@ async fn run_orchestration(
   }
 
   loop {
+    if is_cancelled(state, run_id).await {
+      update_status(state, run_id, RunStatus::Failed).await;
+      return Ok(());
+    }
+
     round_index = round_index.saturating_add(1);
     let round_label = if run_context.run_forever {
       format!("Debate round {round_index} started: proposal phase.")
@@ -165,7 +166,15 @@ async fn run_orchestration(
       )
     };
 
-    sequence = emit(db, &sender, run_id, sequence, "phase_started", None, &round_label);
+    sequence = emit(
+      db,
+      &sender,
+      run_id,
+      sequence,
+      "phase_started",
+      None,
+      &round_label,
+    );
 
     for persona in &DEBATE_PERSONAS {
       let turn = request_agent_turn(
@@ -176,16 +185,37 @@ async fn run_orchestration(
         MAX_TOKENS_PER_TURN,
         *persona,
         &discussion_log,
+        true,
       )
       .await
       .with_context(|| format!("failed proposal turn for {}", persona.name))?;
 
-      sequence = emit(db, &sender, run_id, sequence, "agent_response_created", Some(persona.name), &turn);
+      sequence = emit(
+        db,
+        &sender,
+        run_id,
+        sequence,
+        "agent_response_created",
+        Some(persona.name),
+        &turn,
+      );
       discussion_log.push((persona.name.to_string(), turn));
+      if is_cancelled(state, run_id).await {
+        update_status(state, run_id, RunStatus::Failed).await;
+        return Ok(());
+      }
       sleep(Duration::from_secs(10)).await;
     }
 
-    sequence = emit(db, &sender, run_id, sequence, "phase_started", None, "Round moved to critique phase.");
+    sequence = emit(
+      db,
+      &sender,
+      run_id,
+      sequence,
+      "phase_started",
+      None,
+      "Round moved to critique phase.",
+    );
 
     for persona in &DEBATE_PERSONAS {
       let turn = request_agent_turn(
@@ -196,12 +226,25 @@ async fn run_orchestration(
         MAX_TOKENS_PER_TURN,
         *persona,
         &discussion_log,
+        false,
       )
       .await
       .with_context(|| format!("failed critique turn for {}", persona.name))?;
 
-      sequence = emit(db, &sender, run_id, sequence, "agent_response_revised", Some(persona.name), &turn);
+      sequence = emit(
+        db,
+        &sender,
+        run_id,
+        sequence,
+        "agent_response_revised",
+        Some(persona.name),
+        &turn,
+      );
       discussion_log.push((persona.name.to_string(), turn));
+      if is_cancelled(state, run_id).await {
+        update_status(state, run_id, RunStatus::Failed).await;
+        return Ok(());
+      }
       sleep(Duration::from_secs(10)).await;
     }
 
@@ -216,7 +259,15 @@ async fn run_orchestration(
         "Waiting {} seconds before next round.",
         run_context.interval_seconds
       );
-      sequence = emit(db, &sender, run_id, sequence, "round_waiting", None, &wait_message);
+      sequence = emit(
+        db,
+        &sender,
+        run_id,
+        sequence,
+        "round_waiting",
+        None,
+        &wait_message,
+      );
       sleep(Duration::from_secs(run_context.interval_seconds)).await;
     }
   }
@@ -225,23 +276,48 @@ async fn run_orchestration(
     return Ok(());
   }
 
-  sequence = emit(db, &sender, run_id, sequence, "phase_started", None, "Generating final report.");
+  sequence = emit(
+    db,
+    &sender,
+    run_id,
+    sequence,
+    "phase_started",
+    None,
+    "Generating final report.",
+  );
 
   let report = request_agent_turn(
     client,
     state,
     &run_context,
     "final_report",
-    MAX_TOKENS_FINAL_REPORT,
+    MAX_TOKENS_PER_TURN,
     CHIEF_EDITOR,
     &discussion_log,
+    true,
   )
   .await
   .context("failed final report for ChiefEditor")?;
 
-  sequence = emit(db, &sender, run_id, sequence, "final_report", Some("ChiefEditor"), &report);
+  sequence = emit(
+    db,
+    &sender,
+    run_id,
+    sequence,
+    "final_report",
+    Some("ChiefEditor"),
+    &report,
+  );
 
-  let _ = emit(db, &sender, run_id, sequence, "run_completed", None, "Run completed successfully.");
+  let _ = emit(
+    db,
+    &sender,
+    run_id,
+    sequence,
+    "run_completed",
+    None,
+    "Run completed successfully.",
+  );
 
   update_status(state, run_id, RunStatus::Completed).await;
 
@@ -290,6 +366,7 @@ async fn request_agent_turn(
   max_tokens: u32,
   persona: AgentPersona,
   discussion_log: &[(String, String)],
+  use_web_search: bool,
 ) -> anyhow::Result<String> {
   let transcript = discussion_log
     .iter()
@@ -341,19 +418,26 @@ async fn request_agent_turn(
       role: "user".to_string(),
       content: user_prompt,
     }],
-    tools: vec![AnthropicTool {
-      kind: WEB_SEARCH_TOOL.kind,
-      name: WEB_SEARCH_TOOL.name,
-    }],
+    tools: if use_web_search {
+      vec![AnthropicTool {
+        kind: WEB_SEARCH_TOOL.kind,
+        name: WEB_SEARCH_TOOL.name,
+      }]
+    } else {
+      vec![]
+    },
   };
 
   let mut attempt = 0u32;
   loop {
-    let response = client
+    let mut req = client
       .post(ANTHROPIC_MESSAGES_URL)
       .header("x-api-key", state.anthropic_api_key.as_ref())
-      .header("anthropic-version", ANTHROPIC_VERSION)
-      .header("anthropic-beta", ANTHROPIC_BETA_WEB_SEARCH)
+      .header("anthropic-version", ANTHROPIC_VERSION);
+    if use_web_search {
+      req = req.header("anthropic-beta", ANTHROPIC_BETA_WEB_SEARCH);
+    }
+    let response = req
       .json(&request_body)
       .send()
       .await
@@ -362,7 +446,9 @@ async fn request_agent_turn(
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
       attempt += 1;
       if attempt > 5 {
-        return Err(anyhow!("Anthropic rate limit exceeded after {attempt} retries"));
+        return Err(anyhow!(
+          "Anthropic rate limit exceeded after {attempt} retries"
+        ));
       }
       let wait = 30 * attempt;
       tracing::warn!(attempt, wait_secs = wait, "rate limited, retrying");
@@ -413,13 +499,19 @@ async fn load_run_context(state: &AppState, run_id: Uuid) -> RunContext {
 
   RunContext {
     topic: "general research".to_string(),
-    goal: "Analyze the topic with evidence and produce a balanced recommendation.".to_string(),
+    goal:
+      "Analyze the topic with evidence and produce a balanced recommendation."
+        .to_string(),
     instruction: None,
     background: None,
     interval_seconds: 0,
     rounds: 1,
     run_forever: false,
   }
+}
+
+async fn is_cancelled(state: &AppState, run_id: Uuid) -> bool {
+  state.cancelled_runs.read().await.contains(&run_id)
 }
 
 async fn update_status(state: &AppState, run_id: Uuid, status: RunStatus) {
