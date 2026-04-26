@@ -6,7 +6,8 @@ use std::net::SocketAddr;
 pub struct AppConfig {
   pub bind_addr: SocketAddr,
   pub anthropic_api_key: String,
-  pub anthropic_model: String,
+  pub anthropic_high_model: String,
+  pub anthropic_low_model: String,
   pub database_url: String,
 }
 
@@ -21,13 +22,15 @@ impl AppConfig {
 
     let anthropic_api_key =
       env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is required")?;
-    let anthropic_model = "claude-sonnet-4-6".to_string();
+    let anthropic_high_model = "claude-sonnet-4-6".to_string();
+    let anthropic_low_model = "claude-haiku-4-5".to_string();
     let database_url = "sqlite:///data/vemium.db".to_string();
 
     Ok(Self {
       bind_addr,
       anthropic_api_key,
-      anthropic_model,
+      anthropic_high_model,
+      anthropic_low_model,
       database_url,
     })
   }

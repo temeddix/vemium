@@ -5,6 +5,7 @@ mod error;
 mod models;
 mod routes;
 mod runtime;
+mod scheduler;
 
 use crate::app_state::AppState;
 use crate::config::AppConfig;
@@ -28,12 +29,14 @@ async fn main() -> Result<()> {
 
   let state = AppState::new(
     config.anthropic_api_key.clone(),
-    config.anthropic_model.clone(),
+    config.anthropic_high_model.clone(),
+    config.anthropic_low_model.clone(),
     db,
     initial_runs,
   );
 
   restore_active_run(&state).await;
+  scheduler::spawn_room_scheduler(state.clone());
 
   let app = build_router(state);
 
@@ -64,7 +67,8 @@ fn build_router(state: AppState) -> Router {
 fn log_model_config(config: &AppConfig) {
   tracing::info!(
       anthropic = "set",
-      model = %config.anthropic_model,
+      high_model = %config.anthropic_high_model,
+      low_model = %config.anthropic_low_model,
       "anthropic configuration loaded"
   );
 }

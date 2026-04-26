@@ -17,11 +17,8 @@ use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
-const DEFAULT_INTERVAL_SECONDS: u64 = 0;
-const DEFAULT_AUTORUN_INTERVAL_SECONDS: u64 = 60;
-const DEFAULT_ROUNDS: u32 = 1;
-const MAX_INTERVAL_SECONDS: u64 = 86_400;
-const MAX_ROUNDS: u32 = 24;
+const DEFAULT_DISCUSSION_CYCLES: u32 = 16;
+const MAX_DISCUSSION_CYCLES: u32 = 120;
 
 pub fn create_router(state: AppState) -> Router {
   Router::new()
@@ -55,18 +52,39 @@ async fn create_discussion_run(
   payload: Option<Json<CreateRunRequest>>,
 ) -> impl IntoResponse {
   let request = payload.map(|Json(body)| body).unwrap_or_default();
-  create_run(state, request).await
+  create_run(state, request, false).await
 }
 
 async fn create_run(
   state: AppState,
   request: CreateRunRequest,
+  force_new_room: bool,
 ) -> impl IntoResponse {
-  if let Some(active_run) = get_current_active_run(&state).await {
-    return (StatusCode::OK, Json(CreateRunResponse { run: active_run }))
-      .into_response();
+  if !force_new_room {
+    if let Some(active_run) = get_current_active_run(&state).await {
+      return (StatusCode::OK, Json(CreateRunResponse { run: active_run }))
+        .into_response();
+    }
   }
 
+  let record = build_and_start_run(state, request).await;
+
+  (
+    StatusCode::ACCEPTED,
+    Json(CreateRunResponse { run: record }),
+  )
+    .into_response()
+}
+
+pub async fn create_scheduled_room(state: AppState) -> Option<RunRecord> {
+  let request = CreateRunRequest::default();
+  Some(build_and_start_run(state, request).await)
+}
+
+async fn build_and_start_run(
+  state: AppState,
+  request: CreateRunRequest,
+) -> RunRecord {
   let saved_settings = db::load_settings(&state.db).await.report().flatten();
 
   let run_id = Uuid::new_v4();
@@ -96,29 +114,13 @@ async fn create_run(
     .or_else(|| saved_settings.as_ref().map(|s| s.instruction.clone()))
     .map(|v| v.trim().to_string())
     .filter(|v| !v.is_empty());
-  let run_forever = request
-    .run_forever
-    .or_else(|| saved_settings.as_ref().map(|s| s.autorun))
-    .unwrap_or(false);
-  let interval_seconds = request
-    .interval_seconds
-    .or_else(|| {
-      saved_settings
-        .as_ref()
-        .map(|s| u64::from(s.interval_minutes) * 60)
-    })
-    .map(|v| v.min(MAX_INTERVAL_SECONDS))
-    .unwrap_or(DEFAULT_INTERVAL_SECONDS);
-  let interval_seconds = if run_forever && interval_seconds == 0 {
-    DEFAULT_AUTORUN_INTERVAL_SECONDS
-  } else {
-    interval_seconds
-  };
-  let rounds = request
-    .rounds
-    .or_else(|| saved_settings.as_ref().map(|s| s.turns))
-    .map(|v| v.clamp(DEFAULT_ROUNDS, MAX_ROUNDS))
-    .unwrap_or(DEFAULT_ROUNDS);
+  let run_forever = request.run_forever.unwrap_or(false);
+  let interval_seconds = request.interval_seconds.unwrap_or(0);
+  let discussion_cycles = request
+    .discussion_cycles
+    .or_else(|| saved_settings.as_ref().map(|s| s.discussion_cycles))
+    .map(|v| v.clamp(1, MAX_DISCUSSION_CYCLES))
+    .unwrap_or(DEFAULT_DISCUSSION_CYCLES);
 
   let record = RunRecord {
     id: run_id,
@@ -128,7 +130,7 @@ async fn create_run(
     instruction,
     background,
     interval_seconds,
-    rounds,
+    discussion_cycles,
     run_forever,
     created_at: now.clone(),
     updated_at: now,
@@ -156,11 +158,7 @@ async fn create_run(
 
   runtime::spawn_run(state, run_id);
 
-  (
-    StatusCode::ACCEPTED,
-    Json(CreateRunResponse { run: record }),
-  )
-    .into_response()
+  record
 }
 
 async fn cancel_run(
@@ -225,16 +223,16 @@ async fn list_runs(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
-  match db::load_all_settings(&state.db).await {
-    Ok(settings) => {
-      (StatusCode::OK, Json(RunSettingsResponse { settings })).into_response()
-    }
-    Err(_) => (
-      StatusCode::INTERNAL_SERVER_ERROR,
-      Json(json!({ "error": "Failed to load settings." })),
-    )
-      .into_response(),
+  if let Some(settings) = db::load_all_settings(&state.db).await.report() {
+    return (StatusCode::OK, Json(RunSettingsResponse { settings }))
+      .into_response();
   }
+
+  (
+    StatusCode::INTERNAL_SERVER_ERROR,
+    Json(json!({ "error": "Failed to load settings." })),
+  )
+    .into_response()
 }
 
 async fn upsert_discussion_settings(
@@ -242,16 +240,19 @@ async fn upsert_discussion_settings(
   Json(payload): Json<UpsertRunSettingsRequest>,
 ) -> impl IntoResponse {
   let now = Utc::now().to_rfc3339();
-  match db::upsert_settings(&state.db, &payload, &now).await {
-    Ok(setting) => {
-      (StatusCode::OK, Json(json!({ "setting": setting }))).into_response()
-    }
-    Err(_) => (
-      StatusCode::INTERNAL_SERVER_ERROR,
-      Json(json!({ "error": "Failed to save settings." })),
-    )
-      .into_response(),
+  if let Some(setting) = db::upsert_settings(&state.db, &payload, &now)
+    .await
+    .report()
+  {
+    return (StatusCode::OK, Json(json!({ "setting": setting })))
+      .into_response();
   }
+
+  (
+    StatusCode::INTERNAL_SERVER_ERROR,
+    Json(json!({ "error": "Failed to save settings." })),
+  )
+    .into_response()
 }
 
 async fn stream_run_events(

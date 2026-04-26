@@ -33,7 +33,7 @@ pub async fn insert_run(pool: &SqlitePool, run: &RunRecord) -> Result<()> {
   let id = run.id.to_string();
   let status = run_status_to_str(&run.status);
   let interval = run.interval_seconds as i64;
-  let rounds = run.rounds as i64;
+  let rounds = run.discussion_cycles as i64;
   let run_forever = bool_to_sqlite(run.run_forever);
 
   sqlx::query(
@@ -140,7 +140,7 @@ pub async fn load_all_runs(pool: &SqlitePool) -> Result<Vec<RunRecord>> {
         .try_get("background")
         .context("runs.background: invalid value")?,
       interval_seconds: interval_seconds as u64,
-      rounds: rounds as u32,
+      discussion_cycles: rounds as u32,
       run_forever: sqlite_to_bool(run_forever),
       created_at: row
         .try_get("created_at")
@@ -205,8 +205,8 @@ pub async fn load_all_settings(
   pool: &SqlitePool,
 ) -> Result<Vec<RunLaunchSettings>> {
   let rows = sqlx::query(
-    "SELECT kind, topic, goal, instruction, background, interval_minutes, \
-     turns, autorun, updated_at FROM run_settings ORDER BY kind ASC",
+    "SELECT kind, topic, goal, instruction, background, chat_turns, \
+     schedule_cron, updated_at FROM run_settings ORDER BY kind ASC",
   )
   .fetch_all(pool)
   .await
@@ -214,15 +214,9 @@ pub async fn load_all_settings(
 
   let mut settings = Vec::with_capacity(rows.len());
   for row in rows {
-    let interval_minutes: i64 = row
-      .try_get("interval_minutes")
-      .context("run_settings.interval_minutes: invalid value")?;
-    let turns: i64 = row
-      .try_get("turns")
-      .context("run_settings.turns: invalid value")?;
-    let autorun: i64 = row
-      .try_get("autorun")
-      .context("run_settings.autorun: invalid value")?;
+    let discussion_cycles: i64 = row
+      .try_get("chat_turns")
+      .context("run_settings.chat_turns: invalid value")?;
 
     settings.push(RunLaunchSettings {
       topic: row
@@ -237,9 +231,10 @@ pub async fn load_all_settings(
       background: row
         .try_get("background")
         .context("run_settings.background: invalid value")?,
-      interval_minutes: interval_minutes as u32,
-      turns: turns as u32,
-      autorun: sqlite_to_bool(autorun),
+      discussion_cycles: discussion_cycles as u32,
+      room_schedule: row
+        .try_get("schedule_cron")
+        .context("run_settings.schedule_cron: invalid value")?,
       updated_at: row
         .try_get("updated_at")
         .context("run_settings.updated_at: invalid value")?,
@@ -254,18 +249,16 @@ pub async fn upsert_settings(
   request: &UpsertRunSettingsRequest,
   updated_at: &str,
 ) -> Result<RunLaunchSettings> {
-  let interval_minutes = request.interval_minutes as i64;
-  let turns = request.turns as i64;
-  let autorun = bool_to_sqlite(request.autorun);
+  let discussion_cycles = request.discussion_cycles as i64;
 
   sqlx::query(
     "INSERT INTO run_settings \
-     (kind, topic, goal, instruction, background, interval_minutes, turns, autorun, updated_at) \
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+      (kind, topic, goal, instruction, background, interval_minutes, turns, autorun, chat_turns, schedule_cron, updated_at) \
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
      ON CONFLICT(kind) DO UPDATE SET \
      topic=excluded.topic, goal=excluded.goal, instruction=excluded.instruction, \
-     background=excluded.background, interval_minutes=excluded.interval_minutes, \
-     turns=excluded.turns, autorun=excluded.autorun, \
+     background=excluded.background, chat_turns=excluded.chat_turns, \
+     schedule_cron=excluded.schedule_cron, \
      updated_at=excluded.updated_at",
   )
   .bind("discussion")
@@ -273,9 +266,11 @@ pub async fn upsert_settings(
   .bind(&request.goal)
   .bind(&request.instruction)
   .bind(&request.background)
-  .bind(interval_minutes)
-  .bind(turns)
-  .bind(autorun)
+  .bind(0_i64)
+  .bind(discussion_cycles)
+  .bind(0_i64)
+  .bind(discussion_cycles)
+  .bind(&request.room_schedule)
   .bind(updated_at)
   .execute(pool)
   .await
@@ -286,9 +281,8 @@ pub async fn upsert_settings(
     goal: request.goal.clone(),
     instruction: request.instruction.clone(),
     background: request.background.clone(),
-    interval_minutes: request.interval_minutes,
-    turns: request.turns,
-    autorun: request.autorun,
+    discussion_cycles: request.discussion_cycles,
+    room_schedule: request.room_schedule.clone(),
     updated_at: updated_at.to_string(),
   })
 }
@@ -297,8 +291,8 @@ pub async fn load_settings(
   pool: &SqlitePool,
 ) -> Result<Option<RunLaunchSettings>> {
   let row = sqlx::query(
-    "SELECT topic, goal, instruction, background, interval_minutes, \
-     turns, autorun, updated_at FROM run_settings WHERE kind = 'discussion'",
+    "SELECT topic, goal, instruction, background, chat_turns, \
+     schedule_cron, updated_at FROM run_settings WHERE kind = 'discussion'",
   )
   .fetch_optional(pool)
   .await
@@ -308,15 +302,9 @@ pub async fn load_settings(
     return Ok(None);
   };
 
-  let interval_minutes: i64 = row
-    .try_get("interval_minutes")
-    .context("run_settings.interval_minutes: invalid value")?;
-  let turns: i64 = row
-    .try_get("turns")
-    .context("run_settings.turns: invalid value")?;
-  let autorun: i64 = row
-    .try_get("autorun")
-    .context("run_settings.autorun: invalid value")?;
+  let discussion_cycles: i64 = row
+    .try_get("chat_turns")
+    .context("run_settings.chat_turns: invalid value")?;
 
   Ok(Some(RunLaunchSettings {
     topic: row
@@ -331,9 +319,10 @@ pub async fn load_settings(
     background: row
       .try_get("background")
       .context("run_settings.background: invalid value")?,
-    interval_minutes: interval_minutes as u32,
-    turns: turns as u32,
-    autorun: sqlite_to_bool(autorun),
+    discussion_cycles: discussion_cycles as u32,
+    room_schedule: row
+      .try_get("schedule_cron")
+      .context("run_settings.schedule_cron: invalid value")?,
     updated_at: row
       .try_get("updated_at")
       .context("run_settings.updated_at: invalid value")?,
@@ -366,4 +355,3 @@ fn bool_to_sqlite(value: bool) -> i64 {
 fn sqlite_to_bool(value: i64) -> bool {
   value != 0
 }
-

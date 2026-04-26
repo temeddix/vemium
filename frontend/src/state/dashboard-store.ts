@@ -218,13 +218,19 @@ export class DashboardStore {
       next.background = request.background.trim();
     }
     if (
-      request.intervalSeconds !== undefined &&
-      Number.isFinite(request.intervalSeconds)
+      request.discussionCycles !== undefined &&
+      Number.isFinite(request.discussionCycles)
     ) {
-      next.intervalSeconds = Math.max(0, Math.floor(request.intervalSeconds));
+      next.discussionCycles = Math.max(
+        1,
+        Math.floor(request.discussionCycles),
+      );
+    }
+    if (request.chatTurns !== undefined && Number.isFinite(request.chatTurns)) {
+      next.discussionCycles = Math.max(1, Math.floor(request.chatTurns));
     }
     if (request.rounds !== undefined && Number.isFinite(request.rounds)) {
-      next.rounds = Math.max(1, Math.floor(request.rounds));
+      next.discussionCycles = Math.max(1, Math.floor(request.rounds));
     }
     if (request.runForever !== undefined) {
       next.runForever = request.runForever;

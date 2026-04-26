@@ -17,9 +17,8 @@ interface RunSettingsForm {
   goal: string;
   instruction: string;
   background: string;
-  intervalMinutes: number;
-  turns: number;
-  autorun: boolean;
+  discussionCycles: number;
+  roomSchedule: string;
 }
 
 const EMPTY_SETTINGS: RunSettingsForm = {
@@ -27,9 +26,8 @@ const EMPTY_SETTINGS: RunSettingsForm = {
   goal: "",
   instruction: "",
   background: "",
-  intervalMinutes: 0,
-  turns: 1,
-  autorun: false,
+  discussionCycles: 16,
+  roomSchedule: "",
 };
 
 function mdSlot(content: string) {
@@ -46,17 +44,6 @@ function readInputValue(target: EventTarget | null): string | null {
   }
   const val = (target as Record<string, unknown>)["value"];
   return typeof val === "string" ? val : null;
-}
-
-function readChecked(target: EventTarget | null): boolean | null {
-  if (!(target instanceof HTMLElement)) {
-    return null;
-  }
-  if (!("checked" in target)) {
-    return null;
-  }
-  const val = (target as Record<string, unknown>)["checked"];
-  return typeof val === "boolean" ? val : null;
 }
 
 declare global {
@@ -562,7 +549,7 @@ export class DashboardView extends LitElement {
                 : ""}">
                 <wa-card>
                   <div class="event-meta">
-                    <span>${event.agent ?? "None"}</span>
+                    <span>${event.agent ?? ""}</span>
                     <span>${formatTimestamp(event.timestamp)}</span>
                   </div>
                   <wa-markdown class="event-text">${mdSlot(
@@ -655,37 +642,26 @@ export class DashboardView extends LitElement {
 
           <div class="numeric-row">
             <label class="field">
-              <span class="field-label">Interval (minutes)</span>
-              <wa-input
-                type="number"
-                size="small"
-                min="0"
-                .value="${String(s.intervalMinutes)}"
-                @input="${(e: InputEvent): void =>
-                  this.#onNumberField("intervalMinutes", e, 0)}"
-              ></wa-input>
-            </label>
-
-            <label class="field">
-              <span class="field-label">Turns</span>
+              <span class="field-label">Discussion Cycles</span>
               <wa-input
                 type="number"
                 size="small"
                 min="1"
-                .value="${String(s.turns)}"
+                .value="${String(s.discussionCycles)}"
                 @input="${(e: InputEvent): void =>
-                  this.#onNumberField("turns", e, 1)}"
+                  this.#onNumberField("discussionCycles", e, 1)}"
               ></wa-input>
             </label>
-          </div>
 
-          <div class="toggle-row">
-            <wa-checkbox
-              .checked="${s.autorun}"
-              @change="${(e: Event): void => this.#onAutorun(e)}"
-            >
-              Autorun
-            </wa-checkbox>
+            <label class="field">
+              <span class="field-label">Room Schedule (cron, optional)</span>
+              <wa-input
+                size="small"
+                .value="${s.roomSchedule}"
+                @input="${(e: InputEvent): void =>
+                  this.#onTextField("roomSchedule", e)}"
+              ></wa-input>
+            </label>
           </div>
         </div>
 
@@ -731,9 +707,8 @@ export class DashboardView extends LitElement {
           goal: s.goal,
           instruction: s.instruction,
           background: s.background,
-          intervalMinutes: s.intervalMinutes,
-          turns: s.turns,
-          autorun: s.autorun,
+          discussionCycles: s.discussionCycles,
+          roomSchedule: s.roomSchedule,
         };
       }
     } catch {
@@ -742,7 +717,12 @@ export class DashboardView extends LitElement {
   }
 
   #onTextField(
-    field: "topic" | "goal" | "instruction" | "background",
+    field:
+      | "topic"
+      | "goal"
+      | "instruction"
+      | "background"
+      | "roomSchedule",
     event: InputEvent,
   ): void {
     const value = readInputValue(event.target);
@@ -753,7 +733,7 @@ export class DashboardView extends LitElement {
   }
 
   #onNumberField(
-    field: "intervalMinutes" | "turns",
+    field: "discussionCycles",
     event: InputEvent,
     minValue: number,
   ): void {
@@ -766,14 +746,6 @@ export class DashboardView extends LitElement {
       ? Math.max(minValue, parsed)
       : minValue;
     this.settings = { ...this.settings, [field]: value };
-  }
-
-  #onAutorun(event: Event): void {
-    const checked = readChecked(event.target);
-    if (checked === null) {
-      return;
-    }
-    this.settings = { ...this.settings, autorun: checked };
   }
 
   async #saveSettings(): Promise<void> {
@@ -795,9 +767,8 @@ export class DashboardView extends LitElement {
       goal: this.settings.goal,
       instruction: this.settings.instruction,
       background: this.settings.background,
-      intervalMinutes: this.settings.intervalMinutes,
-      turns: this.settings.turns,
-      autorun: this.settings.autorun,
+      discussionCycles: this.settings.discussionCycles,
+      roomSchedule: this.settings.roomSchedule,
     };
   }
 
@@ -807,9 +778,7 @@ export class DashboardView extends LitElement {
       goal: this.settings.goal,
       instruction: this.settings.instruction,
       background: this.settings.background,
-      intervalSeconds: this.settings.intervalMinutes * 60,
-      rounds: this.settings.turns,
-      runForever: this.settings.autorun,
+      discussionCycles: this.settings.discussionCycles,
     };
   }
 

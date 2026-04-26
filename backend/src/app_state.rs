@@ -12,14 +12,16 @@ pub struct AppState {
   pub run_streams: Arc<RwLock<HashMap<Uuid, broadcast::Sender<RunEvent>>>>,
   pub cancelled_runs: Arc<RwLock<HashSet<Uuid>>>,
   pub anthropic_api_key: Arc<String>,
-  pub anthropic_model: Arc<String>,
+  pub anthropic_high_model: Arc<String>,
+  pub anthropic_low_model: Arc<String>,
   pub db: SqlitePool,
 }
 
 impl AppState {
   pub fn new(
     anthropic_api_key: String,
-    anthropic_model: String,
+    anthropic_high_model: String,
+    anthropic_low_model: String,
     db: SqlitePool,
     initial_runs: Vec<RunRecord>,
   ) -> Self {
@@ -45,7 +47,8 @@ impl AppState {
       run_streams: Arc::new(RwLock::new(HashMap::new())),
       cancelled_runs: Arc::new(RwLock::new(HashSet::new())),
       anthropic_api_key: Arc::new(anthropic_api_key),
-      anthropic_model: Arc::new(anthropic_model),
+      anthropic_high_model: Arc::new(anthropic_high_model),
+      anthropic_low_model: Arc::new(anthropic_low_model),
       db,
     }
   }

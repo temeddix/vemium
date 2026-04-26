@@ -20,7 +20,8 @@ pub struct RunRecord {
   pub instruction: Option<String>,
   pub background: Option<String>,
   pub interval_seconds: u64,
-  pub rounds: u32,
+  #[serde(alias = "rounds")]
+  pub discussion_cycles: u32,
   pub run_forever: bool,
   pub created_at: String,
   pub updated_at: String,
@@ -34,7 +35,8 @@ pub struct CreateRunRequest {
   pub instruction: Option<String>,
   pub background: Option<String>,
   pub interval_seconds: Option<u64>,
-  pub rounds: Option<u32>,
+  #[serde(alias = "chatTurns", alias = "rounds")]
+  pub discussion_cycles: Option<u32>,
   pub run_forever: Option<bool>,
 }
 
@@ -45,9 +47,10 @@ pub struct RunLaunchSettings {
   pub goal: String,
   pub instruction: String,
   pub background: String,
-  pub interval_minutes: u32,
-  pub turns: u32,
-  pub autorun: bool,
+  #[serde(alias = "chatTurns")]
+  pub discussion_cycles: u32,
+  #[serde(alias = "scheduleCron")]
+  pub room_schedule: String,
   pub updated_at: String,
 }
 
@@ -58,9 +61,10 @@ pub struct UpsertRunSettingsRequest {
   pub goal: String,
   pub instruction: String,
   pub background: String,
-  pub interval_minutes: u32,
-  pub turns: u32,
-  pub autorun: bool,
+  #[serde(alias = "chatTurns")]
+  pub discussion_cycles: u32,
+  #[serde(alias = "scheduleCron")]
+  pub room_schedule: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

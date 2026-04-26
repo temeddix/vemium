@@ -31,7 +31,8 @@ export interface StartRunRequest {
   goal?: string;
   instruction?: string;
   background?: string;
-  intervalSeconds?: number;
+  discussionCycles?: number;
+  chatTurns?: number;
   rounds?: number;
   runForever?: boolean;
 }
@@ -41,9 +42,8 @@ export interface RunSettings {
   goal: string;
   instruction: string;
   background: string;
-  intervalMinutes: number;
-  turns: number;
-  autorun: boolean;
+  discussionCycles: number;
+  roomSchedule: string;
   updatedAt: string;
 }
 
@@ -56,9 +56,8 @@ export interface SaveRunSettingsRequest {
   goal: string;
   instruction: string;
   background: string;
-  intervalMinutes: number;
-  turns: number;
-  autorun: boolean;
+  discussionCycles: number;
+  roomSchedule: string;
 }
 
 export interface SaveRunSettingsResponse {

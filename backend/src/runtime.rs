@@ -13,18 +13,10 @@ use uuid::Uuid;
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA_WEB_SEARCH: &str = "web-search-2025-03-05";
-const MAX_TOKENS_PER_TURN: u32 = 8192;
-const NON_FINAL_WORD_GUIDANCE: &str =
-  include_str!("prompts/non_final_word_guidance.md");
-
-const DATA_SCAVENGER_PROMPT: &str = include_str!("prompts/data_scavenger.md");
-const MACRO_STRATEGIST_PROMPT: &str =
-  include_str!("prompts/macro_strategist.md");
-const QUANT_ENGINEER_PROMPT: &str = include_str!("prompts/quant_engineer.md");
-const COMPLIANCE_LAWYER_PROMPT: &str =
-  include_str!("prompts/compliance_lawyer.md");
-const CHIEF_EDITOR_FINAL_REPORT_PROMPT: &str =
-  include_str!("prompts/chief_editor_final_report.md");
+const RESEARCH_MAX_TOKENS: u32 = 8192;
+const CHAT_MAX_TOKENS: u32 = 256;
+const REPORT_MAX_TOKENS: u32 = 4096;
+const CHAT_INTERVAL_SECONDS: u64 = 5;
 
 #[derive(Clone, Copy)]
 struct AgentPersona {
@@ -38,13 +30,12 @@ struct RunContext {
   goal: String,
   instruction: Option<String>,
   background: Option<String>,
-  interval_seconds: u64,
-  rounds: u32,
-  run_forever: bool,
+  discussion_cycles: u32,
 }
 
 struct AgentTurnRequest<'a> {
   phase: &'a str,
+  model: &'a str,
   max_tokens: u32,
   persona: AgentPersona,
   discussion_log: &'a [(String, String)],
@@ -53,22 +44,27 @@ struct AgentTurnRequest<'a> {
 
 const DEBATE_PERSONAS: [AgentPersona; 4] = [
   AgentPersona {
-    name: "DataScavenger",
-    system_prompt: DATA_SCAVENGER_PROMPT,
+    name: "Data Scavenger",
+    system_prompt: include_str!("prompts/data_scavenger.md"),
   },
   AgentPersona {
-    name: "MacroStrategist",
-    system_prompt: MACRO_STRATEGIST_PROMPT,
+    name: "Macro Strategist",
+    system_prompt: include_str!("prompts/macro_strategist.md"),
   },
   AgentPersona {
-    name: "QuantEngineer",
-    system_prompt: QUANT_ENGINEER_PROMPT,
+    name: "Quant Engineer",
+    system_prompt: include_str!("prompts/quant_engineer.md"),
   },
   AgentPersona {
-    name: "ComplianceLawyer",
-    system_prompt: COMPLIANCE_LAWYER_PROMPT,
+    name: "Compliance Lawyer",
+    system_prompt: include_str!("prompts/compliance_lawyer.md"),
   },
 ];
+
+const INTERNET_RESEARCHER: AgentPersona = AgentPersona {
+  name: "Internet Researcher",
+  system_prompt: include_str!("prompts/initial_internet_research.md"),
+};
 
 #[derive(Debug, Serialize)]
 struct AnthropicTool {
@@ -138,154 +134,99 @@ async fn run_orchestration(
   };
 
   let run_context = load_run_context(state, run_id).await;
+  let high_model = state.anthropic_high_model.as_ref().clone();
+  let low_model = state.anthropic_low_model.as_ref().clone();
 
   let client = Client::new();
   let db = &state.db;
 
   let mut sequence = 0_u64;
   let mut discussion_log: Vec<(String, String)> = Vec::new();
-  let mut round_index: u64 = 0;
+  sequence = emit(
+    db,
+    &sender,
+    run_id,
+    sequence,
+    "phase_started",
+    None,
+    "Collecting internet research.",
+  );
 
-  if run_context.run_forever {
-    sequence = emit(
-      db,
-      &sender,
-      run_id,
-      sequence,
-      "run_mode",
-      None,
-      "Run configured to continue indefinitely.",
-    );
-  }
+  let research = request_agent_turn(
+    client.clone(),
+    state,
+    &run_context,
+    AgentTurnRequest {
+      phase: "initial_research",
+      model: &high_model,
+      max_tokens: RESEARCH_MAX_TOKENS,
+      persona: INTERNET_RESEARCHER,
+      discussion_log: &discussion_log,
+      use_web_search: true,
+    },
+  )
+  .await
+  .context("failed initial research turn")?;
 
-  loop {
+  sequence = emit(
+    db,
+    &sender,
+    run_id,
+    sequence,
+    "initial_research",
+    Some(INTERNET_RESEARCHER.name),
+    &research,
+  );
+  discussion_log.push((INTERNET_RESEARCHER.name.to_string(), research));
+
+  sequence = emit(
+    db,
+    &sender,
+    run_id,
+    sequence,
+    "phase_started",
+    None,
+    "Starting short chat loop.",
+  );
+
+  let discussion_cycles = run_context.discussion_cycles.max(1);
+  for index in 0..discussion_cycles {
     if is_cancelled(state, run_id).await {
       update_status(state, run_id, RunStatus::Failed).await;
       return Ok(());
     }
 
-    round_index = round_index.saturating_add(1);
-    let round_label = if run_context.run_forever {
-      format!("Debate round {round_index} started: proposal phase.")
-    } else {
-      format!(
-        "Debate round {}/{} started: proposal phase.",
-        round_index, run_context.rounds
-      )
-    };
+    let persona = DEBATE_PERSONAS[(index as usize) % DEBATE_PERSONAS.len()];
+    let turn = request_agent_turn(
+      client.clone(),
+      state,
+      &run_context,
+      AgentTurnRequest {
+        phase: "chat",
+        model: &low_model,
+        max_tokens: CHAT_MAX_TOKENS,
+        persona,
+        discussion_log: &discussion_log,
+        use_web_search: false,
+      },
+    )
+    .await
+    .with_context(|| format!("failed short chat turn for {}", persona.name))?;
 
     sequence = emit(
       db,
       &sender,
       run_id,
       sequence,
-      "phase_started",
-      None,
-      &round_label,
+      "agent_chat",
+      Some(persona.name),
+      &turn,
     );
+    discussion_log.push((persona.name.to_string(), turn));
 
-    for persona in &DEBATE_PERSONAS {
-      let turn = request_agent_turn(
-        client.clone(),
-        state,
-        &run_context,
-        AgentTurnRequest {
-          phase: "proposal",
-          max_tokens: MAX_TOKENS_PER_TURN,
-          persona: *persona,
-          discussion_log: &discussion_log,
-          use_web_search: true,
-        },
-      )
-      .await
-      .with_context(|| format!("failed proposal turn for {}", persona.name))?;
-
-      sequence = emit(
-        db,
-        &sender,
-        run_id,
-        sequence,
-        "agent_response_created",
-        Some(persona.name),
-        &turn,
-      );
-      discussion_log.push((persona.name.to_string(), turn));
-      if is_cancelled(state, run_id).await {
-        update_status(state, run_id, RunStatus::Failed).await;
-        return Ok(());
-      }
-      sleep(Duration::from_secs(10)).await;
+    if index + 1 < discussion_cycles {
+      sleep(Duration::from_secs(CHAT_INTERVAL_SECONDS)).await;
     }
-
-    sequence = emit(
-      db,
-      &sender,
-      run_id,
-      sequence,
-      "phase_started",
-      None,
-      "Round moved to critique phase.",
-    );
-
-    for persona in &DEBATE_PERSONAS {
-      let turn = request_agent_turn(
-        client.clone(),
-        state,
-        &run_context,
-        AgentTurnRequest {
-          phase: "critique",
-          max_tokens: MAX_TOKENS_PER_TURN,
-          persona: *persona,
-          discussion_log: &discussion_log,
-          use_web_search: false,
-        },
-      )
-      .await
-      .with_context(|| format!("failed critique turn for {}", persona.name))?;
-
-      sequence = emit(
-        db,
-        &sender,
-        run_id,
-        sequence,
-        "agent_response_revised",
-        Some(persona.name),
-        &turn,
-      );
-      discussion_log.push((persona.name.to_string(), turn));
-      if is_cancelled(state, run_id).await {
-        update_status(state, run_id, RunStatus::Failed).await;
-        return Ok(());
-      }
-      sleep(Duration::from_secs(10)).await;
-    }
-
-    let reached_end =
-      !run_context.run_forever && round_index >= u64::from(run_context.rounds);
-    if reached_end {
-      break;
-    }
-
-    if run_context.interval_seconds > 0 {
-      let wait_message = format!(
-        "Waiting {} seconds before next round.",
-        run_context.interval_seconds
-      );
-      sequence = emit(
-        db,
-        &sender,
-        run_id,
-        sequence,
-        "round_waiting",
-        None,
-        &wait_message,
-      );
-      sleep(Duration::from_secs(run_context.interval_seconds)).await;
-    }
-  }
-
-  if run_context.run_forever {
-    return Ok(());
   }
 
   sequence = emit(
@@ -304,10 +245,11 @@ async fn run_orchestration(
     &run_context,
     AgentTurnRequest {
       phase: "final_report",
-      max_tokens: MAX_TOKENS_PER_TURN,
+      model: &high_model,
+      max_tokens: REPORT_MAX_TOKENS,
       persona: AgentPersona {
-        name: "ChiefEditor",
-        system_prompt: CHIEF_EDITOR_FINAL_REPORT_PROMPT,
+        name: "Chief Editor",
+        system_prompt: include_str!("prompts/chief_editor_final_report.md"),
       },
       discussion_log: &discussion_log,
       use_web_search: true,
@@ -322,7 +264,7 @@ async fn run_orchestration(
     run_id,
     sequence,
     "final_report",
-    Some("ChiefEditor"),
+    Some("Chief Editor"),
     &report,
   );
 
@@ -401,8 +343,10 @@ async fn request_agent_turn(
 
   let response_guidance = if request.phase == "final_report" {
     "Be thorough and comprehensive."
+  } else if request.phase == "initial_research" {
+    "Collect latest internet-backed facts and cite source names in concise bullets."
   } else {
-    NON_FINAL_WORD_GUIDANCE
+    include_str!("prompts/non_final_word_guidance.md")
   };
 
   let user_prompt = if transcript.is_empty() {
@@ -429,7 +373,7 @@ async fn request_agent_turn(
   };
 
   let request_body = AnthropicMessagesRequest {
-    model: state.anthropic_model.as_ref().clone(),
+    model: request.model.to_string(),
     max_tokens: request.max_tokens,
     system: request.persona.system_prompt.to_string(),
     messages: vec![AnthropicInputMessage {
@@ -520,9 +464,7 @@ async fn load_run_context(state: &AppState, run_id: Uuid) -> RunContext {
       goal: run.goal.clone(),
       instruction: run.instruction.clone(),
       background: run.background.clone(),
-      interval_seconds: run.interval_seconds,
-      rounds: run.rounds,
-      run_forever: run.run_forever,
+      discussion_cycles: run.discussion_cycles,
     };
   }
 
@@ -533,9 +475,7 @@ async fn load_run_context(state: &AppState, run_id: Uuid) -> RunContext {
         .to_string(),
     instruction: None,
     background: None,
-    interval_seconds: 0,
-    rounds: 1,
-    run_forever: false,
+    discussion_cycles: 1,
   }
 }
 
