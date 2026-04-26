@@ -14,6 +14,7 @@ const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA_WEB_SEARCH: &str = "web-search-2025-03-05";
 const MAX_TOKENS_PER_TURN: u32 = 8192;
+const NON_FINAL_WORD_GUIDANCE: &str = "Respond with concrete evidence and structure. Target about 600-900 words unless instruction asks shorter.";
 
 const DATA_SCAVENGER_PROMPT: &str = "You are DataScavenger, an internet-source analyst. Focus on concrete facts, catalyst events, source quality, and timeliness. Use web search to find the latest relevant information.";
 const MACRO_STRATEGIST_PROMPT: &str = "You are MacroStrategist. Focus on macro context, ecosystem forces, and second-order impacts relevant to the topic. Use web search to verify current market conditions.";
@@ -36,6 +37,14 @@ struct RunContext {
   interval_seconds: u64,
   rounds: u32,
   run_forever: bool,
+}
+
+struct AgentTurnRequest<'a> {
+  phase: &'a str,
+  max_tokens: u32,
+  persona: AgentPersona,
+  discussion_log: &'a [(String, String)],
+  use_web_search: bool,
 }
 
 const DEBATE_PERSONAS: [AgentPersona; 4] = [
@@ -181,11 +190,13 @@ async fn run_orchestration(
         client.clone(),
         state,
         &run_context,
-        "proposal",
-        MAX_TOKENS_PER_TURN,
-        *persona,
-        &discussion_log,
-        true,
+        AgentTurnRequest {
+          phase: "proposal",
+          max_tokens: MAX_TOKENS_PER_TURN,
+          persona: *persona,
+          discussion_log: &discussion_log,
+          use_web_search: true,
+        },
       )
       .await
       .with_context(|| format!("failed proposal turn for {}", persona.name))?;
@@ -222,11 +233,13 @@ async fn run_orchestration(
         client.clone(),
         state,
         &run_context,
-        "critique",
-        MAX_TOKENS_PER_TURN,
-        *persona,
-        &discussion_log,
-        false,
+        AgentTurnRequest {
+          phase: "critique",
+          max_tokens: MAX_TOKENS_PER_TURN,
+          persona: *persona,
+          discussion_log: &discussion_log,
+          use_web_search: false,
+        },
       )
       .await
       .with_context(|| format!("failed critique turn for {}", persona.name))?;
@@ -290,11 +303,13 @@ async fn run_orchestration(
     client,
     state,
     &run_context,
-    "final_report",
-    MAX_TOKENS_PER_TURN,
-    CHIEF_EDITOR,
-    &discussion_log,
-    true,
+    AgentTurnRequest {
+      phase: "final_report",
+      max_tokens: MAX_TOKENS_PER_TURN,
+      persona: CHIEF_EDITOR,
+      discussion_log: &discussion_log,
+      use_web_search: true,
+    },
   )
   .await
   .context("failed final report for ChiefEditor")?;
@@ -362,13 +377,10 @@ async fn request_agent_turn(
   client: Client,
   state: &AppState,
   run_context: &RunContext,
-  phase: &str,
-  max_tokens: u32,
-  persona: AgentPersona,
-  discussion_log: &[(String, String)],
-  use_web_search: bool,
+  request: AgentTurnRequest<'_>,
 ) -> anyhow::Result<String> {
-  let transcript = discussion_log
+  let transcript = request
+    .discussion_log
     .iter()
     .map(|(agent, content)| format!("{agent}: {content}"))
     .collect::<Vec<String>>()
@@ -385,40 +397,44 @@ async fn request_agent_turn(
     .map(|v| format!("Instruction: {v}\n"))
     .unwrap_or_default();
 
-  let word_limit = if phase == "final_report" {
+  let response_guidance = if request.phase == "final_report" {
     "Be thorough and comprehensive."
   } else {
-    "Respond in under 300 words."
+    NON_FINAL_WORD_GUIDANCE
   };
 
   let user_prompt = if transcript.is_empty() {
     format!(
-      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}{word_limit}",
+      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}{response_guidance}",
+      phase = request.phase,
       topic = run_context.topic,
       goal = run_context.goal,
       instruction = instruction_line,
       background = background_line,
+      response_guidance = response_guidance,
     )
   } else {
     format!(
-      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}Prior discussion:\n{transcript}\n\nRespond as {name}. {word_limit}",
+      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}Prior discussion:\n{transcript}\n\nRespond as {name}. {response_guidance}",
+      phase = request.phase,
       topic = run_context.topic,
       goal = run_context.goal,
       instruction = instruction_line,
       background = background_line,
-      name = persona.name,
+      name = request.persona.name,
+      response_guidance = response_guidance,
     )
   };
 
   let request_body = AnthropicMessagesRequest {
     model: state.anthropic_model.as_ref().clone(),
-    max_tokens,
-    system: persona.system_prompt.to_string(),
+    max_tokens: request.max_tokens,
+    system: request.persona.system_prompt.to_string(),
     messages: vec![AnthropicInputMessage {
       role: "user".to_string(),
       content: user_prompt,
     }],
-    tools: if use_web_search {
+    tools: if request.use_web_search {
       vec![AnthropicTool {
         kind: WEB_SEARCH_TOOL.kind,
         name: WEB_SEARCH_TOOL.name,
@@ -434,7 +450,7 @@ async fn request_agent_turn(
       .post(ANTHROPIC_MESSAGES_URL)
       .header("x-api-key", state.anthropic_api_key.as_ref())
       .header("anthropic-version", ANTHROPIC_VERSION);
-    if use_web_search {
+    if request.use_web_search {
       req = req.header("anthropic-beta", ANTHROPIC_BETA_WEB_SEARCH);
     }
     let response = req
@@ -470,16 +486,27 @@ async fn request_agent_turn(
       .await
       .context("failed to decode Anthropic response")?;
 
-    let text = payload
+    let text_blocks = payload
       .content
       .into_iter()
-      .find_map(|block| match block {
-        AnthropicOutputBlock::Text { text } => Some(text),
+      .filter_map(|block| match block {
+        AnthropicOutputBlock::Text { text } => {
+          let trimmed = text.trim().to_string();
+          if trimmed.is_empty() {
+            None
+          } else {
+            Some(trimmed)
+          }
+        }
         AnthropicOutputBlock::Other => None,
       })
-      .context("Anthropic response contained no text block")?;
+      .collect::<Vec<String>>();
 
-    return Ok(text.trim().to_string());
+    if text_blocks.is_empty() {
+      return Err(anyhow!("Anthropic response contained no text block"));
+    }
+
+    return Ok(text_blocks.join("\n\n"));
   }
 }
 
