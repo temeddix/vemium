@@ -279,6 +279,10 @@ export class DashboardView extends LitElement {
       gap: 0.5rem;
     }
 
+    .event-item {
+      width: min(100%, 40rem);
+    }
+
     .event-item wa-card::part(base) {
       padding: 0.6rem 0.75rem;
     }
