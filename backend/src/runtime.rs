@@ -14,7 +14,7 @@ const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA_WEB_SEARCH: &str = "web-search-2025-03-05";
 const RESEARCH_MAX_TOKENS: u32 = 8192;
-const CHAT_MAX_TOKENS: u32 = 256;
+const CHAT_MAX_TOKENS: u32 = 512;
 const REPORT_MAX_TOKENS: u32 = 4096;
 const CHAT_INTERVAL_SECONDS: u64 = 5;
 
@@ -349,19 +349,30 @@ async fn request_agent_turn(
     include_str!("prompts/non_final_word_guidance.md")
   };
 
+  let length_guidance = if request.phase == "chat" {
+    concat!(
+      "Length guardrail: Keep the response concise ",
+      "(about 180-220 words, up to 6 bullets). ",
+      "Do not exceed the response token budget."
+    )
+  } else {
+    "Length guardrail: Do not exceed the response token budget."
+  };
+
   let user_prompt = if transcript.is_empty() {
     format!(
-      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}{response_guidance}",
+      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}{response_guidance}\n{length_guidance}",
       phase = request.phase,
       topic = run_context.topic,
       goal = run_context.goal,
       instruction = instruction_line,
       background = background_line,
       response_guidance = response_guidance,
+      length_guidance = length_guidance,
     )
   } else {
     format!(
-      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}Prior discussion:\n{transcript}\n\nRespond as {name}. {response_guidance}",
+      "Phase: {phase}.\nTopic: {topic}.\nGoal: {goal}.\n{instruction}{background}Prior discussion:\n{transcript}\n\nRespond as {name}. {response_guidance}\n{length_guidance}",
       phase = request.phase,
       topic = run_context.topic,
       goal = run_context.goal,
@@ -369,6 +380,7 @@ async fn request_agent_turn(
       background = background_line,
       name = request.persona.name,
       response_guidance = response_guidance,
+      length_guidance = length_guidance,
     )
   };
 
