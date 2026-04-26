@@ -14,13 +14,17 @@ const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA_WEB_SEARCH: &str = "web-search-2025-03-05";
 const MAX_TOKENS_PER_TURN: u32 = 8192;
-const NON_FINAL_WORD_GUIDANCE: &str = "Respond with concrete evidence and structure. Target about 600-900 words unless instruction asks shorter.";
+const NON_FINAL_WORD_GUIDANCE: &str =
+  include_str!("prompts/non_final_word_guidance.md");
 
-const DATA_SCAVENGER_PROMPT: &str = "You are DataScavenger, an internet-source analyst. Focus on concrete facts, catalyst events, source quality, and timeliness. Use web search to find the latest relevant information.";
-const MACRO_STRATEGIST_PROMPT: &str = "You are MacroStrategist. Focus on macro context, ecosystem forces, and second-order impacts relevant to the topic. Use web search to verify current market conditions.";
-const QUANT_ENGINEER_PROMPT: &str = "You are QuantEngineer. Focus on structured reasoning, scenario comparison, and measurable assumptions. Use web search to find quantitative data.";
-const COMPLIANCE_LAWYER_PROMPT: &str = "You are ComplianceLawyer. Focus on regulatory, legal, policy, and governance constraints and uncertainties. Use web search to find current regulatory developments.";
-const CHIEF_EDITOR_FINAL_REPORT_PROMPT: &str = "You are ChiefEditor writing the final authoritative report for this debate. Produce a well-structured document covering: (1) Executive Summary, (2) Key Findings per perspective, (3) Areas of consensus and disagreement, (4) Final Recommendation with reasoning, (5) Confidence Level, (6) Key Risks to monitor. Be thorough, definitive, and analytical. Use web search to verify any critical facts before finalizing.";
+const DATA_SCAVENGER_PROMPT: &str = include_str!("prompts/data_scavenger.md");
+const MACRO_STRATEGIST_PROMPT: &str =
+  include_str!("prompts/macro_strategist.md");
+const QUANT_ENGINEER_PROMPT: &str = include_str!("prompts/quant_engineer.md");
+const COMPLIANCE_LAWYER_PROMPT: &str =
+  include_str!("prompts/compliance_lawyer.md");
+const CHIEF_EDITOR_FINAL_REPORT_PROMPT: &str =
+  include_str!("prompts/chief_editor_final_report.md");
 
 #[derive(Clone, Copy)]
 struct AgentPersona {
@@ -65,11 +69,6 @@ const DEBATE_PERSONAS: [AgentPersona; 4] = [
     system_prompt: COMPLIANCE_LAWYER_PROMPT,
   },
 ];
-
-const CHIEF_EDITOR: AgentPersona = AgentPersona {
-  name: "ChiefEditor",
-  system_prompt: CHIEF_EDITOR_FINAL_REPORT_PROMPT,
-};
 
 #[derive(Debug, Serialize)]
 struct AnthropicTool {
@@ -306,7 +305,10 @@ async fn run_orchestration(
     AgentTurnRequest {
       phase: "final_report",
       max_tokens: MAX_TOKENS_PER_TURN,
-      persona: CHIEF_EDITOR,
+      persona: AgentPersona {
+        name: "ChiefEditor",
+        system_prompt: CHIEF_EDITOR_FINAL_REPORT_PROMPT,
+      },
       discussion_log: &discussion_log,
       use_web_search: true,
     },
