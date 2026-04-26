@@ -189,8 +189,9 @@ async fn run_orchestration(
     "Starting short chat loop.",
   );
 
-  let discussion_cycles = run_context.discussion_cycles.max(1);
-  for index in 0..discussion_cycles {
+  let num_cycles = run_context.discussion_cycles.max(1);
+  let total_turns = num_cycles * DEBATE_PERSONAS.len() as u32;
+  for index in 0..total_turns {
     if is_cancelled(state, run_id).await {
       update_status(state, run_id, RunStatus::Failed).await;
       return Ok(());
@@ -224,7 +225,7 @@ async fn run_orchestration(
     );
     discussion_log.push((persona.name.to_string(), turn));
 
-    if index + 1 < discussion_cycles {
+    if index + 1 < total_turns {
       sleep(Duration::from_secs(CHAT_INTERVAL_SECONDS)).await;
     }
   }
