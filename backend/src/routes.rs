@@ -60,11 +60,11 @@ async fn create_run(
   request: CreateRunRequest,
   force_new_room: bool,
 ) -> impl IntoResponse {
-  if !force_new_room {
-    if let Some(active_run) = get_current_active_run(&state).await {
-      return (StatusCode::OK, Json(CreateRunResponse { run: active_run }))
-        .into_response();
-    }
+  if !force_new_room
+    && let Some(active_run) = get_current_active_run(&state).await
+  {
+    return (StatusCode::OK, Json(CreateRunResponse { run: active_run }))
+      .into_response();
   }
 
   let record = build_and_start_run(state, request).await;
