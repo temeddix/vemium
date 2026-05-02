@@ -1,43 +1,57 @@
-use anyhow::{Context, Result};
-use std::env;
-use std::net::SocketAddr;
+//! Process-level configuration.
+//!
+//! With the rewrite to per-room provider configuration, this module is
+//! deliberately minimal: only the bind address, database URL, and the
+//! filesystem root for room workspaces are kept here. All LLM-related knobs
+//! live on the [`crate::models::Room`] itself.
 
-#[derive(Debug, Clone)]
-pub struct AppConfig {
-  pub bind_addr: SocketAddr,
-  pub compat_api_url: String,
-  pub compat_api_key: String,
-  pub high_model: String,
-  pub low_model: String,
-  pub database_url: String,
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
+
+/// Filesystem root for room workspaces. Matches the volume mount in
+/// `compose.yaml`.
+const DEFAULT_DATA_ROOT: &str = "/data";
+
+/// Defaults applied to a new [`crate::models::Room`] when the create request
+/// omits a value. Centralized here so the API and the test suite agree.
+pub mod room_defaults {
+  /// One debater turn every 5 seconds.
+  pub const CHAT_INTERVAL_SECONDS: u64 = 5;
+  /// Leader emits a `leader_note` once an hour.
+  pub const EVALUATION_INTERVAL_SECONDS: u64 = 3_600;
+  /// Leader writes a long-form report once a day.
+  pub const REPORT_INTERVAL_SECONDS: u64 = 86_400;
+  /// Single Python script run capped at 10 minutes.
+  pub const PYTHON_TIMEOUT_SECONDS: u64 = 600;
+  /// Every 10 failed Python attempts the runner pings the debate.
+  pub const PYTHON_FEEDBACK_EVERY: u32 = 10;
 }
 
-impl AppConfig {
-  pub fn from_env() -> Result<Self> {
-    let host =
-      env::var("BACKEND_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port = env::var("BACKEND_PORT").unwrap_or_else(|_| "8080".to_string());
-    let bind_addr: SocketAddr = format!("{host}:{port}")
-      .parse()
-      .context("invalid BACKEND_HOST/BACKEND_PORT")?;
+/// Process-level configuration. Construct via [`AppConfig::default`]; the
+/// values are fixed at compile time to match the container deployment.
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+  /// TCP socket the HTTP server binds to.
+  pub bind_addr: SocketAddr,
+  /// SQLite connection string. Always file-backed; the WAL journal lives in
+  /// the same directory.
+  pub database_url: String,
+  /// Filesystem root used for per-room workspaces. The orchestrator creates
+  /// `<data_root>/debate/<room-slug>/` as needed.
+  pub data_root: PathBuf,
+}
 
-    let compat_api_url = env::var("OPENAI_COMPAT_API_URL")
-      .context("OPENAI_COMPAT_API_URL is required")?;
-    let compat_api_key = env::var("OPENAI_COMPAT_API_KEY")
-      .context("OPENAI_COMPAT_API_KEY is required")?;
-    let high_model = env::var("HIGH_MODEL")
-      .context("HIGH_MODEL is required")?;
-    let low_model = env::var("LOW_MODEL")
-      .context("LOW_MODEL is required")?;
-    let database_url = "sqlite:///data/vemium.db".to_string();
-
-    Ok(Self {
+impl Default for AppConfig {
+  fn default() -> Self {
+    let bind_addr =
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080);
+    let data_root = PathBuf::from(DEFAULT_DATA_ROOT);
+    let database_url =
+      format!("sqlite://{}", data_root.join("vemium.db").display());
+    Self {
       bind_addr,
-      compat_api_url,
-      compat_api_key,
-      high_model,
-      low_model,
       database_url,
-    })
+      data_root,
+    }
   }
 }

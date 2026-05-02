@@ -1,58 +1,64 @@
+//! Vemium backend entry point.
+//!
+//! Boot sequence:
+//!
+//! 1. Initialize tracing.
+//! 2. Build the (compile-time) [`AppConfig`].
+//! 3. Open the SQLite pool and run migrations.
+//! 4. Build [`AppState`] and reload every persisted room into memory.
+//! 5. Start the Axum HTTP server on `bind_addr`.
+
 mod app_state;
 mod config;
 mod db;
 mod error;
+mod llm;
 mod models;
+mod python_runner;
 mod routes;
 mod runtime;
-mod scheduler;
+mod streaming;
+mod tools;
+mod workspace;
 
 use crate::app_state::AppState;
 use crate::config::AppConfig;
-use crate::models::RunStatus;
+use crate::error::ReportError;
 use anyhow::Result;
 use axum::Router;
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 #[tokio::main]
 async fn main() -> Result<()> {
   init_tracing();
 
-  let config = AppConfig::from_env()?;
-  log_model_config(&config);
-
-  let db = db::init_pool(&config.database_url).await?;
-  let initial_runs = db::load_all_runs(&db).await?;
-  tracing::info!(count = initial_runs.len(), "loaded runs from database");
-
-  let state = AppState::new(
-    config.compat_api_url.clone(),
-    config.compat_api_key.clone(),
-    config.high_model.clone(),
-    config.low_model.clone(),
-    db,
-    initial_runs,
+  let config = AppConfig::default();
+  tracing::info!(
+    bind = %config.bind_addr,
+    data_root = %config.data_root.display(),
+    "loaded backend config",
   );
 
-  restore_active_run(&state).await;
-  scheduler::spawn_room_scheduler(state.clone());
+  ensure_data_root(&config).await;
+
+  let db = db::init_pool(&config.database_url).await?;
+  let state = AppState::new(db, config.data_root.clone());
+
+  if let Err(error) = runtime::restore_rooms(state.clone()).await {
+    tracing::warn!(%error, "failed to restore rooms on startup");
+  }
 
   let app = build_router(state);
-
   let listener = TcpListener::bind(config.bind_addr).await?;
   tracing::info!(address = %config.bind_addr, "backend server listening");
-
   axum::serve(listener, app).await?;
-
   Ok(())
 }
 
 fn init_tracing() {
   let filter = tracing_subscriber::EnvFilter::try_from_default_env()
     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
   tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
@@ -61,46 +67,20 @@ fn build_router(state: AppState) -> Router {
     .allow_origin(Any)
     .allow_methods(Any)
     .allow_headers(Any);
-
   routes::create_router(state).layer(cors_layer)
 }
 
-fn log_model_config(config: &AppConfig) {
-  tracing::info!(
-      api_url = %config.compat_api_url,
-      high_model = %config.high_model,
-      low_model = %config.low_model,
-      "LLM configuration loaded"
-  );
-}
-
-async fn restore_active_run(state: &AppState) {
-  let run_to_restore = {
-    let runs = state.runs.read().await;
-    runs
-      .values()
-      .filter(|run| {
-        matches!(run.status, RunStatus::Queued | RunStatus::Running)
-      })
-      .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
-      .cloned()
-  };
-
-  let Some(run) = run_to_restore else {
-    return;
-  };
-
-  {
-    let mut active_run_id = state.active_run_id.write().await;
-    *active_run_id = Some(run.id);
-  }
-
-  {
-    let (sender, _receiver) = broadcast::channel(256);
-    let mut streams = state.run_streams.write().await;
-    streams.insert(run.id, sender);
-  }
-
-  tracing::info!(run_id = %run.id, "restoring active run from database state");
-  runtime::spawn_run(state.clone(), run.id);
+/// Best-effort `mkdir -p` for the data root and the debate sub-directory.
+/// Soft failures are logged but do not abort startup, since SQLite's
+/// `create_if_missing` will surface a clearer error if the parent really is
+/// unwritable.
+async fn ensure_data_root(config: &AppConfig) {
+  tokio::fs::create_dir_all(&config.data_root)
+    .await
+    .map_err(anyhow::Error::from)
+    .report();
+  tokio::fs::create_dir_all(config.data_root.join("debate"))
+    .await
+    .map_err(anyhow::Error::from)
+    .report();
 }

@@ -3,11 +3,6 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-    environment:
-      OPENAI_COMPAT_API_URL: ${OPENAI_COMPAT_API_URL}
-      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY}
-      HIGH_MODEL: ${HIGH_MODEL}
-      LOW_MODEL: ${LOW_MODEL}
     ports:
       - "${PORT}:8080"
     volumes:
