@@ -28,9 +28,10 @@ async fn main() -> Result<()> {
   tracing::info!(count = initial_runs.len(), "loaded runs from database");
 
   let state = AppState::new(
-    config.anthropic_api_key.clone(),
-    config.anthropic_high_model.clone(),
-    config.anthropic_low_model.clone(),
+    config.compat_api_url.clone(),
+    config.compat_api_key.clone(),
+    config.high_model.clone(),
+    config.low_model.clone(),
     db,
     initial_runs,
   );
@@ -66,10 +67,10 @@ fn build_router(state: AppState) -> Router {
 
 fn log_model_config(config: &AppConfig) {
   tracing::info!(
-      anthropic = "set",
-      high_model = %config.anthropic_high_model,
-      low_model = %config.anthropic_low_model,
-      "anthropic configuration loaded"
+      api_url = %config.compat_api_url,
+      high_model = %config.high_model,
+      low_model = %config.low_model,
+      "LLM configuration loaded"
   );
 }
 

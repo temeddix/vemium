@@ -10,9 +10,6 @@ use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
-const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-const ANTHROPIC_BETA_WEB_SEARCH: &str = "web-search-2025-03-05";
 const RESEARCH_MAX_TOKENS: u32 = 8192;
 const CHAT_MAX_TOKENS: u32 = 512;
 const REPORT_MAX_TOKENS: u32 = 4096;
@@ -39,7 +36,6 @@ struct AgentTurnRequest<'a> {
   max_tokens: u32,
   persona: AgentPersona,
   discussion_log: &'a [(String, String)],
-  use_web_search: bool,
 }
 
 const DEBATE_PERSONAS: [AgentPersona; 4] = [
@@ -67,45 +63,32 @@ const INTERNET_RESEARCHER: AgentPersona = AgentPersona {
 };
 
 #[derive(Debug, Serialize)]
-struct AnthropicTool {
-  #[serde(rename = "type")]
-  kind: &'static str,
-  name: &'static str,
-}
-
-const WEB_SEARCH_TOOL: AnthropicTool = AnthropicTool {
-  kind: "web_search_20250305",
-  name: "web_search",
-};
-
-#[derive(Debug, Serialize)]
-struct AnthropicMessagesRequest {
+struct ChatRequest {
   model: String,
   max_tokens: u32,
-  system: String,
-  messages: Vec<AnthropicInputMessage>,
-  #[serde(skip_serializing_if = "Vec::is_empty")]
-  tools: Vec<AnthropicTool>,
+  messages: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Serialize)]
-struct AnthropicInputMessage {
+struct ChatMessage {
   role: String,
   content: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicMessagesResponse {
-  content: Vec<AnthropicOutputBlock>,
+struct ChatResponse {
+  choices: Vec<ChatChoice>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum AnthropicOutputBlock {
-  #[serde(rename = "text")]
-  Text { text: String },
-  #[serde(other)]
-  Other,
+struct ChatChoice {
+  message: ChatResponseMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatResponseMessage {
+  #[serde(default)]
+  content: Option<String>,
 }
 
 pub fn spawn_run(state: AppState, run_id: Uuid) {
@@ -134,8 +117,8 @@ async fn run_orchestration(
   };
 
   let run_context = load_run_context(state, run_id).await;
-  let high_model = state.anthropic_high_model.as_ref().clone();
-  let low_model = state.anthropic_low_model.as_ref().clone();
+  let high_model = state.high_model.as_ref().clone();
+  let low_model = state.low_model.as_ref().clone();
 
   let client = Client::new();
   let db = &state.db;
@@ -162,7 +145,6 @@ async fn run_orchestration(
       max_tokens: RESEARCH_MAX_TOKENS,
       persona: INTERNET_RESEARCHER,
       discussion_log: &discussion_log,
-      use_web_search: true,
     },
   )
   .await
@@ -208,7 +190,6 @@ async fn run_orchestration(
         max_tokens: CHAT_MAX_TOKENS,
         persona,
         discussion_log: &discussion_log,
-        use_web_search: false,
       },
     )
     .await
@@ -253,7 +234,6 @@ async fn run_orchestration(
         system_prompt: include_str!("prompts/chief_editor_final_report.md"),
       },
       discussion_log: &discussion_log,
-      use_web_search: true,
     },
   )
   .await
@@ -385,45 +365,37 @@ async fn request_agent_turn(
     )
   };
 
-  let request_body = AnthropicMessagesRequest {
+  let request_body = ChatRequest {
     model: request.model.to_string(),
     max_tokens: request.max_tokens,
-    system: request.persona.system_prompt.to_string(),
-    messages: vec![AnthropicInputMessage {
-      role: "user".to_string(),
-      content: user_prompt,
-    }],
-    tools: if request.use_web_search {
-      vec![AnthropicTool {
-        kind: WEB_SEARCH_TOOL.kind,
-        name: WEB_SEARCH_TOOL.name,
-      }]
-    } else {
-      vec![]
-    },
+    messages: vec![
+      ChatMessage {
+        role: "system".to_string(),
+        content: request.persona.system_prompt.to_string(),
+      },
+      ChatMessage {
+        role: "user".to_string(),
+        content: user_prompt,
+      },
+    ],
   };
+
+  let chat_url = format!("{}/chat/completions", state.compat_api_url.as_ref());
 
   let mut attempt = 0u32;
   loop {
-    let mut req = client
-      .post(ANTHROPIC_MESSAGES_URL)
-      .header("x-api-key", state.anthropic_api_key.as_ref())
-      .header("anthropic-version", ANTHROPIC_VERSION);
-    if request.use_web_search {
-      req = req.header("anthropic-beta", ANTHROPIC_BETA_WEB_SEARCH);
-    }
-    let response = req
+    let response = client
+      .post(&chat_url)
+      .bearer_auth(state.compat_api_key.as_ref())
       .json(&request_body)
       .send()
       .await
-      .context("failed to send Anthropic request")?;
+      .context("failed to send LLM request")?;
 
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
       attempt += 1;
       if attempt > 5 {
-        return Err(anyhow!(
-          "Anthropic rate limit exceeded after {attempt} retries"
-        ));
+        return Err(anyhow!("LLM rate limit exceeded after {attempt} retries"));
       }
       let wait = 30 * attempt;
       tracing::warn!(attempt, wait_secs = wait, "rate limited, retrying");
@@ -437,35 +409,26 @@ async fn request_agent_turn(
         .text()
         .await
         .unwrap_or_else(|_| "<unreadable response body>".to_string());
-      return Err(anyhow!("Anthropic API error {status}: {body}"));
+      return Err(anyhow!("LLM API error {status}: {body}"));
     }
 
-    let payload: AnthropicMessagesResponse = response
+    let payload: ChatResponse = response
       .json()
       .await
-      .context("failed to decode Anthropic response")?;
+      .context("failed to decode LLM response")?;
 
-    let text_blocks = payload
-      .content
+    let text = payload
+      .choices
       .into_iter()
-      .filter_map(|block| match block {
-        AnthropicOutputBlock::Text { text } => {
+      .find_map(|choice| {
+        choice.message.content.and_then(|text| {
           let trimmed = text.trim().to_string();
-          if trimmed.is_empty() {
-            None
-          } else {
-            Some(trimmed)
-          }
-        }
-        AnthropicOutputBlock::Other => None,
+          if trimmed.is_empty() { None } else { Some(trimmed) }
+        })
       })
-      .collect::<Vec<String>>();
+      .ok_or_else(|| anyhow!("LLM response contained no text content"))?;
 
-    if text_blocks.is_empty() {
-      return Err(anyhow!("Anthropic response contained no text block"));
-    }
-
-    return Ok(text_blocks.join("\n\n"));
+    return Ok(text);
   }
 }
 
