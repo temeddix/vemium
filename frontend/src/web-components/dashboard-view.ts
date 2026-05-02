@@ -77,20 +77,27 @@ export class DashboardView extends LitElement {
 
   static override styles = css`
     :host {
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 0.6rem;
+      padding: 0.6rem;
+      box-sizing: border-box;
       height: 100vh;
       overflow: hidden;
+      background: var(--wa-color-surface-sunken);
+    }
+
+    .card {
       background: var(--wa-color-surface-default);
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      border-radius: 0.75rem;
     }
 
     .app-header {
       display: flex;
       align-items: center;
       gap: 0.75rem;
-      padding: 0.6rem 1.25rem;
-      border-bottom: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      flex-shrink: 0;
+      padding: 0.7rem 1.1rem;
     }
 
     .app-logo {
@@ -109,20 +116,20 @@ export class DashboardView extends LitElement {
     }
 
     .layout {
-      flex: 1;
-      min-height: 0;
       display: grid;
       grid-template-columns: 22rem 1fr;
+      grid-template-rows: 1fr;
+      gap: 0.6rem;
+      min-height: 0;
+      min-width: 0;
       overflow: hidden;
     }
 
     .sidebar {
       display: flex;
       flex-direction: column;
-      border-inline-end: var(--wa-border-width-s) solid
-        var(--wa-color-border-normal);
+      min-height: 0;
       overflow: hidden;
-      background: var(--wa-color-surface-default);
     }
 
     .sidebar-header {
@@ -198,6 +205,19 @@ export class DashboardView extends LitElement {
       text-align: center;
       color: var(--wa-color-text-quiet);
       font-size: 0.875rem;
+    }
+
+    .detail {
+      display: flex;
+      min-height: 0;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    te-room-detail {
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
     }
 
     .form-overlay {
@@ -301,13 +321,13 @@ export class DashboardView extends LitElement {
 
   override render() {
     return html`
-      <header class="app-header">
+      <header class="app-header card">
         <span class="app-logo">Vemium</span>
         <span class="app-tagline">Endless agent debate</span>
         <span class="ws-status">${this.#renderWsStatus()}</span>
       </header>
       <div class="layout">
-        <aside class="sidebar">
+        <aside class="sidebar card">
           <div class="sidebar-header">
             <span class="sidebar-label">Rooms</span>
             <wa-button size="small" variant="brand" @click="${(): void =>

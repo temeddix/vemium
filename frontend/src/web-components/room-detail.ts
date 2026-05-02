@@ -71,11 +71,27 @@ export class RoomDetail extends LitElement {
 
   static override styles = css`
     :host {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 0.6rem;
+      min-height: 0;
+      min-width: 0;
       overflow: hidden;
-      background: var(--wa-color-surface-sunken);
+    }
+
+    .card {
+      background: var(--wa-color-surface-default);
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      border-radius: 0.75rem;
+    }
+
+    .empty-card {
+      grid-row: 1 / -1;
+      display: grid;
+      place-items: center;
+      padding: 2rem;
+      color: var(--wa-color-text-quiet);
+      text-align: center;
     }
 
     .empty {
@@ -85,13 +101,10 @@ export class RoomDetail extends LitElement {
     }
 
     .room-header {
-      padding: 0.7rem 1.25rem;
-      border-bottom: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      padding: 0.7rem 1.1rem;
       display: flex;
       align-items: center;
       gap: 0.6rem;
-      background: var(--wa-color-surface-default);
-      flex-shrink: 0;
     }
 
     .room-name {
@@ -114,10 +127,7 @@ export class RoomDetail extends LitElement {
     .tab-bar {
       display: flex;
       gap: 0.4rem;
-      padding: 0.4rem 1rem;
-      border-bottom: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      background: var(--wa-color-surface-default);
-      flex-shrink: 0;
+      padding: 0.45rem 0.6rem;
     }
 
     .tab-btn {
@@ -138,7 +148,6 @@ export class RoomDetail extends LitElement {
     }
 
     .panel {
-      flex: 1;
       min-height: 0;
       overflow-y: auto;
       padding: 1rem 1.25rem;
@@ -297,21 +306,21 @@ export class RoomDetail extends LitElement {
     const view = this.#currentView();
     if (view === null) {
       return html`
-        <p class="empty">
+        <div class="card empty-card">
           Select a room from the sidebar, or create a new one.
-        </p>
+        </div>
       `;
     }
     return html`
       ${this.#renderHeader(view.room)} ${this.#renderTabs()}
-      <div class="panel">${this.#renderActiveTab(view)}</div>
+      <div class="panel card">${this.#renderActiveTab(view)}</div>
     `;
   }
 
   #renderHeader(room: Room) {
     const paused = room.status === "paused";
     return html`
-      <header class="room-header">
+      <header class="room-header card">
         <span class="room-name">${room.name}</span>
         <span class="room-topic">- ${room.topic}</span>
         <wa-badge variant="${badgeVariant(room.status)}" size="small">
@@ -341,7 +350,7 @@ export class RoomDetail extends LitElement {
   #renderTabs() {
     const tabs: Tab[] = ["stream", "settings", "reports"];
     return html`
-      <div class="tab-bar">
+      <div class="tab-bar card">
         ${tabs.map((tab) =>
           html`
             <button
