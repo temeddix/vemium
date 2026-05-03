@@ -1,7 +1,7 @@
 import type { DashboardState, DashboardStore } from "@/app/state";
 import type {
   ProviderConfig,
-  ProviderKind,
+  ReasoningField,
   Room,
   RoomView,
   ToolCallEntry,
@@ -51,9 +51,10 @@ function renderReasoning(turn: TurnBuffer) {
   return html`
     <details class="reasoning-block" ?open="${streaming}">
       <summary>
-        Thinking
-        ${streaming
-          ? html`<span class="reasoning-streaming-dot"></span>`
+        Thinking ${streaming
+          ? html`
+            <span class="reasoning-streaming-dot"></span>
+          `
           : ""}
       </summary>
       <pre class="reasoning-text">${turn.reasoning}</pre>
@@ -280,8 +281,12 @@ export class RoomDetail extends LitElement {
     }
 
     @keyframes reasoning-pulse {
-      0%, 100% { opacity: 0.35; }
-      50% { opacity: 1; }
+      0%, 100% {
+        opacity: 0.35;
+      }
+      50% {
+        opacity: 1;
+      }
     }
 
     .tool-list {
@@ -529,10 +534,13 @@ export class RoomDetail extends LitElement {
               `
               : ""}
           </div>
-          ${turn.reasoning !== "" ? renderReasoning(turn) : ""}
-          ${renderMarkdown(turn.content || "...")}
-          ${toolCalls.length > 0 ? this.#renderTurnToolCalls(toolCalls) : ""}
-          ${turn.error
+          ${turn.reasoning !== ""
+            ? renderReasoning(turn)
+            : ""} ${renderMarkdown(
+              turn.content || "...",
+            )} ${toolCalls.length > 0
+            ? this.#renderTurnToolCalls(toolCalls)
+            : ""} ${turn.error
             ? html`
               <p class="tool-output">${turn.error}</p>
             `
@@ -760,39 +768,40 @@ export class RoomDetail extends LitElement {
     config: ProviderConfig,
     onChange: (config: ProviderConfig) => void,
   ) {
+    const reasoningField: ReasoningField = config.reasoningField ?? "reasoning";
     return html`
       <fieldset class="tier">
         <legend>${label}</legend>
-        <label class="form-field">
-          <span class="form-label">Provider</span>
-          <wa-select size="small" .value="${config.provider}" @change="${(
-            e: Event,
-          ): void => {
-            const value = readInputValue(e.target);
-            if (value === "openrouter" || value === "openai_compat") {
-              onChange({ ...config, provider: value as ProviderKind });
-            }
-          }}">
-            <wa-option value="openrouter">OpenRouter</wa-option>
-            <wa-option value="openai_compat"
-            >OpenAI-compat (Ollama, vLLM, ...)</wa-option>
-          </wa-select>
-        </label>
         ${this.#renderTextField(
+          "Base URL",
+          config.baseUrl,
+          (value) => onChange({ ...config, baseUrl: value }),
+        )} ${this.#renderTextField(
           "Model",
           config.model,
           (model) => onChange({ ...config, model }),
-        )} ${this.#renderTextField(
-          "Base URL",
-          config.baseUrl ?? "",
-          (value) =>
-            onChange({ ...config, baseUrl: value === "" ? null : value }),
         )} ${this.#renderTextField(
           "API key",
           config.apiKey ?? "",
           (value) =>
             onChange({ ...config, apiKey: value === "" ? null : value }),
         )}
+        <label class="form-field">
+          <span class="form-label">Reasoning field</span>
+          <wa-select size="small" .value="${reasoningField}" @change="${(
+            e: Event,
+          ): void => {
+            const value = readInputValue(e.target);
+            if (value === "reasoning" || value === "reasoning_content") {
+              onChange({ ...config, reasoningField: value });
+            }
+          }}">
+            <wa-option value="reasoning"
+            >reasoning (OpenRouter, Ollama, llama.cpp)</wa-option>
+            <wa-option value="reasoning_content"
+            >reasoning_content (DeepSeek, vLLM, OpenAI o-series)</wa-option>
+          </wa-select>
+        </label>
       </fieldset>
     `;
   }

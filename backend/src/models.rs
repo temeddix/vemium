@@ -52,43 +52,50 @@ impl RoomStatus {
   }
 }
 
-/// LLM provider backends supported by the room. Each variant maps to a
-/// concrete client constructed in `crate::llm`.
+/// Which JSON field name the upstream provider uses to stream chain-of-thought
+/// tokens. Vendors split into two camps:
 ///
-/// `OpenaiCompat` is the catch-all for any OpenAI-compatible HTTP API
-/// (Ollama at `http://localhost:11434/v1`, self-hosted vLLM, llama.cpp
-/// server, Together, Fireworks, ...). Use it whenever you want to point at a
-/// custom `base_url`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// - `Reasoning`: OpenRouter, Ollama, llama.cpp - the wider convention.
+/// - `ReasoningContent`: DeepSeek's official API, vLLM defaults, OpenAI's
+///   o-series via the Chat Completions endpoint.
+///
+/// We dispatch to one of two `rig` provider clients based on this so the
+/// thinking trace gets parsed correctly. Everything else (request shape, base
+/// URL handling, tools, auth) is identical between the two.
+#[derive(
+  Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
-pub enum ProviderKind {
-  Openrouter,
-  OpenaiCompat,
+pub enum ReasoningField {
+  /// `delta.reasoning` - default, covers OpenRouter and most local servers.
+  #[default]
+  Reasoning,
+  /// `delta.reasoning_content` - DeepSeek convention.
+  ReasoningContent,
 }
 
-/// Per-tier provider configuration for a room.
+/// Per-tier provider configuration for a room. One [`ProviderConfig`] is
+/// stored for each of the low and high tiers. The wire protocol assumed is
+/// always OpenAI Chat Completions; only the reasoning-field convention varies.
 ///
-/// One [`ProviderConfig`] is stored for each of the low and high tiers.
-/// `api_key` and `base_url` are optional because:
-///
-/// - OpenRouter has a fixed base URL but always needs a key.
-/// - OpenaiCompat needs a base URL and may or may not need a key (Ollama
-///   running locally typically has no key; hosted compatible APIs do).
-///
-/// Validation of the combination happens at room create/update time in
-/// `crate::routes::validate_provider_config`; client construction lives in
-/// `crate::llm`.
+/// Validation happens in `crate::routes::validate_provider_config`; client
+/// construction lives in `crate::llm`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
-  pub provider: ProviderKind,
   pub model: String,
-  /// Required for `OpenaiCompat` (the URL of the OpenAI-compatible server,
-  /// e.g. `http://localhost:11434/v1`). Ignored for `Openrouter`.
-  pub base_url: Option<String>,
-  /// Bearer token. Plaintext in storage — do not return through the public
-  /// API without redaction.
+  /// Endpoint root, e.g. `https://openrouter.ai/api/v1` or
+  /// `http://localhost:11434/v1`. Always required - rig appends
+  /// `/chat/completions` to this.
+  pub base_url: String,
+  /// Bearer token. Plaintext in storage - do not return through the public
+  /// API without redaction. `None` for endpoints that don't require auth
+  /// (e.g. local Ollama).
+  #[serde(default)]
   pub api_key: Option<String>,
+  /// Which JSON field carries reasoning deltas; defaults to `Reasoning`.
+  #[serde(default)]
+  pub reasoning_field: ReasoningField,
 }
 
 impl ProviderConfig {
@@ -96,10 +103,10 @@ impl ProviderConfig {
   /// for embedding in API responses.
   pub fn redacted(&self) -> Self {
     Self {
-      provider: self.provider,
       model: self.model.clone(),
       base_url: self.base_url.clone(),
       api_key: self.api_key.as_deref().map(redact_secret),
+      reasoning_field: self.reasoning_field,
     }
   }
 }

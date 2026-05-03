@@ -1,73 +1,82 @@
 //! Provider client construction.
 //!
-//! Vemium currently supports two LLM provider backends, both of which speak
-//! OpenAI Chat Completions over HTTP/SSE under the hood:
+//! Every supported endpoint speaks the OpenAI Chat Completions wire format
+//! over HTTP/SSE - OpenRouter, Ollama, vLLM, llama.cpp, DeepSeek's hosted
+//! API, OpenAI itself, etc. The "compatibility" is loose, though: vendors
+//! agree on the request shape and on the base response (`delta.content`,
+//! `tool_calls`, `usage`), but each one extends the response with its own
+//! flavor of streaming reasoning text.
 //!
-//! - **OpenRouter** ([`rig::providers::openrouter`]) - first-class
-//!   integration; honors OpenRouter-specific routing and accounting.
-//! - **OpenAI-compatible** ([`rig::providers::openai`]) - caller-supplied
-//!   `base_url`. Use this for Ollama (`http://localhost:11434/v1`),
-//!   self-hosted vLLM, llama.cpp, Together, Fireworks, and friends.
+//! OpenAI Chat Completions itself has *no* reasoning text in the response
+//! (o-series exposes reasoning only via the Responses API). The two vendor
+//! extensions that matter in practice are:
 //!
-//! The runtime constructs a fresh [`rig::agent::Agent`] from one of these
-//! clients per turn (cheap; the agent owns the persona prompt + tool set,
-//! the underlying client is just an HTTP wrapper).
+//! - `delta.reasoning` (+ `delta.reasoning_details[]`): OpenRouter,
+//!   Ollama, llama.cpp.
+//! - `delta.reasoning_content`: DeepSeek's hosted API, vLLM defaults,
+//!   sglang.
+//!
+//! [`rig`] ships one provider module per dialect, so we dispatch on
+//! [`ReasoningField`] when constructing the client. Once built, the rest of
+//! the runtime is generic over the model type and treats both clients
+//! uniformly.
 
-use crate::models::{ProviderConfig, ProviderKind};
+use crate::models::{ProviderConfig, ReasoningField};
 use anyhow::{Context, Result, anyhow};
 use rig::providers::{openai, openrouter};
 
-/// Wraps the concrete [`rig`] client implied by a [`ProviderConfig`].
+/// Wraps one of rig's two OpenAI Chat Completions-compatible client modules.
 ///
-/// Cheap to clone - both inner clients are `Arc`-wrapped `reqwest::Client`s.
-/// The runtime pattern-matches on the variant once per turn to call
-/// `.agent(model)`; the resulting [`rig::agent::Agent`] is generic over the
-/// provider's model type, so it cannot be unified into a single trait
-/// object - hence the explicit two-variant enum here.
+/// Variant names mirror the rig module being wrapped (not the upstream
+/// vendor brand) - the user-facing concept of "which reasoning field is
+/// expected" lives on [`ReasoningField`] in [`ProviderConfig`]. The mapping
+/// happens once in [`ChatClient::from_config`].
 ///
-/// We use [`openai::CompletionsClient`] (Chat Completions) rather than the
-/// default [`openai::Client`] (Responses API) so that the same code path
-/// covers Ollama, vLLM, llama.cpp, and any other server speaking the
-/// venerable `/v1/chat/completions` protocol.
+/// We keep this as an enum (rather than a trait object) because rig fixes
+/// each client's `CompletionModel` associated type at compile time and the
+/// downstream stream loops are generic over `M`. Each match arm
+/// monomorphizes the same generic function body, so the duplication is one
+/// dispatch line per call site, not in the actual logic.
+///
+/// - [`Self::OpenRouter`] - reads `delta.reasoning`. Use for OpenRouter,
+///   Ollama, llama.cpp.
+/// - [`Self::OpenAi`] - reads `delta.reasoning_content`. Use for DeepSeek,
+///   vLLM, sglang. Plain OpenAI Chat Completions is a strict subset and
+///   simply emits no reasoning text on this code path.
 #[derive(Clone)]
 pub enum ChatClient {
   OpenRouter(openrouter::Client),
-  OpenAiCompat(openai::CompletionsClient),
+  OpenAi(openai::CompletionsClient),
 }
 
 impl ChatClient {
-  /// Builds a client from a [`ProviderConfig`]. Returns an error when the
-  /// configuration is missing values that variant requires (e.g.,
-  /// openai_compat without a `base_url`).
+  /// Builds a client from a [`ProviderConfig`]. Both variants accept the
+  /// same `base_url` + optional `api_key`; only the streaming-response
+  /// parser differs, picked by [`ProviderConfig::reasoning_field`].
   pub fn from_config(config: &ProviderConfig) -> Result<Self> {
-    match config.provider {
-      ProviderKind::Openrouter => {
-        let key = config
-          .api_key
-          .as_deref()
-          .map(str::trim)
-          .filter(|s| !s.is_empty())
-          .ok_or_else(|| anyhow!("openrouter provider requires api_key"))?;
-        let client = openrouter::Client::new(key)
+    let base = config.base_url.trim();
+    if base.is_empty() {
+      return Err(anyhow!("provider config requires base_url"));
+    }
+    let key = config.api_key.as_deref().unwrap_or("");
+    match config.reasoning_field {
+      ReasoningField::Reasoning => {
+        let client = openrouter::Client::builder()
+          .api_key(key)
+          .base_url(base)
+          .build()
           .map_err(|e| anyhow!(e.to_string()))
-          .context("failed to build openrouter client")?;
+          .context("failed to build openrouter chat client")?;
         Ok(ChatClient::OpenRouter(client))
       }
-      ProviderKind::OpenaiCompat => {
-        let base = config
-          .base_url
-          .as_deref()
-          .map(str::trim)
-          .filter(|s| !s.is_empty())
-          .ok_or_else(|| anyhow!("openai_compat provider requires base_url"))?;
-        let key = config.api_key.as_deref().unwrap_or("");
+      ReasoningField::ReasoningContent => {
         let client = openai::CompletionsClient::builder()
           .base_url(base)
           .api_key(key)
           .build()
           .map_err(|e| anyhow!(e.to_string()))
-          .context("failed to build openai_compat client")?;
-        Ok(ChatClient::OpenAiCompat(client))
+          .context("failed to build openai chat client")?;
+        Ok(ChatClient::OpenAi(client))
       }
     }
   }

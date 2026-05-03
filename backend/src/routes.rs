@@ -25,8 +25,7 @@ use crate::config::room_defaults;
 use crate::db;
 use crate::error::ReportError;
 use crate::models::{
-  CreateRoomRequest, ProviderConfig, ProviderKind, Room, RoomStatus,
-  UpdateRoomRequest,
+  CreateRoomRequest, ProviderConfig, Room, RoomStatus, UpdateRoomRequest,
 };
 use crate::runtime;
 use crate::streaming::WsEvent;
@@ -442,17 +441,8 @@ fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
   if config.model.trim().is_empty() {
     return Err("model is required".to_string());
   }
-  match config.provider {
-    ProviderKind::Openrouter => {
-      if config.api_key.as_deref().unwrap_or("").trim().is_empty() {
-        return Err("openrouter requires api_key".to_string());
-      }
-    }
-    ProviderKind::OpenaiCompat => {
-      if config.base_url.as_deref().unwrap_or("").trim().is_empty() {
-        return Err("openai_compat requires base_url".to_string());
-      }
-    }
+  if config.base_url.trim().is_empty() {
+    return Err("base_url is required".to_string());
   }
   Ok(())
 }

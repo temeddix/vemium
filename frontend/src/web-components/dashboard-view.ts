@@ -3,7 +3,7 @@ import type { DashboardState, DashboardStore } from "@/app/state";
 import type {
   CreateRoomRequest,
   ProviderConfig,
-  ProviderKind,
+  ReasoningField,
   Room,
   RoomStatus,
 } from "@/app/types";
@@ -31,10 +31,10 @@ interface CreateRoomForm {
 }
 
 const EMPTY_PROVIDER: ProviderConfig = {
-  provider: "openrouter",
   model: "",
-  baseUrl: null,
+  baseUrl: "",
   apiKey: null,
+  reasoningField: "reasoning",
 };
 
 const EMPTY_FORM: CreateRoomForm = {
@@ -523,44 +523,46 @@ export class DashboardView extends LitElement {
     return html`
       <fieldset class="tier">
         <legend>${label}</legend>
-        ${this.#renderProviderSelect(
-          config.provider,
-          (provider) => onChange({ ...config, provider }),
+        ${this.#renderTextField(
+          "Base URL (e.g. https://openrouter.ai/api/v1, http://localhost:11434/v1)",
+          config.baseUrl,
+          (value) => onChange({ ...config, baseUrl: value }),
         )} ${this.#renderTextField(
           "Model",
           config.model,
           (model) => onChange({ ...config, model }),
         )} ${this.#renderTextField(
-          "Base URL (required for openai-compat; e.g. http://localhost:11434/v1)",
-          config.baseUrl ?? "",
-          (value) =>
-            onChange({ ...config, baseUrl: value === "" ? null : value }),
-        )} ${this.#renderTextField(
-          "API key (required for openrouter; optional for local servers)",
+          "API key (optional for local servers)",
           config.apiKey ?? "",
           (value) =>
             onChange({ ...config, apiKey: value === "" ? null : value }),
+        )} ${this.#renderReasoningFieldSelect(
+          config.reasoningField ?? "reasoning",
+          (next) => onChange({ ...config, reasoningField: next }),
         )}
       </fieldset>
     `;
   }
 
-  #renderProviderSelect(
-    current: ProviderKind,
-    onChange: (kind: ProviderKind) => void,
+  #renderReasoningFieldSelect(
+    current: ReasoningField,
+    onChange: (kind: ReasoningField) => void,
   ) {
-    const options: { id: ProviderKind; label: string }[] = [
-      { id: "openrouter", label: "OpenRouter" },
-      { id: "openai_compat", label: "OpenAI-compat (Ollama, vLLM, ...)" },
+    const options: { id: ReasoningField; label: string }[] = [
+      { id: "reasoning", label: "reasoning (OpenRouter, Ollama, llama.cpp)" },
+      {
+        id: "reasoning_content",
+        label: "reasoning_content (DeepSeek, vLLM, OpenAI o-series)",
+      },
     ];
     return html`
       <label class="form-field">
-        <span class="form-label">Provider</span>
+        <span class="form-label">Reasoning field</span>
         <wa-select size="small" .value="${current}" @change="${(
           e: Event,
         ): void => {
           const value = readInputValue(e.target);
-          if (value === "openrouter" || value === "openai_compat") {
+          if (value === "reasoning" || value === "reasoning_content") {
             onChange(value);
           }
         }}">

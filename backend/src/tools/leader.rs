@@ -137,7 +137,7 @@ impl Tool for RequestLeaderDecisionTool {
         .prompt(user)
         .await
         .map_err(|e| LeaderDecisionError::Call(e.to_string()))?,
-      ChatClient::OpenAiCompat(c) => c
+      ChatClient::OpenAi(c) => c
         .agent(&self.high_model)
         .preamble(&preamble)
         .build()

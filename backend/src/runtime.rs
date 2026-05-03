@@ -266,7 +266,7 @@ async fn run_chat_turn(
       )
       .await
     }
-    ChatClient::OpenAiCompat(c) => {
+    ChatClient::OpenAi(c) => {
       run_chat_turn_with_builder(
         c.agent(&room.low.model),
         system_prompt,
@@ -671,7 +671,7 @@ async fn stream_leader_completion(
       )
       .await
     }
-    ChatClient::OpenAiCompat(c) => {
+    ChatClient::OpenAi(c) => {
       run_no_tool_stream(
         c.agent(&model),
         system_prompt.to_string(),
@@ -838,7 +838,7 @@ async fn stream_leader_report(
       )
       .await
     }
-    ChatClient::OpenAiCompat(c) => {
+    ChatClient::OpenAi(c) => {
       run_report_stream(
         c.agent(&model),
         system_prompt.to_string(),
