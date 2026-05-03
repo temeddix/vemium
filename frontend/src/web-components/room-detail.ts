@@ -10,7 +10,7 @@ import type {
 import { formatTimestamp } from "@/app/utils";
 import { css, html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { unsafeHTML } from "lit/directives/unsafe-html.js";
+import { ref } from "lit/directives/ref.js";
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -45,9 +45,24 @@ function readInputValue(target: EventTarget | null): string {
   return typeof value === "string" ? value : "";
 }
 
-function mdSlot(content: string) {
-  const escaped = content.replace(/<\/script/gi, "<\\/script");
-  return unsafeHTML(`<script type="text/markdown">${escaped}</script>`);
+function renderMarkdown(content: string) {
+  return html`
+    <wa-markdown ${ref((el) => {
+      if (el === undefined) {
+        return;
+      }
+      let script = el.querySelector('script[type="text/markdown"]');
+      if (script === null) {
+        script = document.createElement("script");
+        script.setAttribute("type", "text/markdown");
+        el.appendChild(script);
+      }
+      if (script.textContent !== content) {
+        script.textContent = content;
+        (el as { renderMarkdown?: () => void }).renderMarkdown?.();
+      }
+    })}></wa-markdown>
+  `;
 }
 
 @customElement("te-room-detail")
@@ -422,8 +437,7 @@ export class RoomDetail extends LitElement {
               `
               : ""}
           </div>
-          <wa-markdown>${mdSlot(turn.content || "...")}</wa-markdown>
-          ${turn.error
+          ${renderMarkdown(turn.content || "...")} ${turn.error
             ? html`
               <p class="tool-output">${turn.error}</p>
             `
@@ -582,7 +596,7 @@ export class RoomDetail extends LitElement {
                     `
                     : ""}
                 </div>
-                <wa-markdown>${mdSlot(report.content || "...")}</wa-markdown>
+                ${renderMarkdown(report.content || "...")}
               </wa-card>
             </li>
           `
