@@ -57,6 +57,11 @@ pub enum WsEvent {
   /// One token (or partial token) of the in-flight turn's natural-language
   /// content. The frontend appends `delta` to the buffer keyed by `turn_id`.
   TurnToken { turn_id: TurnId, delta: String },
+  /// One token of the in-flight turn's reasoning ("thinking") trace, when
+  /// the model emits chain-of-thought separately from the final response.
+  /// Like `TurnToken`, these are ephemeral - rendered live inside the
+  /// turn's chat bubble but not persisted to the database.
+  TurnReasoningToken { turn_id: TurnId, delta: String },
   /// The turn finished cleanly. The full `content` is the authoritative
   /// payload; the frontend may discard the per-token buffer once received.
   TurnCompleted {

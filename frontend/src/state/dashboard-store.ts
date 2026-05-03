@@ -238,6 +238,7 @@ export class DashboardStore {
             agent: event.agent,
             kind: event.kind,
             content: "",
+            reasoning: "",
             status: "streaming",
             sequence: null,
             timestamp: null,
@@ -250,6 +251,14 @@ export class DashboardStore {
           mapTurn(view, event.turnId, (turn) => ({
             ...turn,
             content: turn.content + event.delta,
+          }))
+        );
+        break;
+      case "turnReasoningToken":
+        this.#mutateView((view) =>
+          mapTurn(view, event.turnId, (turn) => ({
+            ...turn,
+            reasoning: turn.reasoning + event.delta,
           }))
         );
         break;
@@ -433,6 +442,7 @@ function historyEventToTurn(event: RoomEvent): TurnBuffer {
     agent: event.agent ?? eventKindLabel(event.kind),
     kind,
     content: event.content,
+    reasoning: "",
     status: "completed",
     sequence: event.sequence,
     timestamp: event.timestamp,

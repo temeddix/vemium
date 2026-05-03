@@ -102,6 +102,12 @@ export interface WsTurnToken {
   delta: string;
 }
 
+export interface WsTurnReasoningToken {
+  type: "turnReasoningToken";
+  turnId: string;
+  delta: string;
+}
+
 export interface WsTurnCompleted {
   type: "turnCompleted";
   turnId: string;
@@ -162,6 +168,7 @@ export type WsEvent =
   | WsRoomStatus
   | WsTurnStarted
   | WsTurnToken
+  | WsTurnReasoningToken
   | WsTurnCompleted
   | WsTurnFailed
   | WsToolStarted
@@ -209,6 +216,12 @@ export interface TurnBuffer {
   agent: string;
   kind: TurnKind;
   content: string;
+  /**
+   * Live "thinking" trace streamed alongside `content` when the model emits
+   * chain-of-thought separately. Empty for models that don't expose
+   * reasoning, and lost on reconnect (not persisted).
+   */
+  reasoning: string;
   status: "streaming" | "completed" | "failed";
   sequence: number | null;
   timestamp: string | null;

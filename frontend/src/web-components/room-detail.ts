@@ -46,6 +46,21 @@ function readInputValue(target: EventTarget | null): string {
   return typeof value === "string" ? value : "";
 }
 
+function renderReasoning(turn: TurnBuffer) {
+  const streaming = turn.status === "streaming";
+  return html`
+    <details class="reasoning-block" ?open="${streaming}">
+      <summary>
+        Thinking
+        ${streaming
+          ? html`<span class="reasoning-streaming-dot"></span>`
+          : ""}
+      </summary>
+      <pre class="reasoning-text">${turn.reasoning}</pre>
+    </details>
+  `;
+}
+
 function renderMarkdown(content: string) {
   return html`
     <wa-markdown ${ref((el) => {
@@ -202,6 +217,71 @@ export class RoomDetail extends LitElement {
     .turn-failed wa-card::part(base) {
       border-color: var(--wa-color-danger-border-normal);
       background: var(--wa-color-danger-fill-quiet);
+    }
+
+    .reasoning-block {
+      margin: 0 0 0.5rem;
+      padding: 0.35rem 0.6rem;
+      background: var(--wa-color-neutral-fill-quiet);
+      border-left: var(--wa-border-width-s) solid
+        var(--wa-color-neutral-border-normal);
+      border-radius: 0.3rem;
+      font-size: 0.78rem;
+      color: var(--wa-color-text-quiet);
+    }
+
+    .reasoning-block > summary {
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--wa-color-text-quiet);
+      user-select: none;
+    }
+
+    .reasoning-block > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .reasoning-block > summary::before {
+      content: ">";
+      display: inline-block;
+      transition: transform 0.15s ease;
+      font-size: 0.7rem;
+      font-family: var(--wa-font-family-code, monospace);
+    }
+
+    .reasoning-block[open] > summary::before {
+      transform: rotate(90deg);
+    }
+
+    .reasoning-text {
+      margin: 0.35rem 0 0;
+      white-space: pre-wrap;
+      font-family: var(--wa-font-family-code, monospace);
+      font-size: 0.78rem;
+      line-height: 1.45;
+      max-height: 18rem;
+      overflow-y: auto;
+    }
+
+    .reasoning-streaming-dot {
+      display: inline-block;
+      width: 0.45rem;
+      height: 0.45rem;
+      border-radius: 50%;
+      background: var(--wa-color-warning-fill-loud);
+      animation: reasoning-pulse 1s ease-in-out infinite;
+    }
+
+    @keyframes reasoning-pulse {
+      0%, 100% { opacity: 0.35; }
+      50% { opacity: 1; }
     }
 
     .tool-list {
@@ -449,6 +529,7 @@ export class RoomDetail extends LitElement {
               `
               : ""}
           </div>
+          ${turn.reasoning !== "" ? renderReasoning(turn) : ""}
           ${renderMarkdown(turn.content || "...")}
           ${toolCalls.length > 0 ? this.#renderTurnToolCalls(toolCalls) : ""}
           ${turn.error

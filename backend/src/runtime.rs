@@ -55,7 +55,7 @@ use rig::agent::{
 use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, Message};
 use rig::message::AssistantContent;
-use rig::streaming::StreamingPrompt;
+use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -354,6 +354,9 @@ where
     .tool(leader_tool)
     .build();
 
+  let reasoning_sender = hook.sender().clone();
+  let reasoning_turn_id = hook.turn_id().clone();
+
   let mut stream = agent
     .stream_prompt(user_prompt)
     .with_history(history)
@@ -367,10 +370,12 @@ where
       MultiTurnStreamItem::FinalResponse(final_response) => {
         final_text = final_response.response().to_string();
       }
-      _ => {
-        // Tokens, tool starts, and tool results are surfaced through
-        // `DebateHook`; nothing else to do here.
+      MultiTurnStreamItem::StreamAssistantItem(content) => {
+        forward_reasoning(&reasoning_sender, &reasoning_turn_id, &content);
+        // Text deltas, tool starts, and tool results are surfaced through
+        // `DebateHook`; we only intercept reasoning here.
       }
+      _ => {}
     }
   }
   Ok(final_text)
@@ -409,6 +414,45 @@ impl DebateHook {
       tool_starts: Arc::new(Mutex::new(HashMap::new())),
     }
   }
+
+  fn sender(&self) -> &broadcast::Sender<WsEvent> {
+    &self.sender
+  }
+
+  fn turn_id(&self) -> &TurnId {
+    &self.turn_id
+  }
+}
+
+/// Helper used by the chat-turn and leader-evaluation stream loops to
+/// forward reasoning tokens that arrive on the [`MultiTurnStreamItem`]
+/// stream. Reasoning is not exposed via [`PromptHook`], so we extract it
+/// here and send a [`WsEvent::TurnReasoningToken`] for live rendering.
+fn forward_reasoning<R>(
+  sender: &broadcast::Sender<WsEvent>,
+  turn_id: &TurnId,
+  item: &StreamedAssistantContent<R>,
+) {
+  let delta = match item {
+    StreamedAssistantContent::Reasoning(reasoning) => {
+      let text = reasoning.display_text();
+      if text.is_empty() {
+        return;
+      }
+      text
+    }
+    StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+      if reasoning.is_empty() {
+        return;
+      }
+      reasoning.clone()
+    }
+    _ => return,
+  };
+  let _ = sender.send(WsEvent::TurnReasoningToken {
+    turn_id: turn_id.clone(),
+    delta,
+  });
 }
 
 impl<M> PromptHook<M> for DebateHook
@@ -649,14 +693,20 @@ where
   M: CompletionModel + 'static,
 {
   let agent = builder.preamble(&system_prompt).build();
+  let reasoning_sender = hook.sender().clone();
+  let reasoning_turn_id = hook.turn_id().clone();
   let mut stream = agent.stream_prompt(user_prompt).with_hook(hook).await;
 
   let mut final_text = String::new();
   while let Some(item) = stream.next().await {
-    if let MultiTurnStreamItem::FinalResponse(final_response) =
-      item.map_err(|e| anyhow!(e.to_string()))?
-    {
-      final_text = final_response.response().to_string();
+    match item.map_err(|e| anyhow!(e.to_string()))? {
+      MultiTurnStreamItem::FinalResponse(final_response) => {
+        final_text = final_response.response().to_string();
+      }
+      MultiTurnStreamItem::StreamAssistantItem(content) => {
+        forward_reasoning(&reasoning_sender, &reasoning_turn_id, &content);
+      }
+      _ => {}
     }
   }
   Ok(final_text)
