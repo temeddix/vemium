@@ -537,19 +537,21 @@ export class DashboardView extends LitElement {
         </p>
         ${this.#renderApiTypeSelect(apiType, (next) => {
           const patch: Partial<ProviderConfig> = { apiType: next };
-          if (next === "openrouter" && !config.baseUrl.trim()) {
+          if (next === "openrouter") {
             patch.baseUrl = "https://openrouter.ai/api/v1";
           }
           onChange({ ...config, ...patch });
-        })} ${this.#renderTextField(
-          "Base URL (e.g. https://openrouter.ai/api/v1, http://localhost:11434)",
-          config.baseUrl,
-          (value) => onChange({ ...config, baseUrl: value }),
-        )} ${this.#renderTextField(
-          "Model",
-          config.model,
-          (model) => onChange({ ...config, model }),
-        )} ${apiType === "openrouter"
+        })} ${apiType === "ollama"
+          ? this.#renderTextField(
+            "Base URL (e.g. http://localhost:11434)",
+            config.baseUrl,
+            (value) => onChange({ ...config, baseUrl: value }),
+          )
+          : ""} ${this.#renderTextField(
+            "Model",
+            config.model,
+            (model) => onChange({ ...config, model }),
+          )} ${apiType === "openrouter"
           ? this.#renderTextField(
             "API key (required for OpenRouter)",
             config.apiKey ?? "",

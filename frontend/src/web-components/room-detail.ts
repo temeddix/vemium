@@ -791,7 +791,7 @@ export class RoomDetail extends LitElement {
             const value = readInputValue(e.target);
             if (value === "ollama" || value === "openrouter") {
               const patch: Partial<ProviderConfig> = { apiType: value };
-              if (value === "openrouter" && !config.baseUrl.trim()) {
+              if (value === "openrouter") {
                 patch.baseUrl = "https://openrouter.ai/api/v1";
               }
               onChange({ ...config, ...patch });
@@ -802,15 +802,17 @@ export class RoomDetail extends LitElement {
             <wa-option value="openrouter">OpenRouter</wa-option>
           </wa-select>
         </label>
-        ${this.#renderTextField(
-          "Base URL",
-          config.baseUrl,
-          (value) => onChange({ ...config, baseUrl: value }),
-        )} ${this.#renderTextField(
-          "Model",
-          config.model,
-          (model) => onChange({ ...config, model }),
-        )} ${apiType === "openrouter"
+        ${apiType === "ollama"
+          ? this.#renderTextField(
+            "Base URL",
+            config.baseUrl,
+            (value) => onChange({ ...config, baseUrl: value }),
+          )
+          : ""} ${this.#renderTextField(
+            "Model",
+            config.model,
+            (model) => onChange({ ...config, model }),
+          )} ${apiType === "openrouter"
           ? this.#renderTextField(
             "API key (required for OpenRouter)",
             config.apiKey ?? "",
