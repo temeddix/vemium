@@ -1,2 +1,2 @@
-export { DashboardStore } from "./dashboard-store.ts";
-export { RunClient, type RunClientCallbacks } from "./run-client.ts";
+export { type DashboardState, DashboardStore } from "./dashboard-store.ts";
+export { RoomClient, type RoomClientCallbacks } from "./room-client.ts";

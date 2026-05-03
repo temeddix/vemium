@@ -6,7 +6,7 @@ RUN deno install
 
 COPY frontend/src ./src
 COPY frontend/dist ./dist
-RUN deno bundle src/entry.ts --output dist/dist/app.js --minify
+RUN deno task bundle
 
 FROM rust:1.88-bookworm AS backend-build
 WORKDIR /app/backend
@@ -27,8 +27,20 @@ COPY --from=frontend-build /app/frontend/dist ./dist
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
+# Install Python (for `uv run python`), uv (for the project + venv mgmt),
+# ruff (formatter + linter), and ty (type checker). uv is fetched as a
+# static binary to keep the image small. ruff and ty come in as uv-managed
+# tools per project, so they don't need to be installed globally — but a
+# global ruff is handy as a sanity-check during image build.
 RUN apt-get update \
-  && apt-get install -y libsqlite3-0 && rm -rf /var/lib/apt/lists/* \
+  && apt-get install -y --no-install-recommends \
+       libsqlite3-0 \
+       python3 \
+       python3-venv \
+       ca-certificates \
+       curl \
+  && rm -rf /var/lib/apt/lists/* \
+  && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
   && mkdir -p /data
 
 COPY --from=backend-build \

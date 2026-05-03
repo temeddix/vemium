@@ -1,55 +1,61 @@
 import { dashboardContext } from "@/app/context";
-import type { DashboardStore } from "@/app/state";
+import type { DashboardState, DashboardStore } from "@/app/state";
 import type {
-  DashboardState,
-  RunRecord,
-  SaveRunSettingsRequest,
-  StartRunRequest,
+  ApiType,
+  CreateRoomRequest,
+  ProviderConfig,
+  Room,
+  RoomStatus,
 } from "@/app/types";
 import { formatTimestamp } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { unsafeHTML } from "lit/directives/unsafe-html.js";
 
-interface RunSettingsForm {
-  topic: string;
-  goal: string;
-  instruction: string;
-  background: string;
-  discussionCycles: number;
-  roomSchedule: string;
-}
-
-const EMPTY_SETTINGS: RunSettingsForm = {
-  topic: "",
-  goal: "",
-  instruction: "",
-  background: "",
-  discussionCycles: 16,
-  roomSchedule: "",
-};
-
-function mdSlot(content: string) {
-  const escaped = content.replace(/<\/script/gi, "<\\/script");
-  return unsafeHTML(`<script type="text/markdown">${escaped}</script>`);
-}
-
-function readInputValue(target: EventTarget | null): string | null {
-  if (!(target instanceof HTMLElement)) {
-    return null;
-  }
-  if (!("value" in target)) {
-    return null;
-  }
-  const val = (target as Record<string, unknown>)["value"];
-  return typeof val === "string" ? val : null;
-}
+import "./room-detail.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
     "te-dashboard-view": DashboardView;
   }
+}
+
+interface CreateRoomForm {
+  name: string;
+  topic: string;
+  goal: string;
+  instruction: string;
+  background: string;
+  low: ProviderConfig;
+  high: ProviderConfig;
+}
+
+const EMPTY_PROVIDER: ProviderConfig = {
+  model: "",
+  baseUrl: "",
+  apiKey: null,
+  apiType: "ollama",
+};
+
+const EMPTY_FORM: CreateRoomForm = {
+  name: "",
+  topic: "",
+  goal: "",
+  instruction: "",
+  background: "",
+  low: { ...EMPTY_PROVIDER },
+  high: { ...EMPTY_PROVIDER },
+};
+
+function readInputValue(target: EventTarget | null): string {
+  if (!(target instanceof HTMLElement)) {
+    return "";
+  }
+  if (!("value" in target)) {
+    return "";
+  }
+  const value = (target as Record<string, unknown>)["value"];
+  return typeof value === "string" ? value : "";
 }
 
 @customElement("te-dashboard-view")
@@ -62,30 +68,36 @@ export class DashboardView extends LitElement {
   private accessor dashboardState: DashboardState | null = null;
 
   @state()
-  private accessor settings: RunSettingsForm = { ...EMPTY_SETTINGS };
+  private accessor showCreateForm: boolean = false;
 
   @state()
-  private accessor settingsMessage: string | null = null;
+  private accessor formState: CreateRoomForm = { ...EMPTY_FORM };
 
   #unsubscribe: (() => void) | null = null;
 
   static override styles = css`
     :host {
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 0.6rem;
+      padding: 0.6rem;
+      box-sizing: border-box;
       height: 100vh;
       overflow: hidden;
+      background: var(--wa-color-surface-sunken);
     }
 
-    /* -- Header -- */
+    .card {
+      background: var(--wa-color-surface-default);
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      border-radius: 0.75rem;
+    }
+
     .app-header {
       display: flex;
       align-items: center;
       gap: 0.75rem;
-      padding: 0.6rem 1.25rem;
-      border-bottom: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      flex-shrink: 0;
-      background: var(--wa-color-surface-default);
+      padding: 0.7rem 1.1rem;
     }
 
     .app-logo {
@@ -103,67 +115,38 @@ export class DashboardView extends LitElement {
       margin-left: auto;
     }
 
-    /* -- Tab group fills remaining height -- */
-    .tabs-wrap {
-      flex: 1;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-    }
-
-    wa-tab-group {
-      flex: 1;
-      min-height: 0;
-    }
-
-    wa-tab-group::part(base) {
-      height: 100%;
-      display: flex;
-      flex-direction: column;
-    }
-
-    wa-tab-group::part(body) {
-      flex: 1;
-      min-height: 0;
-      overflow: hidden;
-    }
-
-    wa-tab-panel {
-      height: 100%;
-    }
-
-    wa-tab-panel::part(base) {
-      height: 100%;
-      padding: 0;
-      overflow: hidden;
-    }
-
-    /* -- Debates tab -- */
-    .debates-layout {
+    .layout {
       display: grid;
       grid-template-columns: 22rem 1fr;
       grid-template-rows: 1fr;
-      height: 100%;
+      gap: 0.6rem;
+      min-height: 0;
+      min-width: 0;
       overflow: hidden;
     }
 
-    .room-sidebar {
+    .sidebar {
       display: flex;
       flex-direction: column;
-      border-inline-end: var(--wa-border-width-s) solid
-        var(--wa-color-border-normal);
+      min-height: 0;
       overflow: hidden;
-      background: var(--wa-color-surface-default);
+    }
+
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.7rem 0.75rem 0.5rem;
+      flex-shrink: 0;
     }
 
     .sidebar-label {
-      padding: 0.7rem 1rem 0.5rem;
       font-size: 0.7rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.1em;
       color: var(--wa-color-text-quiet);
-      flex-shrink: 0;
+      flex: 1;
     }
 
     .room-list {
@@ -217,169 +200,116 @@ export class DashboardView extends LitElement {
       color: var(--wa-color-text-quiet);
     }
 
-    .no-rooms {
-      padding: 2rem 1rem;
+    .empty-rooms {
+      padding: 1.5rem 1rem;
       text-align: center;
       color: var(--wa-color-text-quiet);
       font-size: 0.875rem;
     }
 
-    /* -- Room content -- */
-    .room-content {
+    .detail {
       display: flex;
-      flex-direction: column;
+      min-height: 0;
+      min-width: 0;
       overflow: hidden;
-      background: var(--wa-color-surface-sunken);
     }
 
-    .content-body {
+    te-room-detail {
       flex: 1;
       min-height: 0;
-      overflow-y: auto;
+      min-width: 0;
+    }
+
+    .form-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      display: grid;
+      place-items: center;
+      padding: 1.5rem;
+      z-index: 100;
+    }
+
+    .form-card {
+      background: var(--wa-color-surface-default);
+      border-radius: 0.75rem;
       padding: 1.25rem;
+      width: min(40rem, 100%);
+      max-height: 90vh;
+      overflow-y: auto;
       display: grid;
-      gap: 1.25rem;
-      align-content: start;
+      gap: 0.75rem;
     }
 
-    .section-label {
-      font-size: 0.7rem;
-      font-weight: 700;
+    .form-card h2 {
+      margin: 0 0 0.25rem;
+      font-size: 1.05rem;
+    }
+
+    .form-grid {
+      display: grid;
+      gap: 0.6rem;
+    }
+
+    .form-field {
+      display: grid;
+      gap: 0.25rem;
+    }
+
+    .form-label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
       text-transform: uppercase;
-      letter-spacing: 0.1em;
       color: var(--wa-color-text-quiet);
-      margin: 0 0 0.5rem;
     }
 
-    .events-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 0.5rem;
-    }
-
-    .event-list {
-      margin: 0;
-      padding: 0;
-      list-style: none;
-      display: grid;
-      gap: 0.5rem;
-    }
-
-    .event-item {
-      width: min(100%, 40rem);
-    }
-
-    .event-item wa-card::part(base) {
-      padding: 0.6rem 0.75rem;
-    }
-
-    .event-item.is-final-report wa-card::part(base) {
-      border-color: var(--wa-color-brand-border-normal);
-      background: var(--wa-color-brand-fill-quiet);
-    }
-
-    .event-meta {
-      display: flex;
-      justify-content: space-between;
+    .form-hint {
       font-size: 0.72rem;
       color: var(--wa-color-text-quiet);
-      margin-bottom: 0.3rem;
+      margin: 0 0 0.2rem;
+      line-height: 1.3;
     }
 
-    .event-text {
-      font-size: 0.875rem;
-    }
-
-    .no-events {
-      padding: 2rem;
-      text-align: center;
-      color: var(--wa-color-text-quiet);
-      font-size: 0.875rem;
-    }
-
-    .agents-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
-      gap: 0.75rem;
-    }
-
-    .agent-card-name {
-      margin: 0 0 0.35rem;
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--wa-color-brand);
-    }
-
-    .agent-card-last {
-      font-size: 0.825rem;
-    }
-
-    /* -- Settings tab -- */
-    .settings-body {
-      height: 100%;
-      overflow-y: auto;
-      padding: 1.5rem;
-      background: var(--wa-color-surface-sunken);
-    }
-
-    .field {
-      display: grid;
-      gap: 0.3rem;
-    }
-
-    .field-label {
-      font-size: 0.78rem;
-      font-weight: 500;
-      color: var(--wa-color-text-quiet);
-    }
-
-    .toggle-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.875rem;
-    }
-
-    .numeric-row {
+    .provider-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 0.75rem;
+      gap: 0.6rem;
     }
 
-    .card-fields {
+    fieldset.tier {
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      border-radius: 0.5rem;
+      padding: 0.6rem;
       display: grid;
-      gap: 0.875rem;
+      gap: 0.4rem;
     }
 
-    .card-actions {
+    fieldset.tier legend {
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0 0.3rem;
+    }
+
+    .form-actions {
       display: flex;
       gap: 0.5rem;
-      flex-wrap: wrap;
+      justify-content: flex-end;
+      margin-top: 0.5rem;
     }
 
-    .message-banner {
-      margin-bottom: 1rem;
-      padding: 0.6rem 0.75rem;
+    .error-banner {
+      padding: 0.5rem 0.75rem;
       border-radius: 0.5rem;
-      border: var(--wa-border-width-s) solid var(--wa-color-brand-border-normal);
-      background: var(--wa-color-brand-fill-quiet);
-      font-size: 0.875rem;
-      color: var(--wa-color-brand-on-quiet);
-    }
-
-    @media (max-width: 900px) {
-      .debates-layout {
-        grid-template-columns: 1fr;
-        grid-template-rows: 12rem 1fr;
-      }
+      background: var(--wa-color-danger-fill-quiet);
+      color: var(--wa-color-danger-on-quiet);
+      font-size: 0.85rem;
     }
   `;
 
   override connectedCallback(): void {
     super.connectedCallback();
     this.#bindStore();
-    void this.#loadSettingsFromBackend();
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -387,7 +317,6 @@ export class DashboardView extends LitElement {
       this.#unsubscribe?.();
       this.#unsubscribe = null;
       this.#bindStore();
-      void this.#loadSettingsFromBackend();
     }
   }
 
@@ -399,36 +328,27 @@ export class DashboardView extends LitElement {
 
   override render() {
     return html`
-      <header class="app-header">
+      <header class="app-header card">
         <span class="app-logo">Vemium</span>
-        <span class="app-tagline">Debating Agents</span>
+        <span class="app-tagline">Endless agent debate</span>
         <span class="ws-status">${this.#renderWsStatus()}</span>
       </header>
-
-      <div class="tabs-wrap">
-        <wa-tab-group placement="bottom">
-          <wa-tab slot="nav" panel="debates">Debates</wa-tab>
-          <wa-tab slot="nav" panel="settings">Settings</wa-tab>
-
-          <wa-tab-panel name="debates">
-            <div class="debates-layout">
-              <aside class="room-sidebar">
-                <div class="sidebar-label">Rooms</div>
-                ${this.#renderRoomList()}
-              </aside>
-              <section class="room-content">
-                ${this.#renderRoomDetail()}
-              </section>
-            </div>
-          </wa-tab-panel>
-
-          <wa-tab-panel name="settings">
-            <div class="settings-body">
-              ${this.#renderSettingsMessage()} ${this.#renderSettingsCard()}
-            </div>
-          </wa-tab-panel>
-        </wa-tab-group>
+      <div class="layout">
+        <aside class="sidebar card">
+          <div class="sidebar-header">
+            <span class="sidebar-label">Rooms</span>
+            <wa-button size="small" variant="brand" @click="${(): void =>
+              this.#openCreate()}">
+              + New
+            </wa-button>
+          </div>
+          ${this.#renderRoomList()}
+        </aside>
+        <section class="detail">
+          <te-room-detail .store="${this.store}"></te-room-detail>
+        </section>
       </div>
+      ${this.showCreateForm ? this.#renderCreateForm() : ""}
     `;
   }
 
@@ -447,243 +367,228 @@ export class DashboardView extends LitElement {
     `;
   }
 
-  #renderSettingsMessage() {
-    if (this.settingsMessage === null) {
-      return html`
-
-      `;
-    }
-    return html`
-      <div class="message-banner">${this.settingsMessage}</div>
-    `;
-  }
-
   #renderRoomList() {
-    if (!this.dashboardState?.runs.length) {
+    if (this.dashboardState === null) {
       return html`
-        <p class="no-rooms">No rooms yet.<br />Start one in Settings.</p>
+
       `;
     }
-
+    const rooms = this.dashboardState.rooms;
+    if (rooms.length === 0) {
+      return html`
+        <p class="empty-rooms">
+          No rooms yet. Create one to start a debate.
+        </p>
+      `;
+    }
+    const currentId = this.dashboardState.currentRoomId;
     return html`
       <ul class="room-list">
-        ${this.dashboardState.runs.map((run) => {
-          const isActive = this.dashboardState?.activeRun?.id === run.id;
-          return html`
-            <li>
-              <button
-                class="room-btn ${isActive ? "is-active" : ""}"
-                @click="${(): void => this.store.selectRun(run.id)}"
-              >
-                <span class="room-title">${this.#roomLabel(run)}</span>
-                <span class="room-meta">
-                  <span class="room-time">${formatTimestamp(
-                    run.createdAt,
-                  )}</span>
-                  <wa-badge variant="${this.#statusVariant(
-                    run.status,
-                  )}" size="small">
-                    ${run.status}
-                  </wa-badge>
-                </span>
-              </button>
-            </li>
-          `;
-        })}
+        ${rooms.map((room) => this.#renderRoomItem(room, currentId))}
       </ul>
     `;
   }
 
-  #renderRoomDetail() {
-    const st = this.dashboardState;
-    if (st === null) {
-      return html`
-
-      `;
-    }
-
-    const isRunning = st.activeRun !== null &&
-      (st.activeRun.status === "running" || st.activeRun.status === "queued");
-
+  #renderRoomItem(room: Room, currentId: string | null) {
+    const isActive = currentId === room.id;
     return html`
-      <div class="content-body">
-        <div class="events-header">
-          <p class="section-label" style="margin:0">Events</p>
-          ${isRunning
+      <li>
+        <button
+          class="room-btn ${isActive ? "is-active" : ""}"
+          @click="${(): void => this.store.selectRoom(room.id)}"
+        >
+          <span class="room-title">${room.name}</span>
+          <span class="room-meta">
+            <span class="room-time">${formatTimestamp(room.createdAt)}</span>
+            ${this.#renderStatusBadge(room.status)}
+          </span>
+        </button>
+      </li>
+    `;
+  }
+
+  #renderStatusBadge(status: RoomStatus) {
+    const variant = statusBadgeVariant(status);
+    return html`
+      <wa-badge variant="${variant}" size="small">${status}</wa-badge>
+    `;
+  }
+
+  #renderCreateForm() {
+    const busy = this.dashboardState?.isCreatingRoom ?? false;
+    const error = this.dashboardState?.errorMessage ?? null;
+    const form = this.formState;
+    return html`
+      <div class="form-overlay" @click="${(e: MouseEvent): void => {
+        if (e.target === e.currentTarget) {
+          this.#closeCreate();
+        }
+      }}">
+        <div class="form-card">
+          <h2>New room</h2>
+          ${error
             ? html`
-              <wa-button
-                size="small"
-                variant="danger"
-                @click="${(): void => {
-                  if (st.activeRun) {
-                    this.store.cancelRun(st.activeRun.id);
-                  }
-                }}"
-              >Cancel</wa-button>
+              <div class="error-banner">${error}</div>
             `
             : ""}
-        </div>
-        ${this.#renderEvents(st)}
-        <div>
-          <p class="section-label">Agent Snapshot</p>
-          <div class="agents-grid">${this.#renderAgents(st)}</div>
+          <div class="form-grid">
+            ${this.#renderTextField(
+              "Name",
+              form.name,
+              (v) => this.#updateForm({ name: v }),
+            )} ${this.#renderTextField(
+              "Topic",
+              form.topic,
+              (v) => this.#updateForm({ topic: v }),
+            )} ${this.#renderTextField(
+              "Goal",
+              form.goal,
+              (v) => this.#updateForm({ goal: v }),
+            )} ${this.#renderTextArea(
+              "Instruction (optional)",
+              form.instruction,
+              (v) => this.#updateForm({ instruction: v }),
+            )} ${this.#renderTextArea(
+              "Background (optional)",
+              form.background,
+              (v) => this.#updateForm({ background: v }),
+            )}
+            <div class="provider-grid">
+              ${this.#renderProvider(
+                "Low tier",
+                form.low,
+                (next) => this.#updateForm({ low: next }),
+              )} ${this.#renderProvider(
+                "High tier",
+                form.high,
+                (next) => this.#updateForm({ high: next }),
+              )}
+            </div>
+          </div>
+          <div class="form-actions">
+            <wa-button
+              size="small"
+              variant="neutral"
+              ?disabled="${busy}"
+              @click="${(): void => this.#closeCreate()}"
+            >
+              Cancel
+            </wa-button>
+            <wa-button
+              size="small"
+              variant="brand"
+              ?disabled="${busy}"
+              @click="${(): Promise<void> => this.#submitCreate()}"
+            >
+              Create
+            </wa-button>
+          </div>
         </div>
       </div>
     `;
   }
 
-  #renderEvents(st: DashboardState) {
-    if (st.events.length === 0) {
-      return html`
-        <p class="no-events">No events yet.</p>
-      `;
-    }
-
+  #renderTextField(
+    label: string,
+    value: string,
+    onChange: (value: string) => void,
+  ) {
     return html`
-      <ul class="event-list">
-        ${st.events.map(
-          (event) =>
-            html`
-              <li class="event-item ${event.eventType === "final_report"
-                ? "is-final-report"
-                : ""}">
-                <wa-card>
-                  <div class="event-meta">
-                    <span>${event.agent ?? ""}</span>
-                    <span>${formatTimestamp(event.timestamp)}</span>
-                  </div>
-                  <wa-markdown class="event-text">${mdSlot(
-                    event.content,
-                  )}</wa-markdown>
-                </wa-card>
-              </li>
-            `,
-        )}
-      </ul>
+      <label class="form-field">
+        <span class="form-label">${label}</span>
+        <wa-input size="small" .value="${value}" @input="${(
+          e: InputEvent,
+        ): void => onChange(readInputValue(e.target))}"></wa-input>
+      </label>
     `;
   }
 
-  #renderAgents(st: DashboardState) {
-    const latestByAgent = new Map<string, string>();
-    for (const event of st.events) {
-      if (event.agent !== null) {
-        latestByAgent.set(event.agent, event.content);
-      }
-    }
-
-    const agentNames = [
-      "DataScavenger",
-      "MacroStrategist",
-      "QuantEngineer",
-      "ComplianceLawyer",
-      "ChiefEditor",
-    ];
-
-    return agentNames.map(
-      (name) =>
-        html`
-          <wa-card>
-            <h3 class="agent-card-name">${name}</h3>
-            <wa-markdown class="agent-card-last">${mdSlot(
-              latestByAgent.get(name) ?? "No update yet.",
-            )}</wa-markdown>
-          </wa-card>
-        `,
-    );
+  #renderTextArea(
+    label: string,
+    value: string,
+    onChange: (value: string) => void,
+  ) {
+    return html`
+      <label class="form-field">
+        <span class="form-label">${label}</span>
+        <wa-textarea
+          size="small"
+          rows="3"
+          .value="${value}"
+          @input="${(e: InputEvent): void =>
+            onChange(readInputValue(e.target))}"
+        ></wa-textarea>
+      </label>
+    `;
   }
 
-  #renderSettingsCard() {
-    const s = this.settings;
-    const busy = this.dashboardState?.isStartingRun ?? false;
-
+  #renderProvider(
+    label: string,
+    config: ProviderConfig,
+    onChange: (config: ProviderConfig) => void,
+  ) {
+    const apiType: ApiType = config.apiType ?? "ollama";
     return html`
-      <wa-card style="max-width: 48rem;">
-        <div slot="header">Debate Settings</div>
-        <div class="card-fields">
-          <label class="field">
-            <span class="field-label">Topic</span>
-            <wa-input
-              size="small"
-              .value="${s.topic}"
-              @input="${(e: InputEvent): void => this.#onTextField("topic", e)}"
-            ></wa-input>
-          </label>
+      <fieldset class="tier">
+        <legend>${label}</legend>
+        <p class="form-hint">
+          Only OpenRouter requires an API key; Ollama / llama.cpp / vLLM and other
+          self-hosted endpoints leave it blank.
+        </p>
+        ${this.#renderApiTypeSelect(apiType, (next) => {
+          const patch: Partial<ProviderConfig> = { apiType: next };
+          if (next === "openRouter") {
+            patch.baseUrl = "https://openrouter.ai/api/v1";
+          }
+          onChange({ ...config, ...patch });
+        })} ${apiType === "ollama"
+          ? this.#renderTextField(
+            "Base URL (e.g. http://localhost:11434)",
+            config.baseUrl,
+            (value) => onChange({ ...config, baseUrl: value }),
+          )
+          : ""} ${this.#renderTextField(
+            "Model",
+            config.model,
+            (model) => onChange({ ...config, model }),
+          )} ${apiType === "openRouter"
+          ? this.#renderTextField(
+            "API key (required for OpenRouter)",
+            config.apiKey ?? "",
+            (value) =>
+              onChange({ ...config, apiKey: value === "" ? null : value }),
+          )
+          : ""}
+      </fieldset>
+    `;
+  }
 
-          <label class="field">
-            <span class="field-label">Goal</span>
-            <wa-input
-              size="small"
-              .value="${s.goal}"
-              @input="${(e: InputEvent): void => this.#onTextField("goal", e)}"
-            ></wa-input>
-          </label>
-
-          <label class="field">
-            <span class="field-label">Instruction</span>
-            <wa-textarea
-              size="small"
-              rows="3"
-              .value="${s.instruction}"
-              @input="${(e: InputEvent): void =>
-                this.#onTextField("instruction", e)}"
-            ></wa-textarea>
-          </label>
-
-          <label class="field">
-            <span class="field-label">Background</span>
-            <wa-textarea
-              size="small"
-              rows="3"
-              .value="${s.background}"
-              @input="${(e: InputEvent): void =>
-                this.#onTextField("background", e)}"
-            ></wa-textarea>
-          </label>
-
-          <div class="numeric-row">
-            <label class="field">
-              <span class="field-label">Discussion Cycles</span>
-              <wa-input
-                type="number"
-                size="small"
-                min="1"
-                .value="${String(s.discussionCycles)}"
-                @input="${(e: InputEvent): void =>
-                  this.#onNumberField("discussionCycles", e, 1)}"
-              ></wa-input>
-            </label>
-
-            <label class="field">
-              <span class="field-label">Room Schedule (cron, optional)</span>
-              <wa-input
-                size="small"
-                .value="${s.roomSchedule}"
-                @input="${(e: InputEvent): void =>
-                  this.#onTextField("roomSchedule", e)}"
-              ></wa-input>
-            </label>
-          </div>
-        </div>
-
-        <div slot="footer" class="card-actions">
-          <wa-button
-            size="small"
-            variant="neutral"
-            ?disabled="${busy}"
-            @click="${(): Promise<void> => this.#saveSettings()}"
-          >
-            Save Settings
-          </wa-button>
-          <wa-button
-            size="small"
-            variant="brand"
-            ?disabled="${busy}"
-            @click="${this.#onStartDebate}"
-          >
-            Start Debate
-          </wa-button>
-        </div>
-      </wa-card>
+  #renderApiTypeSelect(
+    current: ApiType,
+    onChange: (next: ApiType) => void,
+  ) {
+    const options: { id: ApiType; label: string }[] = [
+      { id: "ollama", label: "Ollama" },
+      { id: "openRouter", label: "OpenRouter" },
+    ];
+    return html`
+      <label class="form-field">
+        <span class="form-label">API type</span>
+        <wa-select size="small" .value="${current}" @change="${(
+          e: Event,
+        ): void => {
+          const value = readInputValue(e.target);
+          if (value === "ollama" || value === "openRouter") {
+            onChange(value);
+          }
+        }}">
+          ${options.map((opt) =>
+            html`
+              <wa-option value="${opt.id}">${opt.label}</wa-option>
+            `
+          )}
+        </wa-select>
+      </label>
     `;
   }
 
@@ -697,111 +602,47 @@ export class DashboardView extends LitElement {
     this.dashboardState = this.store.getState();
   }
 
-  async #loadSettingsFromBackend(): Promise<void> {
-    try {
-      const all = await this.store.loadSettings();
-      const s = all[0];
-      if (s !== undefined) {
-        this.settings = {
-          topic: s.topic,
-          goal: s.goal,
-          instruction: s.instruction,
-          background: s.background,
-          discussionCycles: s.discussionCycles,
-          roomSchedule: s.roomSchedule,
-        };
-      }
-    } catch {
-      this.settingsMessage = "Could not load saved settings.";
-    }
+  #openCreate(): void {
+    this.formState = { ...EMPTY_FORM };
+    this.showCreateForm = true;
   }
 
-  #onTextField(
-    field:
-      | "topic"
-      | "goal"
-      | "instruction"
-      | "background"
-      | "roomSchedule",
-    event: InputEvent,
-  ): void {
-    const value = readInputValue(event.target);
-    if (value === null) {
-      return;
-    }
-    this.settings = { ...this.settings, [field]: value };
+  #closeCreate(): void {
+    this.showCreateForm = false;
   }
 
-  #onNumberField(
-    field: "discussionCycles",
-    event: InputEvent,
-    minValue: number,
-  ): void {
-    const raw = readInputValue(event.target);
-    if (raw === null) {
-      return;
-    }
-    const parsed = Number.parseInt(raw, 10);
-    const value = Number.isFinite(parsed)
-      ? Math.max(minValue, parsed)
-      : minValue;
-    this.settings = { ...this.settings, [field]: value };
+  #updateForm(patch: Partial<CreateRoomForm>): void {
+    this.formState = { ...this.formState, ...patch };
   }
 
-  async #saveSettings(): Promise<void> {
-    try {
-      await this.store.saveSettings(this.#toSaveRequest());
-      this.settingsMessage = "Settings saved.";
-    } catch {
-      this.settingsMessage = "Failed to save settings.";
-    }
-  }
-
-  #onStartDebate = (): void => {
-    void this.store.startRun(this.#toStartRequest());
-  };
-
-  #toSaveRequest(): SaveRunSettingsRequest {
-    return {
-      topic: this.settings.topic,
-      goal: this.settings.goal,
-      instruction: this.settings.instruction,
-      background: this.settings.background,
-      discussionCycles: this.settings.discussionCycles,
-      roomSchedule: this.settings.roomSchedule,
+  async #submitCreate(): Promise<void> {
+    const request: CreateRoomRequest = {
+      name: this.formState.name,
+      topic: this.formState.topic,
+      goal: this.formState.goal,
+      instruction: this.formState.instruction === ""
+        ? null
+        : this.formState.instruction,
+      background: this.formState.background === ""
+        ? null
+        : this.formState.background,
+      low: this.formState.low,
+      high: this.formState.high,
     };
-  }
-
-  #toStartRequest(): StartRunRequest {
-    return {
-      topic: this.settings.topic,
-      goal: this.settings.goal,
-      instruction: this.settings.instruction,
-      background: this.settings.background,
-      discussionCycles: this.settings.discussionCycles,
-    };
-  }
-
-  #roomLabel(run: RunRecord | null): string {
-    if (run === null) {
-      return "Select a room";
+    const created = await this.store.createRoom(request);
+    if (created !== null) {
+      this.showCreateForm = false;
     }
-    const tag = new Date(run.createdAt).toLocaleString("en-US", {
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-    return `Debate - ${tag}`;
   }
+}
 
-  #statusVariant(status: string): string {
-    if (status === "running" || status === "queued") {
+function statusBadgeVariant(status: RoomStatus): string {
+  switch (status) {
+    case "active":
       return "brand";
-    }
-    if (status === "failed") {
+    case "paused":
+      return "neutral";
+    case "failed":
       return "danger";
-    }
-    return "neutral";
   }
 }
