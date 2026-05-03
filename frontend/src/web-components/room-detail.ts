@@ -793,7 +793,11 @@ export class RoomDetail extends LitElement {
           ): void => {
             const value = readInputValue(e.target);
             if (value === "reasoning" || value === "reasoning_content") {
-              onChange({ ...config, reasoningField: value });
+              const patch: Partial<ProviderConfig> = { reasoningField: value };
+              if (value === "reasoning" && !config.baseUrl.trim()) {
+                patch.baseUrl = "https://openrouter.ai/api/v1";
+              }
+              onChange({ ...config, ...patch });
             }
           }}">
             <wa-option value="reasoning"

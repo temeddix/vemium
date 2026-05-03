@@ -538,7 +538,13 @@ export class DashboardView extends LitElement {
             onChange({ ...config, apiKey: value === "" ? null : value }),
         )} ${this.#renderReasoningFieldSelect(
           config.reasoningField ?? "reasoning",
-          (next) => onChange({ ...config, reasoningField: next }),
+          (next) => {
+            const patch: Partial<ProviderConfig> = { reasoningField: next };
+            if (next === "reasoning" && !config.baseUrl.trim()) {
+              patch.baseUrl = "https://openrouter.ai/api/v1";
+            }
+            onChange({ ...config, ...patch });
+          },
         )}
       </fieldset>
     `;
