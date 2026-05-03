@@ -568,7 +568,7 @@ export class DashboardView extends LitElement {
     onChange: (next: ApiType) => void,
   ) {
     const options: { id: ApiType; label: string }[] = [
-      { id: "ollama", label: "Ollama (also llama.cpp, vLLM, self-hosted)" },
+      { id: "ollama", label: "Ollama" },
       { id: "openRouter", label: "OpenRouter" },
     ];
     return html`

@@ -797,8 +797,7 @@ export class RoomDetail extends LitElement {
               onChange({ ...config, ...patch });
             }
           }}">
-            <wa-option value="ollama"
-            >Ollama (also llama.cpp, vLLM, self-hosted)</wa-option>
+            <wa-option value="ollama">Ollama</wa-option>
             <wa-option value="openRouter">OpenRouter</wa-option>
           </wa-select>
         </label>
