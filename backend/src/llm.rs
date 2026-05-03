@@ -28,6 +28,7 @@ use rig::providers::{
   openrouter,
 };
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
+use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use crate::models::{ApiType, ProviderConfig};
@@ -47,6 +48,23 @@ use crate::workspace::RoomWorkspace;
 /// in a degenerate case; this caps a single turn at a finite number of tool
 /// rounds before forcing the agent to produce a final reply.
 const MAX_TOOL_ROUNDS_PER_TURN: usize = 8;
+
+/// Native Ollama enables thinking output via a top-level `think: true` flag
+/// on the chat request. Without it, models that *can* think (qwen3, gpt-oss,
+/// deepseek-r1, etc.) silently omit the `thinking` field, and the streaming
+/// loop has no reasoning to forward. Models that don't support thinking
+/// simply ignore the flag.
+fn ollama_extra_params() -> Value {
+  json!({ "think": true })
+}
+
+/// OpenRouter requires opting in to reasoning streaming on the request body
+/// (see <https://openrouter.ai/docs/use-cases/reasoning-tokens>). Setting
+/// `enabled: true` works across reasoning-capable models from every vendor;
+/// non-reasoning models accept the flag and just don't emit deltas.
+fn openrouter_extra_params() -> Value {
+  json!({ "reasoning": { "enabled": true } })
+}
 
 /// Inputs for a debater turn (full tool set). Bundled into a single struct
 /// because the runtime always passes them together.
@@ -159,21 +177,33 @@ impl OllamaChatClient {
 #[async_trait]
 impl ChatClient for OllamaChatClient {
   async fn run_debate_turn(&self, inputs: DebateTurnInputs) -> Result<String> {
-    run_chat_turn_with_builder(self.client.agent(&self.model), inputs).await
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(ollama_extra_params());
+    run_chat_turn_with_builder(builder, inputs).await
   }
 
   async fn run_evaluation_turn(
     &self,
     inputs: NoToolTurnInputs<DebateHook>,
   ) -> Result<String> {
-    run_no_tool_stream(self.client.agent(&self.model), inputs).await
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(ollama_extra_params());
+    run_no_tool_stream(builder, inputs).await
   }
 
   async fn run_report_turn(
     &self,
     inputs: NoToolTurnInputs<ReportHook>,
   ) -> Result<String> {
-    run_report_stream(self.client.agent(&self.model), inputs).await
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(ollama_extra_params());
+    run_report_stream(builder, inputs).await
   }
 
   async fn prompt_once(
@@ -230,21 +260,33 @@ impl OpenRouterChatClient {
 #[async_trait]
 impl ChatClient for OpenRouterChatClient {
   async fn run_debate_turn(&self, inputs: DebateTurnInputs) -> Result<String> {
-    run_chat_turn_with_builder(self.client.agent(&self.model), inputs).await
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(openrouter_extra_params());
+    run_chat_turn_with_builder(builder, inputs).await
   }
 
   async fn run_evaluation_turn(
     &self,
     inputs: NoToolTurnInputs<DebateHook>,
   ) -> Result<String> {
-    run_no_tool_stream(self.client.agent(&self.model), inputs).await
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(openrouter_extra_params());
+    run_no_tool_stream(builder, inputs).await
   }
 
   async fn run_report_turn(
     &self,
     inputs: NoToolTurnInputs<ReportHook>,
   ) -> Result<String> {
-    run_report_stream(self.client.agent(&self.model), inputs).await
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(openrouter_extra_params());
+    run_report_stream(builder, inputs).await
   }
 
   async fn prompt_once(

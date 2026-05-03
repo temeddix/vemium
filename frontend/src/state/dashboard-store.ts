@@ -340,8 +340,9 @@ export class DashboardStore {
   ): void {
     const turns: TurnBuffer[] = [];
     const toolCalls: ToolCallEntry[] = [];
+    const pendingToolCalls: ToolCallEntry[] = [];
     for (const event of events) {
-      ingestHistoryEvent(event, turns, toolCalls);
+      ingestHistoryEvent(event, turns, toolCalls, pendingToolCalls);
     }
     const view: RoomView = {
       room,
@@ -405,11 +406,16 @@ function ingestHistoryEvent(
   event: RoomEvent,
   turns: TurnBuffer[],
   toolCalls: ToolCallEntry[],
+  pendingToolCalls: ToolCallEntry[],
 ): void {
   if (event.kind === "tool_call") {
     const record = parseToolCallRecord(event.content);
     if (record !== null) {
-      toolCalls.push({
+      // Tool-call rows are persisted at the moment the tool result lands,
+      // *before* the assistant turn that owns them is written. Buffer them
+      // and attach to the next agent_chat / leader_note we see so the UI
+      // can scope the tool list under that turn.
+      pendingToolCalls.push({
         id: `${event.sequence}`,
         turnId: "",
         sequence: event.sequence,
@@ -429,7 +435,14 @@ function ingestHistoryEvent(
     event.kind === "system" ||
     event.kind === "phase"
   ) {
-    turns.push(historyEventToTurn(event));
+    const turn = historyEventToTurn(event);
+    turns.push(turn);
+    if (pendingToolCalls.length > 0) {
+      for (const call of pendingToolCalls) {
+        toolCalls.push({ ...call, turnId: turn.turnId });
+      }
+      pendingToolCalls.length = 0;
+    }
   }
 }
 
