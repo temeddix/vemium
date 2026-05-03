@@ -1,11 +1,13 @@
 import type { DashboardState, DashboardStore } from "@/app/state";
 import type {
   ApiType,
+  Draft,
+  DraftToolCall,
+  Message,
   ProviderConfig,
   Room,
   RoomView,
-  ToolCallEntry,
-  TurnBuffer,
+  ToolCallRecord,
   UpdateRoomRequest,
 } from "@/app/types";
 import { formatTimestamp } from "@/app/utils";
@@ -46,8 +48,53 @@ function readInputValue(target: EventTarget | null): string {
   return typeof value === "string" ? value : "";
 }
 
-function renderReasoning(turn: TurnBuffer) {
-  const streaming = turn.status === "streaming";
+/**
+ * Common shape used by the tool-list renderer for both finalized message
+ * tool calls and in-flight draft tool calls. The two source types differ
+ * (a persisted record has no `status` because it always succeeded or
+ * errored deterministically), so we normalize at the call site.
+ */
+interface ToolCallView {
+  tool: string;
+  status: "running" | "ok" | "error";
+  argsPreview: string;
+  outputPreview: string | null;
+  durationMs: number | null;
+}
+
+function toolRecordToView(record: ToolCallRecord): ToolCallView {
+  return {
+    tool: record.tool,
+    status: record.ok ? "ok" : "error",
+    argsPreview: previewArgsValue(record.args),
+    outputPreview: record.outputPreview,
+    durationMs: record.durationMs,
+  };
+}
+
+function draftCallToView(call: DraftToolCall): ToolCallView {
+  return {
+    tool: call.tool,
+    status: call.status,
+    argsPreview: call.argsPreview,
+    outputPreview: call.outputPreview,
+    durationMs: call.durationMs,
+  };
+}
+
+function previewArgsValue(value: unknown): string {
+  try {
+    const text = JSON.stringify(value);
+    if (text === undefined) {
+      return "";
+    }
+    return text.length > 240 ? `${text.slice(0, 240)}...` : text;
+  } catch {
+    return "";
+  }
+}
+
+function renderReasoning(text: string, streaming: boolean) {
   return html`
     <details class="reasoning-block" ?open="${streaming}">
       <summary>
@@ -57,7 +104,7 @@ function renderReasoning(turn: TurnBuffer) {
           `
           : ""}
       </summary>
-      <pre class="reasoning-text">${turn.reasoning}</pre>
+      <pre class="reasoning-text">${text}</pre>
     </details>
   `;
 }
@@ -493,63 +540,82 @@ export class RoomDetail extends LitElement {
   }
 
   #renderStream(view: RoomView) {
-    if (view.turns.length === 0) {
+    if (view.messages.length === 0 && view.drafts.length === 0) {
       return html`
         <p class="empty">No turns yet.</p>
       `;
     }
     return html`
       <ul class="turn-list">
-        ${view.turns.map((turn) =>
-          this.#renderTurn(
-            turn,
-            view.toolCalls.filter((call) => call.turnId === turn.turnId),
-          )
-        )}
+        ${view.messages.map((message) => this.#renderMessage(message))} ${view
+          .drafts.map((draft) => this.#renderDraft(draft))}
       </ul>
     `;
   }
 
-  #renderTurn(turn: TurnBuffer, toolCalls: ToolCallEntry[]) {
-    const classes = [
+  #renderMessage(message: Message) {
+    const kindLabel = message.kind === "leader_note" ? "leader note" : "chat";
+    const cardClasses = [
       "turn-item",
-      turn.kind === "leader_note" ? "turn-leader" : "",
-      turn.status === "streaming" ? "turn-streaming" : "",
-      turn.status === "failed" ? "turn-failed" : "",
+      message.kind === "leader_note" ? "turn-leader" : "",
     ]
       .filter(Boolean)
       .join(" ");
     return html`
-      <li class="${classes}">
+      <li class="${cardClasses}">
         <wa-card>
           <div class="turn-meta">
-            <strong>${turn.agent}</strong>
-            <span>- ${turn.kind === "leader_note"
-              ? "leader note"
-              : "chat"}</span>
-            ${turn.timestamp
-              ? html`
-                <span>- ${formatTimestamp(turn.timestamp)}</span>
-              `
-              : ""} ${turn.status === "streaming"
+            <strong>${message.agent ?? "?"}</strong>
+            <span>- ${kindLabel}</span>
+            <span>- ${formatTimestamp(message.timestamp)}</span>
+          </div>
+          ${message.reasoning !== ""
+            ? renderReasoning(message.reasoning, false)
+            : ""} ${renderMarkdown(
+              message.content,
+            )} ${message.toolCalls.length > 0
+            ? this.#renderToolCallList(
+              message.toolCalls.map(toolRecordToView),
+            )
+            : ""}
+        </wa-card>
+      </li>
+    `;
+  }
+
+  #renderDraft(draft: Draft) {
+    const kindLabel = draft.kind === "leader_note" ? "leader note" : "chat";
+    const cardClasses = [
+      "turn-item",
+      draft.kind === "leader_note" ? "turn-leader" : "",
+      draft.status === "streaming" ? "turn-streaming" : "",
+      draft.status === "failed" ? "turn-failed" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return html`
+      <li class="${cardClasses}">
+        <wa-card>
+          <div class="turn-meta">
+            <strong>${draft.agent !== "" ? draft.agent : "..."}</strong>
+            <span>- ${kindLabel}</span>
+            ${draft.status === "streaming"
               ? html`
                 <wa-badge size="small" variant="warning">streaming</wa-badge>
               `
-              : ""} ${turn.status === "failed"
-              ? html`
+              : html`
                 <wa-badge size="small" variant="danger">failed</wa-badge>
-              `
-              : ""}
+              `}
           </div>
-          ${turn.reasoning !== ""
-            ? renderReasoning(turn)
+          ${draft.reasoning !== ""
+            ? renderReasoning(draft.reasoning, draft.status === "streaming")
             : ""} ${renderMarkdown(
-              turn.content || "...",
-            )} ${toolCalls.length > 0
-            ? this.#renderTurnToolCalls(toolCalls)
-            : ""} ${turn.error
+              draft.content || "...",
+            )} ${draft.toolCalls.length > 0
+            ? this.#renderToolCallList(draft.toolCalls.map(draftCallToView))
+            : ""} ${draft.error !== null
             ? html`
-              <p class="tool-output">${turn.error}</p>
+              <p class="tool-output">${draft.error}</p>
             `
             : ""}
         </wa-card>
@@ -557,10 +623,10 @@ export class RoomDetail extends LitElement {
     `;
   }
 
-  #renderTurnToolCalls(toolCalls: ToolCallEntry[]) {
+  #renderToolCallList(calls: ToolCallView[]) {
     return html`
       <ul class="tool-list">
-        ${toolCalls.map((call) =>
+        ${calls.map((call) =>
           html`
             <li>
               <div class="tool-meta">

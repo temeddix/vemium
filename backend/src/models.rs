@@ -5,8 +5,10 @@
 //! - [`Room`]: the canonical record of one debate subject. Each room has its
 //!   own settings (including provider configuration) and runs an endless
 //!   pause/resume-able orchestration.
-//! - [`RoomEvent`]: an append-only entry in the room's visible chat log
-//!   (debater turn, leader note, tool call, system message, ...).
+//! - [`RoomEvent`]: one finalized message in the room's chat log — a
+//!   debater turn or a leader note. Each row owns the message text plus
+//!   the model's reasoning trace and the inline list of tool calls
+//!   executed during that turn.
 //! - [`RoomReport`]: a periodic high-model summary of the room. Reports are
 //!   first-class so the UI can list them independently of the chat log.
 //! - [`ProviderConfig`]: per-tier (low / high) LLM provider configuration
@@ -202,11 +204,8 @@ pub struct RoomView {
   pub updated_at: DateTime<Utc>,
 }
 
-/// Categorisation of a row in `room_events`.
-///
-/// The kind controls how the UI renders the entry and whether the orchestrator
-/// includes it in the LLM-visible transcript (currently: `agent_chat` and
-/// `leader_note` are part of the transcript; the rest are status/UI only).
+/// Categorisation of a row in `room_events`. Both kinds are part of the
+/// LLM-visible transcript and are rendered as message cards by the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoomEventKind {
@@ -214,12 +213,6 @@ pub enum RoomEventKind {
   AgentChat,
   /// The leader (high-model) emitted a steering note.
   LeaderNote,
-  /// A tool call resolved. `content` is JSON `ToolCallRecord`.
-  ToolCall,
-  /// Free-form status line from the orchestrator (e.g. "Resumed").
-  Phase,
-  /// System-level error or notice not tied to a specific agent.
-  System,
 }
 
 impl RoomEventKind {
@@ -227,9 +220,6 @@ impl RoomEventKind {
     match self {
       Self::AgentChat => "agent_chat",
       Self::LeaderNote => "leader_note",
-      Self::ToolCall => "tool_call",
-      Self::Phase => "phase",
-      Self::System => "system",
     }
   }
 
@@ -237,16 +227,16 @@ impl RoomEventKind {
     match value {
       "agent_chat" => Ok(Self::AgentChat),
       "leader_note" => Ok(Self::LeaderNote),
-      "tool_call" => Ok(Self::ToolCall),
-      "phase" => Ok(Self::Phase),
-      "system" => Ok(Self::System),
       other => Err(anyhow::anyhow!("unknown room event kind: {other}")),
     }
   }
 }
 
-/// A persisted log entry. The room's full chat history is the ordered list of
-/// these rows joined with [`RoomReport`] entries.
+/// One finalized message in a room's chat log. The text content, the
+/// model's reasoning trace, and every tool call executed during the turn
+/// all live on the same row — there are no separate `tool_call` rows. The
+/// room's full visible history is the ordered list of these joined with
+/// [`RoomReport`] entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomEvent {
@@ -255,6 +245,14 @@ pub struct RoomEvent {
   pub kind: RoomEventKind,
   pub agent: Option<String>,
   pub content: String,
+  /// Model's chain-of-thought for this turn. Empty when the model emitted
+  /// none, or when the provider doesn't expose reasoning separately.
+  #[serde(default)]
+  pub reasoning: String,
+  /// Tools invoked during this turn, in invocation order. Empty when the
+  /// turn called no tools.
+  #[serde(default)]
+  pub tool_calls: Vec<ToolCallRecord>,
   pub timestamp: DateTime<Utc>,
 }
 
@@ -303,10 +301,10 @@ pub struct RoomReport {
   pub status: ReportStatus,
 }
 
-/// JSON payload stored in `RoomEvent.content` when `kind == ToolCall`.
-///
-/// Both the input arguments and the (truncated) output are kept so the UI can
-/// render a useful debug view without re-running the tool.
+/// One tool invocation that happened during a debater turn. Embedded inline
+/// in [`RoomEvent::tool_calls`] so the message and its tool calls travel
+/// together. Both the input arguments and the (truncated) output are kept
+/// so the UI can render a useful debug view without re-running the tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallRecord {

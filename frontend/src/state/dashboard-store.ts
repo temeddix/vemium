@@ -1,17 +1,16 @@
 import { BACKEND_BASE_URL } from "@/app/config";
 import type {
   CreateRoomRequest,
+  Draft,
+  DraftToolCall,
+  Message,
   ReportBuffer,
   Room,
-  RoomEvent,
-  RoomEventKind,
   RoomReport,
   RoomsListResponse,
   RoomStatus,
   RoomView,
-  ToolCallEntry,
-  ToolCallRecord,
-  TurnBuffer,
+  TurnKind,
   UpdateRoomRequest,
   WsEvent,
 } from "@/app/types";
@@ -226,80 +225,79 @@ export class DashboardStore {
   #applyEvent(event: WsEvent): void {
     switch (event.type) {
       case "snapshot":
-        this.#applySnapshot(event.room, event.events, event.reports);
+        this.#applySnapshot(event.room, event.messages, event.reports);
         break;
       case "roomStatus":
         this.#patchCurrentRoom((room) => ({ ...room, status: event.status }));
         break;
-      case "turnStarted":
+      case "draftStarted":
         this.#mutateView((view) =>
-          appendOrReplaceTurn(view, {
-            turnId: event.turnId,
-            agent: event.agent,
-            kind: event.kind,
-            content: "",
-            reasoning: "",
-            status: "streaming",
-            sequence: null,
-            timestamp: null,
-            error: null,
-          })
+          upsertDraft(view, event.turnId, event.agent, event.kind)
         );
         break;
-      case "turnToken":
+      case "draftText":
         this.#mutateView((view) =>
-          mapTurn(view, event.turnId, (turn) => ({
-            ...turn,
-            content: turn.content + event.delta,
+          mapDraft(view, event.turnId, (draft) => ({
+            ...draft,
+            content: draft.content + event.delta,
           }))
         );
         break;
-      case "turnReasoningToken":
+      case "draftReasoning":
         this.#mutateView((view) =>
-          mapTurn(view, event.turnId, (turn) => ({
-            ...turn,
-            reasoning: turn.reasoning + event.delta,
+          mapDraft(view, event.turnId, (draft) => ({
+            ...draft,
+            reasoning: draft.reasoning + event.delta,
           }))
         );
         break;
-      case "turnCompleted":
+      case "draftToolStarted":
         this.#mutateView((view) =>
-          mapTurn(view, event.turnId, (turn) => ({
-            ...turn,
-            content: event.content,
-            status: "completed",
-            sequence: event.sequence,
-            timestamp: event.timestamp,
+          mapDraft(view, event.turnId, (draft) => ({
+            ...draft,
+            toolCalls: [...draft.toolCalls, {
+              callId: event.callId,
+              tool: event.tool,
+              argsPreview: event.argsPreview,
+              status: "running",
+              outputPreview: null,
+              durationMs: null,
+            }],
           }))
         );
         break;
-      case "turnFailed":
+      case "draftToolCompleted":
         this.#mutateView((view) =>
-          mapTurn(view, event.turnId, (turn) => ({
-            ...turn,
-            content: event.partial,
+          mapDraft(view, event.turnId, (draft) => ({
+            ...draft,
+            toolCalls: draft.toolCalls.map((call) =>
+              call.callId === event.callId
+                ? {
+                  ...call,
+                  status: event.ok ? "ok" : "error",
+                  outputPreview: event.outputPreview,
+                  durationMs: event.durationMs,
+                }
+                : call
+            ),
+          }))
+        );
+        break;
+      case "draftFailed":
+        this.#mutateView((view) =>
+          mapDraft(view, event.turnId, (draft) => ({
+            ...draft,
             status: "failed",
             error: event.error,
           }))
         );
         break;
-      case "toolStarted":
-        this.#mutateView((view) =>
-          appendToolCall(view, {
-            id: `live:${event.turnId}:${event.tool}:${view.toolCalls.length}`,
-            turnId: event.turnId,
-            sequence: null,
-            tool: event.tool,
-            argsPreview: event.argsPreview,
-            status: "running",
-            outputPreview: null,
-            durationMs: null,
-            timestamp: null,
-          })
-        );
-        break;
-      case "toolCompleted":
-        this.#mutateView((view) => completeToolCall(view, event));
+      case "messageAdded":
+        this.#mutateView((view) => ({
+          ...view,
+          messages: appendMessage(view.messages, event.message),
+          drafts: view.drafts.filter((d) => d.turnId !== event.turnId),
+        }));
         break;
       case "reportStarted":
         this.#mutateView((view) =>
@@ -335,33 +333,18 @@ export class DashboardStore {
 
   #applySnapshot(
     room: Room,
-    events: RoomEvent[],
+    messages: Message[],
     reports: RoomReport[],
   ): void {
-    const turns: TurnBuffer[] = [];
-    const toolCalls: ToolCallEntry[] = [];
-    const pendingToolCalls: ToolCallEntry[] = [];
-    for (const event of events) {
-      ingestHistoryEvent(event, turns, toolCalls, pendingToolCalls);
-    }
-    // The backend replays this frame whenever the broadcast receiver lags
-    // (token-heavy turns can flood the ring faster than the socket drains).
-    // When that happens mid-stream, preserve the existing in-flight turns
-    // so the next `TurnToken` / `TurnCompleted` still has a buffer to land
-    // in - otherwise the active turn would visibly disappear and resume
-    // only after its DB row is written.
-    const existing = this.#state.views[room.id];
-    const liveTurns = existing?.turns.filter((t) => t.status === "streaming") ??
-      [];
-    const liveToolCalls =
-      existing?.toolCalls.filter((c) => c.status === "running") ?? [];
-    const liveReports =
-      existing?.reports.filter((r) => r.status === "streaming") ?? [];
+    // Snapshot is authoritative for `messages`. `drafts` are recreated by
+    // any `DraftStarted` frames the server replays right after subscribe;
+    // we wipe the live draft list so a stale draft from a previous
+    // selection of the same room doesn't linger.
     const view: RoomView = {
       room,
-      turns: [...turns, ...liveTurns],
-      toolCalls: [...toolCalls, ...liveToolCalls],
-      reports: mergeReports(reports.map(toReportBuffer), liveReports),
+      messages,
+      drafts: [],
+      reports: reports.map(toReportBuffer),
     };
     this.#patch({
       views: { ...this.#state.views, [room.id]: view },
@@ -415,168 +398,86 @@ export class DashboardStore {
 
 // -- Pure helpers ---------------------------------------------------------
 
-function ingestHistoryEvent(
-  event: RoomEvent,
-  turns: TurnBuffer[],
-  toolCalls: ToolCallEntry[],
-  pendingToolCalls: ToolCallEntry[],
-): void {
-  if (event.kind === "tool_call") {
-    const record = parseToolCallRecord(event.content);
-    if (record !== null) {
-      // Tool-call rows are persisted at the moment the tool result lands,
-      // *before* the assistant turn that owns them is written. Buffer them
-      // and attach to the next agent_chat / leader_note we see so the UI
-      // can scope the tool list under that turn.
-      pendingToolCalls.push({
-        id: `${event.sequence}`,
-        turnId: "",
-        sequence: event.sequence,
-        tool: record.tool,
-        argsPreview: previewArgs(record.args),
-        status: record.ok ? "ok" : "error",
-        outputPreview: record.outputPreview,
-        durationMs: record.durationMs,
-        timestamp: event.timestamp,
-      });
-    }
-    return;
-  }
-  if (
-    event.kind === "agent_chat" ||
-    event.kind === "leader_note" ||
-    event.kind === "system" ||
-    event.kind === "phase"
-  ) {
-    const turn = historyEventToTurn(event);
-    turns.push(turn);
-    if (pendingToolCalls.length > 0) {
-      for (const call of pendingToolCalls) {
-        toolCalls.push({ ...call, turnId: turn.turnId });
-      }
-      pendingToolCalls.length = 0;
-    }
-  }
-}
-
-function historyEventToTurn(event: RoomEvent): TurnBuffer {
-  const kind: TurnBuffer["kind"] = event.kind === "leader_note"
-    ? "leader_note"
-    : "agent_chat";
+function emptyDraft(turnId: string, agent: string, kind: TurnKind): Draft {
   return {
-    turnId: `history:${event.sequence}`,
-    agent: event.agent ?? eventKindLabel(event.kind),
+    turnId,
+    agent,
     kind,
-    content: event.content,
+    content: "",
     reasoning: "",
-    status: "completed",
-    sequence: event.sequence,
-    timestamp: event.timestamp,
+    toolCalls: [],
+    status: "streaming",
     error: null,
   };
 }
 
-function eventKindLabel(kind: RoomEventKind): string {
-  switch (kind) {
-    case "agent_chat":
-      return "agent";
-    case "leader_note":
-      return "leader";
-    case "phase":
-      return "phase";
-    case "system":
-      return "system";
-    case "tool_call":
-      return "tool";
-  }
-}
-
-function parseToolCallRecord(content: string): ToolCallRecord | null {
-  try {
-    const value = JSON.parse(content) as ToolCallRecord;
-    return value;
-  } catch {
-    return null;
-  }
-}
-
-function previewArgs(value: unknown): string {
-  try {
-    const text = JSON.stringify(value);
-    if (text === undefined) {
-      return "";
-    }
-    return text.length > 240 ? `${text.slice(0, 240)}...` : text;
-  } catch {
-    return "";
-  }
-}
-
-function appendOrReplaceTurn(
-  view: RoomView,
-  turn: TurnBuffer,
-): RoomView {
-  const idx = view.turns.findIndex((t) => t.turnId === turn.turnId);
-  const turns = idx >= 0
-    ? view.turns.map((t, i) => (i === idx ? turn : t))
-    : [...view.turns, turn];
-  return { ...view, turns };
-}
-
-function mapTurn(
+/**
+ * Inserts (or refreshes the metadata of) a draft for `turnId`. Refresh
+ * happens when the server replays `DraftStarted` for an already-known
+ * draft (e.g. because we're a late subscriber); we keep any tokens
+ * already accumulated and just patch the header.
+ */
+function upsertDraft(
   view: RoomView,
   turnId: string,
-  transform: (turn: TurnBuffer) => TurnBuffer,
+  agent: string,
+  kind: TurnKind,
 ): RoomView {
-  const turns = view.turns.map((turn) =>
-    turn.turnId === turnId ? transform(turn) : turn
-  );
-  return { ...view, turns };
-}
-
-function appendToolCall(view: RoomView, call: ToolCallEntry): RoomView {
-  return { ...view, toolCalls: [...view.toolCalls, call] };
-}
-
-function completeToolCall(
-  view: RoomView,
-  event: {
-    turnId: string;
-    sequence: number;
-    tool: string;
-    ok: boolean;
-    outputPreview: string;
-    durationMs: number;
-    timestamp: string;
-  },
-): RoomView {
-  const idx = view.toolCalls.findIndex((c) =>
-    c.status === "running" && c.turnId === event.turnId && c.tool === event.tool
-  );
+  const idx = view.drafts.findIndex((d) => d.turnId === turnId);
   if (idx < 0) {
-    return appendToolCall(view, {
-      id: `${event.sequence}`,
-      turnId: event.turnId,
-      sequence: event.sequence,
-      tool: event.tool,
-      argsPreview: "",
-      status: event.ok ? "ok" : "error",
-      outputPreview: event.outputPreview,
-      durationMs: event.durationMs,
-      timestamp: event.timestamp,
-    });
+    return {
+      ...view,
+      drafts: [...view.drafts, emptyDraft(turnId, agent, kind)],
+    };
   }
-  const updated: ToolCallEntry = {
-    ...view.toolCalls[idx],
-    id: `${event.sequence}`,
-    sequence: event.sequence,
-    status: event.ok ? "ok" : "error",
-    outputPreview: event.outputPreview,
-    durationMs: event.durationMs,
-    timestamp: event.timestamp,
-  };
-  const toolCalls = view.toolCalls.map((c, i) => (i === idx ? updated : c));
-  return { ...view, toolCalls };
+  const drafts = view.drafts.map((d, i) =>
+    i === idx ? { ...d, agent, kind } : d
+  );
+  return { ...view, drafts };
+}
+
+/**
+ * Applies `transform` to the draft for `turnId`. If no such draft exists
+ * yet (we received a delta before any `DraftStarted` frame), creates an
+ * anonymous placeholder so the tokens have somewhere to land - the
+ * server's replay will fill in the header before the next render.
+ */
+function mapDraft(
+  view: RoomView,
+  turnId: string,
+  transform: (draft: Draft) => Draft,
+): RoomView {
+  const idx = view.drafts.findIndex((d) => d.turnId === turnId);
+  if (idx < 0) {
+    const placeholder = emptyDraft(turnId, "", "agent_chat");
+    return {
+      ...view,
+      drafts: [...view.drafts, transform(placeholder)],
+    };
+  }
+  const drafts = view.drafts.map((d, i) => (i === idx ? transform(d) : d));
+  return { ...view, drafts };
+}
+
+/**
+ * Inserts `message` into `messages` keeping the list sorted by sequence.
+ * `MessageAdded` frames usually arrive in order, but we tolerate
+ * reordering (e.g. on-demand leader notes interleaved with a debater
+ * turn) by re-sorting around the insertion point.
+ */
+function appendMessage(messages: Message[], incoming: Message): Message[] {
+  if (messages.some((m) => m.sequence === incoming.sequence)) {
+    return messages.map((m) => m.sequence === incoming.sequence ? incoming : m);
+  }
+  if (
+    messages.length === 0 ||
+    incoming.sequence > messages[messages.length - 1].sequence
+  ) {
+    return [...messages, incoming];
+  }
+  const next = [...messages, incoming];
+  next.sort((a, b) => a.sequence - b.sequence);
+  return next;
 }
 
 function appendReport(view: RoomView, report: ReportBuffer): RoomView {
@@ -608,18 +509,10 @@ function toReportBuffer(report: RoomReport): ReportBuffer {
   };
 }
 
-/**
- * Drops live (still-streaming) reports that the snapshot now contains as
- * persisted rows, then keeps any remaining live reports on top.
- */
-function mergeReports(
-  fromSnapshot: ReportBuffer[],
-  live: ReportBuffer[],
-): ReportBuffer[] {
-  const known = new Set(fromSnapshot.map((r) => r.reportId));
-  const stillLive = live.filter((r) => !known.has(r.reportId));
-  return [...fromSnapshot, ...stillLive];
-}
+// `DraftToolCall` is referenced indirectly through `Draft.toolCalls`. Re-
+// export the alias so consumers (room-detail.ts) can keep their imports
+// minimal even though we never construct one directly here.
+export type { DraftToolCall };
 
 // Re-export for the dashboard view's status badge convenience.
 export type { RoomStatus };

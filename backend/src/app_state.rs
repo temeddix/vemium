@@ -7,32 +7,28 @@
 //! - `db`: connection pool to SQLite (durable storage).
 //! - `data_root`: filesystem root for room workspaces.
 //! - `rooms`: every loaded [`Room`] keyed by id.
-//! - `room_streams`: a [`broadcast::Sender`] per room, used to fan out
-//!   [`WsEvent`]s to any number of WebSocket subscribers.
+//! - `room_streams`: a [`RoomStream`] per room, used to fan out [`WsEvent`]s
+//!   to any number of WebSocket subscribers via per-subscriber priority
+//!   lanes (lifecycle vs. token).
 //! - `room_handles`: a [`RoomHandle`] per room that owns the orchestrator's
 //!   pause/stop signals.
 //!
 //! Access patterns:
 //!
 //! - The orchestrator reads/writes `rooms[id]` and `room_handles[id]`.
-//! - HTTP handlers read `rooms`, broadcast on `room_streams`, and toggle the
-//!   handle's pause flag.
-//! - WebSocket handlers subscribe to a sender from `room_streams`.
+//! - HTTP handlers read `rooms`, push events through `room_streams`, and
+//!   toggle the handle's pause flag.
+//! - WebSocket handlers subscribe to a [`RoomStream`] for live events.
 
 use crate::models::Room;
-use crate::streaming::WsEvent;
+use crate::streaming::RoomStream;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::{Notify, RwLock, broadcast};
+use tokio::sync::{Notify, RwLock};
 use uuid::Uuid;
-
-/// Capacity of each room's WebSocket broadcast channel. Slow or
-/// briefly-disconnected clients can fall behind by this many events before
-/// being dropped (and reconnecting to replay from the snapshot).
-const ROOM_BROADCAST_CAPACITY: usize = 512;
 
 /// Per-room control plane shared between the orchestrator and the HTTP API.
 ///
@@ -115,7 +111,7 @@ pub struct AppState {
   pub db: SqlitePool,
   pub data_root: Arc<PathBuf>,
   pub rooms: Arc<RwLock<HashMap<Uuid, Room>>>,
-  pub room_streams: Arc<RwLock<HashMap<Uuid, broadcast::Sender<WsEvent>>>>,
+  pub room_streams: Arc<RwLock<HashMap<Uuid, Arc<RoomStream>>>>,
   pub room_handles: Arc<RwLock<HashMap<Uuid, RoomHandle>>>,
 }
 
@@ -130,23 +126,20 @@ impl AppState {
     }
   }
 
-  /// Convenience: creates the WS broadcast channel for a room and returns
-  /// the sender. If the channel already exists, the existing sender is
-  /// returned unchanged (subscribers persist across orchestrator restarts).
-  pub async fn ensure_room_stream(
-    &self,
-    room_id: Uuid,
-  ) -> broadcast::Sender<WsEvent> {
+  /// Returns the room's [`RoomStream`], creating it on first access.
+  /// Subscribers persist across orchestrator restarts because the stream
+  /// lives in [`AppState`] rather than in the orchestrator task.
+  pub async fn ensure_room_stream(&self, room_id: Uuid) -> Arc<RoomStream> {
     {
       let streams = self.room_streams.read().await;
-      if let Some(sender) = streams.get(&room_id) {
-        return sender.clone();
+      if let Some(stream) = streams.get(&room_id) {
+        return stream.clone();
       }
     }
     let mut streams = self.room_streams.write().await;
     streams
       .entry(room_id)
-      .or_insert_with(|| broadcast::channel(ROOM_BROADCAST_CAPACITY).0)
+      .or_insert_with(|| Arc::new(RoomStream::new()))
       .clone()
   }
 

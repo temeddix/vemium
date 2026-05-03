@@ -28,7 +28,7 @@ use crate::models::{
   CreateRoomRequest, ProviderConfig, Room, RoomStatus, UpdateRoomRequest,
 };
 use crate::runtime;
-use crate::streaming::WsEvent;
+use crate::streaming::{RoomReceiver, WsEvent};
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -39,7 +39,6 @@ use axum::{Json, Router};
 use chrono::Utc;
 use serde_json::json;
 use slug::slugify;
-use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
@@ -324,8 +323,8 @@ async fn set_room_status(
     }
   }
 
-  let sender = state.ensure_room_stream(room_id).await;
-  let _ = sender.send(WsEvent::RoomStatus { status });
+  let stream = state.ensure_room_stream(room_id).await;
+  stream.send(WsEvent::RoomStatus { status });
 
   (StatusCode::OK, Json(json!({"status": status.as_str()}))).into_response()
 }
@@ -371,17 +370,17 @@ async fn stream_room_events(
   if state.rooms.read().await.get(&room_id).is_none() {
     return not_found("room");
   }
-  let sender = state.ensure_room_stream(room_id).await;
-  ws.on_upgrade(move |socket| {
-    handle_socket(socket, state, room_id, sender.subscribe())
-  })
+  let stream = state.ensure_room_stream(room_id).await;
+  let receiver = stream.subscribe();
+  ws.on_upgrade(move |socket| handle_socket(socket, state, room_id, receiver))
 }
 
-/// Builds the snapshot frame used to (re)hydrate a connected client. Returns
-/// `None` if the room has been deleted between connection time and now.
+/// Builds the snapshot frame sent right after a successful upgrade so the
+/// client starts from the persisted state. Returns `None` if the room was
+/// deleted between connection acceptance and snapshot construction.
 async fn build_snapshot(state: &AppState, room_id: Uuid) -> Option<WsEvent> {
   let room_view = state.rooms.read().await.get(&room_id).map(Room::view)?;
-  let events = db::load_room_events(&state.db, room_id)
+  let messages = db::load_room_events(&state.db, room_id)
     .await
     .report()
     .unwrap_or_default();
@@ -391,7 +390,7 @@ async fn build_snapshot(state: &AppState, room_id: Uuid) -> Option<WsEvent> {
     .unwrap_or_default();
   Some(WsEvent::Snapshot {
     room: Box::new(room_view),
-    events,
+    messages,
     reports,
   })
 }
@@ -400,7 +399,7 @@ async fn handle_socket(
   mut socket: WebSocket,
   state: AppState,
   room_id: Uuid,
-  mut receiver: broadcast::Receiver<WsEvent>,
+  mut receiver: RoomReceiver,
 ) {
   let Some(initial) = build_snapshot(&state, room_id).await else {
     return;
@@ -409,33 +408,36 @@ async fn handle_socket(
     return;
   }
   loop {
+    // `biased` makes lifecycle frames win the poll order so a backlog of
+    // tokens in the second lane can never delay a `TurnStarted` /
+    // `TurnCompleted`. Both lanes use bounded mpsc per-subscriber, so
+    // there's no shared ring that could evict another connection's
+    // events.
     tokio::select! {
+      biased;
       incoming = socket.recv() => match incoming {
         Some(Ok(Message::Close(_))) | None => break,
         Some(Ok(_)) => {}
         Some(Err(_)) => break,
       },
-      event = receiver.recv() => match event {
-        Ok(event) => {
+      event = receiver.lifecycle.recv() => match event {
+        Some(event) => {
           if !send_event(&mut socket, &event).await {
             break;
           }
         }
-        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-          // The client fell behind the broadcast ring (token-heavy turns
-          // can flood it faster than `socket.send` drains). Resync by
-          // replaying a fresh snapshot — the persisted history fills any
-          // turn whose `TurnStarted` was evicted, so the frontend won't
-          // be left receiving `TurnToken`s for an unknown turn.
-          tracing::warn!(%room_id, %skipped, "ws receiver lagged; replaying snapshot");
-          let Some(snapshot) = build_snapshot(&state, room_id).await else {
-            break;
-          };
-          if !send_event(&mut socket, &snapshot).await {
+        // Lifecycle channel closed: producer dropped this subscription
+        // (likely lifecycle buffer full -> behind beyond recovery). Bail
+        // and let the client reconnect with a fresh snapshot.
+        None => break,
+      },
+      event = receiver.tokens.recv() => match event {
+        Some(event) => {
+          if !send_event(&mut socket, &event).await {
             break;
           }
         }
-        Err(broadcast::error::RecvError::Closed) => break,
+        None => break,
       },
     }
   }

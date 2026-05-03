@@ -12,7 +12,7 @@ use crate::db;
 use crate::error::ReportError;
 use crate::llm::build_chat_client;
 use crate::models::{ProviderConfig, RoomEvent, RoomEventKind};
-use crate::streaming::{TurnKind, WsEvent, new_turn_id};
+use crate::streaming::WsEvent;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -180,24 +180,21 @@ impl RequestLeaderDecisionTool {
       kind: RoomEventKind::LeaderNote,
       agent: Some(LEADER_AGENT_LABEL.to_string()),
       content: content.to_string(),
+      reasoning: String::new(),
+      tool_calls: Vec::new(),
       timestamp,
     };
 
     db::insert_event(&self.state.db, &event).await.report();
 
-    let sender = self.state.ensure_room_stream(self.room_id).await;
-    let turn_id = new_turn_id();
-    let _ = sender.send(WsEvent::TurnStarted {
-      turn_id: turn_id.clone(),
-      agent: LEADER_AGENT_LABEL.to_string(),
-      kind: TurnKind::LeaderNote,
-    });
-    let _ = sender.send(WsEvent::TurnCompleted {
-      turn_id,
-      sequence,
-      agent: LEADER_AGENT_LABEL.to_string(),
-      content: content.to_string(),
-      timestamp,
+    let stream = self.state.ensure_room_stream(self.room_id).await;
+    // No draft phase: the on-demand leader call resolves synchronously
+    // before the calling agent's turn continues, so there is nothing to
+    // stream incrementally. Emit `MessageAdded` directly with a fresh
+    // turn id; the frontend has no draft to retire and just appends.
+    stream.send(WsEvent::MessageAdded {
+      turn_id: crate::streaming::new_turn_id(),
+      message: event,
     });
   }
 }

@@ -34,7 +34,8 @@ use crate::models::{
 };
 use crate::python_runner::PythonRunner;
 use crate::streaming::{
-  ReportId, TurnId, TurnKind, WsEvent, new_turn_id, report_id_for,
+  ReportId, RoomStream, ToolCallId, TurnId, TurnKind, WsEvent, new_turn_id,
+  report_id_for,
 };
 use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::workspace::{DebateRoot, RoomWorkspace};
@@ -47,7 +48,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -172,14 +173,6 @@ async fn run_debate_loop(
 
     if let Err(error) = result {
       tracing::warn!(%room_id, persona = %persona.name, %error, "chat turn failed");
-      emit_system_message(
-        &state,
-        &handle,
-        room_id,
-        &format!("Turn for {} failed: {error}", persona.name),
-      )
-      .await
-      .report();
     }
 
     let interval = snapshot.chat_interval_seconds.max(1);
@@ -207,10 +200,10 @@ async fn run_chat_turn(
   let user_prompt = build_chat_user_prompt(room, persona);
   let preamble = build_room_preamble(room);
 
-  let sender = state.ensure_room_stream(room.id).await;
+  let stream = state.ensure_room_stream(room.id).await;
   let turn_id = new_turn_id();
 
-  let _ = sender.send(WsEvent::TurnStarted {
+  stream.send(WsEvent::DraftStarted {
     turn_id: turn_id.clone(),
     agent: persona.name.to_string(),
     kind: TurnKind::AgentChat,
@@ -224,13 +217,8 @@ async fn run_chat_turn(
     room.high.clone(),
     preamble,
   );
-  let hook = DebateHook::new(
-    state.clone(),
-    handle.clone(),
-    room.id,
-    turn_id.clone(),
-    sender.clone(),
-  );
+  let hook = DebateHook::new(turn_id.clone(), stream.clone());
+  let recorder = hook.recorder();
 
   let client = build_chat_client(&room.low)
     .context("failed to construct low-tier client")?;
@@ -250,9 +238,8 @@ async fn run_chat_turn(
   let final_text = match result {
     Ok(text) => text,
     Err(error) => {
-      let _ = sender.send(WsEvent::TurnFailed {
+      stream.send(WsEvent::DraftFailed {
         turn_id,
-        partial: String::new(),
         error: error.to_string(),
       });
       return Err(error);
@@ -261,14 +248,14 @@ async fn run_chat_turn(
 
   let trimmed = final_text.trim().to_string();
   if trimmed.is_empty() {
-    let _ = sender.send(WsEvent::TurnFailed {
+    stream.send(WsEvent::DraftFailed {
       turn_id,
-      partial: String::new(),
       error: "model produced no text after tool loop".to_string(),
     });
     return Ok(());
   }
 
+  let (reasoning, tool_calls) = recorder.snapshot().await;
   let sequence = handle.allocate_event_sequence();
   let timestamp = Utc::now();
   let event = RoomEvent {
@@ -276,17 +263,16 @@ async fn run_chat_turn(
     sequence,
     kind: RoomEventKind::AgentChat,
     agent: Some(persona.name.to_string()),
-    content: trimmed.clone(),
+    content: trimmed,
+    reasoning,
+    tool_calls,
     timestamp,
   };
   db::insert_event(&state.db, &event).await.report();
 
-  let _ = sender.send(WsEvent::TurnCompleted {
+  stream.send(WsEvent::MessageAdded {
     turn_id,
-    sequence,
-    agent: persona.name.to_string(),
-    content: trimmed,
-    timestamp,
+    message: event,
   });
   Ok(())
 }
@@ -295,42 +281,81 @@ async fn run_chat_turn(
 
 /// Bridge between Rig's [`PromptHook`] callbacks and our WebSocket /
 /// persistence layer. One instance per turn.
+///
+/// The hook does NOT persist anything per-event. Reasoning deltas and tool
+/// invocations are accumulated in [`TurnRecorder`] (shared by `Arc` with
+/// the orchestrator); the orchestrator pulls them out at turn end and
+/// inserts a single `room_events` row containing the message text plus the
+/// inline reasoning + tool calls. The hook's only job is to fan WebSocket
+/// `Draft*` frames out to subscribers in real time.
 #[derive(Clone)]
 pub struct DebateHook {
-  state: AppState,
-  handle: RoomHandle,
-  room_id: Uuid,
   turn_id: TurnId,
-  sender: broadcast::Sender<WsEvent>,
-  /// Tracks `internal_call_id -> start_instant` for in-flight tool calls so
-  /// we can compute durations on completion.
-  tool_starts: Arc<Mutex<HashMap<String, Instant>>>,
+  stream: Arc<RoomStream>,
+  recorder: Arc<TurnRecorder>,
+  /// `rig::internal_call_id -> (call_id, tool_name, started_at)` for
+  /// in-flight tool calls, so we can correlate results back to starts.
+  tool_starts: Arc<Mutex<HashMap<String, ToolStart>>>,
+}
+
+#[derive(Clone)]
+struct ToolStart {
+  call_id: ToolCallId,
+  tool: String,
+  started_at: Instant,
+}
+
+/// Per-turn accumulator owned by both the [`DebateHook`] and the
+/// orchestrator. Reasoning deltas append to a string; finished tool calls
+/// append to a vec in invocation order.
+#[derive(Default)]
+pub struct TurnRecorder {
+  inner: Mutex<TurnRecorderInner>,
+}
+
+#[derive(Default)]
+struct TurnRecorderInner {
+  reasoning: String,
+  tool_calls: Vec<ToolCallRecord>,
+}
+
+impl TurnRecorder {
+  /// Returns the accumulated `(reasoning, tool_calls)` for this turn.
+  /// Called once at turn end after the LLM stream has fully drained.
+  pub async fn snapshot(&self) -> (String, Vec<ToolCallRecord>) {
+    let inner = self.inner.lock().await;
+    (inner.reasoning.clone(), inner.tool_calls.clone())
+  }
+
+  pub(crate) async fn append_reasoning(&self, delta: &str) {
+    self.inner.lock().await.reasoning.push_str(delta);
+  }
+
+  pub(crate) async fn record_tool_call(&self, record: ToolCallRecord) {
+    self.inner.lock().await.tool_calls.push(record);
+  }
 }
 
 impl DebateHook {
-  fn new(
-    state: AppState,
-    handle: RoomHandle,
-    room_id: Uuid,
-    turn_id: TurnId,
-    sender: broadcast::Sender<WsEvent>,
-  ) -> Self {
+  fn new(turn_id: TurnId, stream: Arc<RoomStream>) -> Self {
     Self {
-      state,
-      handle,
-      room_id,
       turn_id,
-      sender,
+      stream,
+      recorder: Arc::new(TurnRecorder::default()),
       tool_starts: Arc::new(Mutex::new(HashMap::new())),
     }
   }
 
-  pub(crate) fn sender(&self) -> &broadcast::Sender<WsEvent> {
-    &self.sender
+  pub(crate) fn stream(&self) -> &Arc<RoomStream> {
+    &self.stream
   }
 
   pub(crate) fn turn_id(&self) -> &TurnId {
     &self.turn_id
+  }
+
+  pub(crate) fn recorder(&self) -> Arc<TurnRecorder> {
+    self.recorder.clone()
   }
 }
 
@@ -343,7 +368,7 @@ where
     text_delta: &str,
     _aggregated_text: &str,
   ) -> HookAction {
-    let _ = self.sender.send(WsEvent::TurnToken {
+    self.stream.send(WsEvent::DraftText {
       turn_id: self.turn_id.clone(),
       delta: text_delta.to_string(),
     });
@@ -357,30 +382,46 @@ where
     internal_call_id: &str,
     args: &str,
   ) -> ToolCallHookAction {
-    let _ = self.sender.send(WsEvent::ToolStarted {
+    let call_id = internal_call_id.to_string();
+    self.stream.send(WsEvent::DraftToolStarted {
       turn_id: self.turn_id.clone(),
+      call_id: call_id.clone(),
       tool: tool_name.to_string(),
       args_preview: preview(args),
     });
-    self
-      .tool_starts
-      .lock()
-      .await
-      .insert(internal_call_id.to_string(), Instant::now());
+    self.tool_starts.lock().await.insert(
+      call_id.clone(),
+      ToolStart {
+        call_id,
+        tool: tool_name.to_string(),
+        started_at: Instant::now(),
+      },
+    );
     ToolCallHookAction::cont()
   }
 
   async fn on_tool_result(
     &self,
-    tool_name: &str,
+    _tool_name: &str,
     _tool_call_id: Option<String>,
     internal_call_id: &str,
     args: &str,
     result: &str,
   ) -> HookAction {
     let started = self.tool_starts.lock().await.remove(internal_call_id);
-    let duration_ms =
-      started.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
+    let Some(ToolStart {
+      call_id,
+      tool,
+      started_at,
+    }) = started
+    else {
+      tracing::warn!(
+        internal_call_id,
+        "tool result without matching start; dropping"
+      );
+      return HookAction::cont();
+    };
+    let duration_ms = started_at.elapsed().as_millis() as u64;
     // Heuristic: rig surfaces tool errors via `Result::Err`, which it then
     // serializes with a recognizable "Tool error:" prefix in the assistant
     // message back to the model. Treat anything else as success.
@@ -389,35 +430,22 @@ where
     let args_value: serde_json::Value =
       serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
 
-    let sequence = self.handle.allocate_event_sequence();
-    let timestamp = Utc::now();
     let record = ToolCallRecord {
-      tool: tool_name.to_string(),
+      tool: tool.clone(),
       args: args_value,
       ok,
       output_preview: preview_text.clone(),
       duration_ms,
     };
-    if let Ok(serialized) = serde_json::to_string(&record) {
-      let event = RoomEvent {
-        room_id: self.room_id,
-        sequence,
-        kind: RoomEventKind::ToolCall,
-        agent: None,
-        content: serialized,
-        timestamp,
-      };
-      db::insert_event(&self.state.db, &event).await.report();
-    }
+    self.recorder.record_tool_call(record).await;
 
-    let _ = self.sender.send(WsEvent::ToolCompleted {
+    self.stream.send(WsEvent::DraftToolCompleted {
       turn_id: self.turn_id.clone(),
-      sequence,
-      tool: tool_name.to_string(),
+      call_id,
+      tool,
       ok,
       output_preview: preview_text,
       duration_ms,
-      timestamp,
     });
     HookAction::cont()
   }
@@ -475,38 +503,37 @@ async fn run_leader_evaluation(
      your evaluation now."
   );
 
-  let sender = state.ensure_room_stream(room.id).await;
+  let stream = state.ensure_room_stream(room.id).await;
   let turn_id = new_turn_id();
 
-  let _ = sender.send(WsEvent::TurnStarted {
+  stream.send(WsEvent::DraftStarted {
     turn_id: turn_id.clone(),
     agent: LEADER_EVAL_AGENT.to_string(),
     kind: TurnKind::LeaderNote,
   });
 
-  let hook = DebateHook::new(
-    state.clone(),
-    handle.clone(),
-    room.id,
-    turn_id.clone(),
-    sender.clone(),
-  );
+  let hook = DebateHook::new(turn_id.clone(), stream.clone());
+  let recorder = hook.recorder();
 
   let final_text = stream_leader_completion(&room.high, &system, user, hook)
     .await
     .inspect_err(|error| {
-      let _ = sender.send(WsEvent::TurnFailed {
+      stream.send(WsEvent::DraftFailed {
         turn_id: turn_id.clone(),
-        partial: String::new(),
         error: error.to_string(),
       });
     })?;
 
   let trimmed = final_text.trim().to_string();
   if trimmed.is_empty() {
+    stream.send(WsEvent::DraftFailed {
+      turn_id,
+      error: "leader produced no text".to_string(),
+    });
     return Ok(());
   }
 
+  let (reasoning, tool_calls) = recorder.snapshot().await;
   let sequence = handle.allocate_event_sequence();
   let timestamp = Utc::now();
   let event = RoomEvent {
@@ -514,17 +541,16 @@ async fn run_leader_evaluation(
     sequence,
     kind: RoomEventKind::LeaderNote,
     agent: Some(LEADER_EVAL_AGENT.to_string()),
-    content: trimmed.clone(),
+    content: trimmed,
+    reasoning,
+    tool_calls,
     timestamp,
   };
   db::insert_event(&state.db, &event).await.report();
 
-  let _ = sender.send(WsEvent::TurnCompleted {
+  stream.send(WsEvent::MessageAdded {
     turn_id,
-    sequence,
-    agent: LEADER_EVAL_AGENT.to_string(),
-    content: trimmed,
-    timestamp,
+    message: event,
   });
   Ok(())
 }
@@ -599,13 +625,13 @@ async fn run_leader_report(
     db::start_report(&state.db, room.id, sequence, started_at).await?;
   let report_id = report_id_for(report.id);
 
-  let sender = state.ensure_room_stream(room.id).await;
-  let _ = sender.send(WsEvent::ReportStarted {
+  let stream = state.ensure_room_stream(room.id).await;
+  stream.send(WsEvent::ReportStarted {
     report_id: report_id.clone(),
     sequence,
   });
 
-  let hook = ReportHook::new(report_id.clone(), sender.clone());
+  let hook = ReportHook::new(report_id.clone(), stream.clone());
 
   let outcome = stream_leader_report(&room.high, &system, user, hook).await;
   let completed_at = Utc::now();
@@ -622,7 +648,7 @@ async fn run_leader_report(
       )
       .await
       .report();
-      let _ = sender.send(WsEvent::ReportCompleted {
+      stream.send(WsEvent::ReportCompleted {
         report_id,
         sequence,
         content: final_content,
@@ -641,7 +667,7 @@ async fn run_leader_report(
       )
       .await
       .report();
-      let _ = sender.send(WsEvent::ReportCompleted {
+      stream.send(WsEvent::ReportCompleted {
         report_id,
         sequence,
         content: String::new(),
@@ -676,12 +702,12 @@ async fn stream_leader_report(
 #[derive(Clone)]
 pub struct ReportHook {
   report_id: ReportId,
-  sender: broadcast::Sender<WsEvent>,
+  stream: Arc<RoomStream>,
 }
 
 impl ReportHook {
-  fn new(report_id: ReportId, sender: broadcast::Sender<WsEvent>) -> Self {
-    Self { report_id, sender }
+  fn new(report_id: ReportId, stream: Arc<RoomStream>) -> Self {
+    Self { report_id, stream }
   }
 }
 
@@ -694,7 +720,7 @@ where
     text_delta: &str,
     _aggregated_text: &str,
   ) -> HookAction {
-    let _ = self.sender.send(WsEvent::ReportToken {
+    self.stream.send(WsEvent::ReportToken {
       report_id: self.report_id.clone(),
       delta: text_delta.to_string(),
     });
@@ -749,24 +775,14 @@ fn build_room_preamble(room: &Room) -> String {
   out
 }
 
-/// Renders persisted events as the agent's chat history. Tool calls and
-/// system events are excluded - they are private orchestrator state, not
-/// part of the shared dialogue.
-///
-/// The history alternates by speaker label (the prior speaker's name is
-/// embedded in each `assistant` message so the new debater can tell turns
-/// apart).
+/// Renders persisted messages as the agent's chat history. Each row is
+/// folded into one assistant message tagged with the speaker name so a new
+/// debater can tell whose turn was whose.
 fn render_transcript_messages(
   events: &[RoomEvent],
 ) -> Vec<rig::completion::Message> {
   events
     .iter()
-    .filter(|event| {
-      matches!(
-        event.kind,
-        RoomEventKind::AgentChat | RoomEventKind::LeaderNote
-      )
-    })
     .map(|event| {
       let speaker = event.agent.as_deref().unwrap_or("speaker");
       let body = format!("{speaker}: {}", event.content);
@@ -785,12 +801,6 @@ fn render_transcript_messages(
 fn render_transcript_text(events: &[RoomEvent]) -> String {
   events
     .iter()
-    .filter(|event| {
-      matches!(
-        event.kind,
-        RoomEventKind::AgentChat | RoomEventKind::LeaderNote
-      )
-    })
     .map(|event| {
       let speaker = event.agent.as_deref().unwrap_or("speaker");
       format!("[{speaker}] {}", event.content)
@@ -806,49 +816,6 @@ fn preview(text: &str) -> String {
   let mut out: String = text.chars().take(PREVIEW_MAX_CHARS).collect();
   out.push_str("...");
   out
-}
-
-async fn emit_system_message(
-  state: &AppState,
-  handle: &RoomHandle,
-  room_id: Uuid,
-  message: &str,
-) -> Result<()> {
-  let sequence = handle.allocate_event_sequence();
-  let timestamp = Utc::now();
-  let event = RoomEvent {
-    room_id,
-    sequence,
-    kind: RoomEventKind::System,
-    agent: None,
-    content: message.to_string(),
-    timestamp,
-  };
-  db::insert_event(&state.db, &event).await?;
-  let sender = state.ensure_room_stream(room_id).await;
-  let _ = sender.send(WsEvent::RoomStatus {
-    status: state
-      .rooms
-      .read()
-      .await
-      .get(&room_id)
-      .map(|room| room.status)
-      .unwrap_or(RoomStatus::Active),
-  });
-  let turn_id = new_turn_id();
-  let _ = sender.send(WsEvent::TurnStarted {
-    turn_id: turn_id.clone(),
-    agent: "system".to_string(),
-    kind: TurnKind::AgentChat,
-  });
-  let _ = sender.send(WsEvent::TurnCompleted {
-    turn_id,
-    sequence,
-    agent: "system".to_string(),
-    content: message.to_string(),
-    timestamp,
-  });
-  Ok(())
 }
 
 // Workspace dir convenience for the [`AppState`] data root.

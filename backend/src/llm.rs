@@ -29,12 +29,11 @@ use rig::providers::{
 };
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde_json::{Value, json};
-use tokio::sync::broadcast;
 
 use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
-use crate::runtime::{DebateHook, ReportHook};
-use crate::streaming::{TurnId, WsEvent};
+use crate::runtime::{DebateHook, ReportHook, TurnRecorder};
+use crate::streaming::{RoomStream, TurnId, WsEvent};
 use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::python::RunPythonTool;
 use crate::tools::web_fetch::WebFetchTool;
@@ -329,8 +328,9 @@ where
     .tool(inputs.leader_tool)
     .build();
 
-  let reasoning_sender = inputs.hook.sender().clone();
+  let reasoning_stream = inputs.hook.stream().clone();
   let reasoning_turn_id = inputs.hook.turn_id().clone();
+  let reasoning_recorder = inputs.hook.recorder();
 
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
@@ -346,7 +346,13 @@ where
         final_text = final_response.response().to_string();
       }
       MultiTurnStreamItem::StreamAssistantItem(content) => {
-        forward_reasoning(&reasoning_sender, &reasoning_turn_id, &content);
+        forward_reasoning(
+          &reasoning_stream,
+          &reasoning_turn_id,
+          &reasoning_recorder,
+          &content,
+        )
+        .await;
         // Text deltas, tool starts, and tool results are surfaced through
         // `DebateHook`; we only intercept reasoning here.
       }
@@ -366,8 +372,9 @@ where
   M: CompletionModel + 'static,
 {
   let agent = builder.preamble(&inputs.system_prompt).build();
-  let reasoning_sender = inputs.hook.sender().clone();
+  let reasoning_stream = inputs.hook.stream().clone();
   let reasoning_turn_id = inputs.hook.turn_id().clone();
+  let reasoning_recorder = inputs.hook.recorder();
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .with_hook(inputs.hook)
@@ -380,7 +387,13 @@ where
         final_text = final_response.response().to_string();
       }
       MultiTurnStreamItem::StreamAssistantItem(content) => {
-        forward_reasoning(&reasoning_sender, &reasoning_turn_id, &content);
+        forward_reasoning(
+          &reasoning_stream,
+          &reasoning_turn_id,
+          &reasoning_recorder,
+          &content,
+        )
+        .await;
       }
       _ => {}
     }
@@ -415,11 +428,13 @@ where
 
 /// Forwards reasoning tokens that arrive on the [`MultiTurnStreamItem`]
 /// stream. Reasoning is not exposed via [`rig::agent::PromptHook`], so we
-/// extract it here and emit a [`WsEvent::TurnReasoningToken`] for live
-/// rendering.
-fn forward_reasoning<R>(
-  sender: &broadcast::Sender<WsEvent>,
+/// extract it here, push it into the [`TurnRecorder`] (so the eventual
+/// `MessageAdded` includes the full trace inline) and emit a
+/// [`WsEvent::DraftReasoning`] frame for live rendering.
+async fn forward_reasoning<R>(
+  stream: &RoomStream,
   turn_id: &TurnId,
+  recorder: &TurnRecorder,
   item: &StreamedAssistantContent<R>,
 ) {
   let delta = match item {
@@ -438,7 +453,8 @@ fn forward_reasoning<R>(
     }
     _ => return,
   };
-  let _ = sender.send(WsEvent::TurnReasoningToken {
+  recorder.append_reasoning(&delta).await;
+  stream.send(WsEvent::DraftReasoning {
     turn_id: turn_id.clone(),
     delta,
   });

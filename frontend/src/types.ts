@@ -50,20 +50,19 @@ export interface Room {
   updatedAt: string;
 }
 
-export type RoomEventKind =
-  | "agent_chat"
-  | "leader_note"
-  | "tool_call"
-  | "phase"
-  | "system";
-
-export interface RoomEvent {
+/**
+ * One finalized message in a room's chat log. Reasoning trace and the list
+ * of tool calls invoked during the turn are inline on the same record;
+ * there is no separate "tool_call" event type any more.
+ */
+export interface Message {
   roomId: string;
   sequence: number;
-  kind: RoomEventKind;
+  kind: TurnKind;
   agent: string | null;
-  /** For `tool_call`, this is JSON-encoded `ToolCallRecord`; otherwise plain text. */
   content: string;
+  reasoning: string;
+  toolCalls: ToolCallRecord[];
   timestamp: string;
 }
 
@@ -87,12 +86,21 @@ export interface ToolCallRecord {
 
 // -- WebSocket events -----------------------------------------------------
 
+/**
+ * Both kinds participate in the LLM-visible transcript and render as
+ * message cards. Used by `Message`, `Draft`, and the WS draft frames.
+ */
 export type TurnKind = "agent_chat" | "leader_note";
 
+/**
+ * First frame on every connect. Carries the room state and the persisted
+ * message log; in-flight drafts are surfaced separately via `DraftStarted`
+ * frames replayed by the server immediately after subscribe.
+ */
 export interface WsSnapshot {
   type: "snapshot";
   room: Room;
-  events: RoomEvent[];
+  messages: Message[];
   reports: RoomReport[];
 }
 
@@ -101,57 +109,57 @@ export interface WsRoomStatus {
   status: RoomStatus;
 }
 
-export interface WsTurnStarted {
-  type: "turnStarted";
+export interface WsDraftStarted {
+  type: "draftStarted";
   turnId: string;
   agent: string;
   kind: TurnKind;
 }
 
-export interface WsTurnToken {
-  type: "turnToken";
+export interface WsDraftText {
+  type: "draftText";
   turnId: string;
   delta: string;
 }
 
-export interface WsTurnReasoningToken {
-  type: "turnReasoningToken";
+export interface WsDraftReasoning {
+  type: "draftReasoning";
   turnId: string;
   delta: string;
 }
 
-export interface WsTurnCompleted {
-  type: "turnCompleted";
+export interface WsDraftToolStarted {
+  type: "draftToolStarted";
   turnId: string;
-  sequence: number;
-  agent: string;
-  content: string;
-  timestamp: string;
-}
-
-export interface WsTurnFailed {
-  type: "turnFailed";
-  turnId: string;
-  partial: string;
-  error: string;
-}
-
-export interface WsToolStarted {
-  type: "toolStarted";
-  turnId: string;
+  callId: string;
   tool: string;
   argsPreview: string;
 }
 
-export interface WsToolCompleted {
-  type: "toolCompleted";
+export interface WsDraftToolCompleted {
+  type: "draftToolCompleted";
   turnId: string;
-  sequence: number;
+  callId: string;
   tool: string;
   ok: boolean;
   outputPreview: string;
   durationMs: number;
-  timestamp: string;
+}
+
+export interface WsDraftFailed {
+  type: "draftFailed";
+  turnId: string;
+  error: string;
+}
+
+/**
+ * Authoritative finalization. The frontend retires the matching draft (if
+ * any) and appends `message` to the chat log.
+ */
+export interface WsMessageAdded {
+  type: "messageAdded";
+  turnId: string;
+  message: Message;
 }
 
 export interface WsReportStarted {
@@ -178,13 +186,13 @@ export interface WsReportCompleted {
 export type WsEvent =
   | WsSnapshot
   | WsRoomStatus
-  | WsTurnStarted
-  | WsTurnToken
-  | WsTurnReasoningToken
-  | WsTurnCompleted
-  | WsTurnFailed
-  | WsToolStarted
-  | WsToolCompleted
+  | WsDraftStarted
+  | WsDraftText
+  | WsDraftReasoning
+  | WsDraftToolStarted
+  | WsDraftToolCompleted
+  | WsDraftFailed
+  | WsMessageAdded
   | WsReportStarted
   | WsReportToken
   | WsReportCompleted;
@@ -215,42 +223,34 @@ export type UpdateRoomRequest =
     high?: ProviderConfig;
   };
 
-// -- Live in-memory turn buffer -------------------------------------------
+// -- Live in-memory state -------------------------------------------------
 
 /**
- * One in-flight or completed turn keyed by the orchestrator's `turnId`.
- * The store builds these from streamed `WsEvent`s and the persisted
- * `RoomEvent` history, so the UI renders both replayed and live turns
- * uniformly.
+ * A turn that's currently being produced by the model. Built up from
+ * `Draft*` WS frames, retired when the matching `MessageAdded` arrives.
+ * Drafts are purely transient - they're never persisted and they don't
+ * survive reconnects intact (a draft already in-flight at connect time is
+ * surfaced via the server's `DraftStarted` replay, but its accumulated
+ * text starts empty and only fills with whatever tokens arrive after).
  */
-export interface TurnBuffer {
+export interface Draft {
   turnId: string;
   agent: string;
   kind: TurnKind;
   content: string;
-  /**
-   * Live "thinking" trace streamed alongside `content` when the model emits
-   * chain-of-thought separately. Empty for models that don't expose
-   * reasoning, and lost on reconnect (not persisted).
-   */
   reasoning: string;
-  status: "streaming" | "completed" | "failed";
-  sequence: number | null;
-  timestamp: string | null;
+  toolCalls: DraftToolCall[];
+  status: "streaming" | "failed";
   error: string | null;
 }
 
-export interface ToolCallEntry {
-  /** Stable id; derived from `sequence` for completed calls or `turnId+tool` for in-flight ones. */
-  id: string;
-  turnId: string;
-  sequence: number | null;
+export interface DraftToolCall {
+  callId: string;
   tool: string;
   argsPreview: string;
   status: "running" | "ok" | "error";
   outputPreview: string | null;
   durationMs: number | null;
-  timestamp: string | null;
 }
 
 export interface ReportBuffer {
@@ -262,20 +262,16 @@ export interface ReportBuffer {
 }
 
 /**
- * Aggregated per-room view that the dashboard renders. Built incrementally
- * from `WsEvent`s by the store; never sent over the wire.
+ * Aggregated per-room view that the dashboard renders. Built from the
+ * snapshot's `messages` (authoritative) plus live WS draft / message /
+ * report frames. Never sent over the wire.
  */
 export interface RoomView {
   room: Room;
-  /**
-   * Ordered timeline of turns. Each turn aggregates the `turnStarted`,
-   * `turnToken`s, and `turnCompleted` events that share the same `turnId`,
-   * plus the historical `RoomEvent`s for completed turns reloaded from
-   * the database snapshot.
-   */
-  turns: TurnBuffer[];
-  /** Tool calls associated with any turn in this room, newest last. */
-  toolCalls: ToolCallEntry[];
+  /** Finalized messages, newest last. Replaced wholesale on snapshot. */
+  messages: Message[];
+  /** In-flight drafts, keyed by turnId. Usually 0 or 1 entries. */
+  drafts: Draft[];
   /** All reports for this room, newest last. */
   reports: ReportBuffer[];
 }
