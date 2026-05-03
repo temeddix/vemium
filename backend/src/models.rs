@@ -65,7 +65,7 @@ impl RoomStatus {
 #[derive(
   Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
 )]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub enum ApiType {
   #[default]
   Ollama,

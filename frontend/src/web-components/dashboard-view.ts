@@ -537,7 +537,7 @@ export class DashboardView extends LitElement {
         </p>
         ${this.#renderApiTypeSelect(apiType, (next) => {
           const patch: Partial<ProviderConfig> = { apiType: next };
-          if (next === "openrouter") {
+          if (next === "openRouter") {
             patch.baseUrl = "https://openrouter.ai/api/v1";
           }
           onChange({ ...config, ...patch });
@@ -551,7 +551,7 @@ export class DashboardView extends LitElement {
             "Model",
             config.model,
             (model) => onChange({ ...config, model }),
-          )} ${apiType === "openrouter"
+          )} ${apiType === "openRouter"
           ? this.#renderTextField(
             "API key (required for OpenRouter)",
             config.apiKey ?? "",
@@ -569,7 +569,7 @@ export class DashboardView extends LitElement {
   ) {
     const options: { id: ApiType; label: string }[] = [
       { id: "ollama", label: "Ollama (also llama.cpp, vLLM, self-hosted)" },
-      { id: "openrouter", label: "OpenRouter" },
+      { id: "openRouter", label: "OpenRouter" },
     ];
     return html`
       <label class="form-field">
@@ -578,7 +578,7 @@ export class DashboardView extends LitElement {
           e: Event,
         ): void => {
           const value = readInputValue(e.target);
-          if (value === "ollama" || value === "openrouter") {
+          if (value === "ollama" || value === "openRouter") {
             onChange(value);
           }
         }}">

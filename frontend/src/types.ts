@@ -7,11 +7,11 @@ export type ReportStatus = "streaming" | "done" | "failed";
 /**
  * Which provider family a `ProviderConfig` targets. Selects the underlying
  * rig client at runtime: `ollama` uses the native `/api/chat` protocol,
- * `openrouter` uses OpenAI-compatible streaming and works against
+ * `openRouter` uses OpenAI-compatible streaming and works against
  * OpenRouter (and any OpenAI-compatible endpoint that emits
  * `delta.reasoning`, e.g. llama.cpp).
  */
-export type ApiType = "ollama" | "openrouter";
+export type ApiType = "ollama" | "openRouter";
 
 export interface ProviderConfig {
   model: string;

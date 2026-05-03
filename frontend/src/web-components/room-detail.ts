@@ -789,9 +789,9 @@ export class RoomDetail extends LitElement {
             e: Event,
           ): void => {
             const value = readInputValue(e.target);
-            if (value === "ollama" || value === "openrouter") {
+            if (value === "ollama" || value === "openRouter") {
               const patch: Partial<ProviderConfig> = { apiType: value };
-              if (value === "openrouter") {
+              if (value === "openRouter") {
                 patch.baseUrl = "https://openrouter.ai/api/v1";
               }
               onChange({ ...config, ...patch });
@@ -799,7 +799,7 @@ export class RoomDetail extends LitElement {
           }}">
             <wa-option value="ollama"
             >Ollama (also llama.cpp, vLLM, self-hosted)</wa-option>
-            <wa-option value="openrouter">OpenRouter</wa-option>
+            <wa-option value="openRouter">OpenRouter</wa-option>
           </wa-select>
         </label>
         ${apiType === "ollama"
@@ -812,7 +812,7 @@ export class RoomDetail extends LitElement {
             "Model",
             config.model,
             (model) => onChange({ ...config, model }),
-          )} ${apiType === "openrouter"
+          )} ${apiType === "openRouter"
           ? this.#renderTextField(
             "API key (required for OpenRouter)",
             config.apiKey ?? "",
