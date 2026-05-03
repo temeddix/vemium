@@ -1,9 +1,9 @@
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
 import type {
+  ApiType,
   CreateRoomRequest,
   ProviderConfig,
-  ReasoningField,
   Room,
   RoomStatus,
 } from "@/app/types";
@@ -34,7 +34,7 @@ const EMPTY_PROVIDER: ProviderConfig = {
   model: "",
   baseUrl: "",
   apiKey: null,
-  reasoningField: "reasoning",
+  apiType: "ollama",
 };
 
 const EMPTY_FORM: CreateRoomForm = {
@@ -262,6 +262,13 @@ export class DashboardView extends LitElement {
       letter-spacing: 0.05em;
       text-transform: uppercase;
       color: var(--wa-color-text-quiet);
+    }
+
+    .form-hint {
+      font-size: 0.72rem;
+      color: var(--wa-color-text-quiet);
+      margin: 0 0 0.2rem;
+      line-height: 1.3;
     }
 
     .provider-grid {
@@ -520,55 +527,56 @@ export class DashboardView extends LitElement {
     config: ProviderConfig,
     onChange: (config: ProviderConfig) => void,
   ) {
+    const apiType: ApiType = config.apiType ?? "ollama";
     return html`
       <fieldset class="tier">
         <legend>${label}</legend>
-        ${this.#renderTextField(
-          "Base URL (e.g. https://openrouter.ai/api/v1, http://localhost:11434/v1)",
+        <p class="form-hint">
+          Only OpenRouter requires an API key; Ollama / llama.cpp / vLLM and other
+          self-hosted endpoints leave it blank.
+        </p>
+        ${this.#renderApiTypeSelect(apiType, (next) => {
+          const patch: Partial<ProviderConfig> = { apiType: next };
+          if (next === "openrouter" && !config.baseUrl.trim()) {
+            patch.baseUrl = "https://openrouter.ai/api/v1";
+          }
+          onChange({ ...config, ...patch });
+        })} ${this.#renderTextField(
+          "Base URL (e.g. https://openrouter.ai/api/v1, http://localhost:11434)",
           config.baseUrl,
           (value) => onChange({ ...config, baseUrl: value }),
         )} ${this.#renderTextField(
           "Model",
           config.model,
           (model) => onChange({ ...config, model }),
-        )} ${this.#renderTextField(
-          "API key (optional for local servers)",
-          config.apiKey ?? "",
-          (value) =>
-            onChange({ ...config, apiKey: value === "" ? null : value }),
-        )} ${this.#renderReasoningFieldSelect(
-          config.reasoningField ?? "reasoning",
-          (next) => {
-            const patch: Partial<ProviderConfig> = { reasoningField: next };
-            if (next === "reasoning" && !config.baseUrl.trim()) {
-              patch.baseUrl = "https://openrouter.ai/api/v1";
-            }
-            onChange({ ...config, ...patch });
-          },
-        )}
+        )} ${apiType === "openrouter"
+          ? this.#renderTextField(
+            "API key (required for OpenRouter)",
+            config.apiKey ?? "",
+            (value) =>
+              onChange({ ...config, apiKey: value === "" ? null : value }),
+          )
+          : ""}
       </fieldset>
     `;
   }
 
-  #renderReasoningFieldSelect(
-    current: ReasoningField,
-    onChange: (kind: ReasoningField) => void,
+  #renderApiTypeSelect(
+    current: ApiType,
+    onChange: (next: ApiType) => void,
   ) {
-    const options: { id: ReasoningField; label: string }[] = [
-      { id: "reasoning", label: "reasoning (OpenRouter, Ollama, llama.cpp)" },
-      {
-        id: "reasoning_content",
-        label: "reasoning_content (DeepSeek, vLLM, OpenAI o-series)",
-      },
+    const options: { id: ApiType; label: string }[] = [
+      { id: "ollama", label: "Ollama (also llama.cpp, vLLM, self-hosted)" },
+      { id: "openrouter", label: "OpenRouter" },
     ];
     return html`
       <label class="form-field">
-        <span class="form-label">Reasoning field</span>
+        <span class="form-label">API type</span>
         <wa-select size="small" .value="${current}" @change="${(
           e: Event,
         ): void => {
           const value = readInputValue(e.target);
-          if (value === "reasoning" || value === "reasoning_content") {
+          if (value === "ollama" || value === "openrouter") {
             onChange(value);
           }
         }}">

@@ -52,32 +52,28 @@ impl RoomStatus {
   }
 }
 
-/// Which JSON field name the upstream provider uses to stream chain-of-thought
-/// tokens. Vendors split into two camps:
+/// Which provider family a [`ProviderConfig`] targets. Each value selects a
+/// different rig client at runtime (see `crate::llm::build_chat_client`):
 ///
-/// - `Reasoning`: OpenRouter, Ollama, llama.cpp - the wider convention.
-/// - `ReasoningContent`: DeepSeek's official API, vLLM defaults, OpenAI's
-///   o-series via the Chat Completions endpoint.
-///
-/// Both values use [`openai::CompletionsClient`] for the actual HTTP call.
-/// `ReasoningContent` providers will have their thinking traces forwarded to
-/// the UI; `Reasoning` providers (Ollama etc.) will work correctly but their
-/// `delta.reasoning` field is not currently parsed by the client.
+/// - [`ApiType::Ollama`]: rig's native Ollama client (`/api/chat`, NDJSON).
+///   Covers Ollama itself plus any other server that exposes the same native
+///   protocol. `base_url` should point at the server root (e.g.
+///   `http://localhost:11434`); `api_key` is optional.
+/// - [`ApiType::OpenRouter`]: rig's OpenRouter client. `base_url` is normally
+///   `https://openrouter.ai/api/v1` but is left configurable for proxies;
+///   `api_key` is required.
 #[derive(
   Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum ReasoningField {
-  /// `delta.reasoning` - default, covers OpenRouter and most local servers.
+pub enum ApiType {
   #[default]
-  Reasoning,
-  /// `delta.reasoning_content` - DeepSeek convention.
-  ReasoningContent,
+  Ollama,
+  OpenRouter,
 }
 
 /// Per-tier provider configuration for a room. One [`ProviderConfig`] is
-/// stored for each of the low and high tiers. The wire protocol assumed is
-/// always OpenAI Chat Completions; only the reasoning-field convention varies.
+/// stored for each of the low and high tiers.
 ///
 /// Validation happens in `crate::routes::validate_provider_config`; client
 /// construction lives in `crate::llm`.
@@ -85,18 +81,18 @@ pub enum ReasoningField {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
   pub model: String,
-  /// Endpoint root, e.g. `https://openrouter.ai/api/v1` or
-  /// `http://localhost:11434/v1`. Always required - rig appends
-  /// `/chat/completions` to this.
+  /// Endpoint root. For Ollama, the server root (e.g.
+  /// `http://localhost:11434`). For OpenRouter, the API base (normally
+  /// `https://openrouter.ai/api/v1`).
   pub base_url: String,
   /// Bearer token. Plaintext in storage - do not return through the public
-  /// API without redaction. `None` for endpoints that don't require auth
-  /// (e.g. local Ollama).
+  /// API without redaction. Required for OpenRouter; optional for Ollama.
   #[serde(default)]
   pub api_key: Option<String>,
-  /// Which JSON field carries reasoning deltas; defaults to `Reasoning`.
+  /// Which provider family to use. Defaults to [`ApiType::Ollama`] so older
+  /// rooms persisted before this field existed continue to load.
   #[serde(default)]
-  pub reasoning_field: ReasoningField,
+  pub api_type: ApiType,
 }
 
 impl ProviderConfig {
@@ -107,7 +103,7 @@ impl ProviderConfig {
       model: self.model.clone(),
       base_url: self.base_url.clone(),
       api_key: self.api_key.as_deref().map(redact_secret),
-      reasoning_field: self.reasoning_field,
+      api_type: self.api_type,
     }
   }
 }

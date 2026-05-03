@@ -18,18 +18,16 @@
 //!
 //! ## How streaming + tools are wired
 //!
-//! Each turn builds a [`rig::agent::Agent`] from the room's `low` (or
-//! `high`) provider config and attaches a [`DebateHook`] (or
-//! [`ReportHook`]). The hook receives token deltas and tool-call lifecycle
-//! callbacks from Rig and forwards them to the room's WebSocket broadcaster
-//! plus persistent storage. We do not iterate raw stream items ourselves -
-//! Rig drives the multi-turn agentic loop internally and we just await its
-//! [`MultiTurnStreamItem::FinalResponse`] to know when to stop.
+//! Each turn delegates to [`crate::llm::ChatClient`], which adapts the
+//! room's [`ProviderConfig`] to one of the supported rig providers. The
+//! runtime supplies turn inputs (system prompt, history, hook) and receives
+//! the final assistant text once the stream completes; per-token deltas
+//! flow through the [`DebateHook`] / [`ReportHook`] passed in.
 
 use crate::app_state::{AppState, RoomHandle};
 use crate::db;
 use crate::error::ReportError;
-use crate::llm::build_chat_client;
+use crate::llm::{DebateTurnInputs, NoToolTurnInputs, build_chat_client};
 use crate::models::{
   ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind, RoomStatus,
   ToolCallRecord,
@@ -39,23 +37,12 @@ use crate::streaming::{
   ReportId, TurnId, TurnKind, WsEvent, new_turn_id, report_id_for,
 };
 use crate::tools::leader::RequestLeaderDecisionTool;
-use crate::tools::python::RunPythonTool;
-use crate::tools::web_fetch::WebFetchTool;
-use crate::tools::workspace::{
-  CreateSubjectFolderTool, ListFilesTool, ListSubjectFoldersTool, ReadFileTool,
-  WriteFileTool,
-};
 use crate::workspace::{DebateRoot, RoomWorkspace};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::Utc;
-use futures::StreamExt;
-use rig::agent::{
-  AgentBuilder, HookAction, MultiTurnStreamItem, PromptHook, ToolCallHookAction,
-};
-use rig::client::CompletionClient;
-use rig::completion::{CompletionModel, Message};
+use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
+use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
-use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,11 +84,6 @@ const CHAT_LENGTH_GUARDRAIL: &str =
 const LEADER_EVAL_AGENT: &str = "Leader (evaluation)";
 const LEADER_EVAL_PROMPT: &str = include_str!("prompts/leader_evaluation.md");
 const LEADER_REPORT_PROMPT: &str = include_str!("prompts/leader_report.md");
-
-/// Tool-call iteration safety net. The LLM may keep requesting tools forever
-/// in a degenerate case; this caps a single turn at a finite number of tool
-/// rounds before forcing the agent to produce a final reply.
-const MAX_TOOL_ROUNDS_PER_TURN: usize = 8;
 
 /// Maximum bytes emitted in tool args/output previews to the WebSocket.
 const PREVIEW_MAX_CHARS: usize = 240;
@@ -208,9 +190,10 @@ async fn run_debate_loop(
   }
 }
 
-/// Runs one debater turn end-to-end. The provider variant determines which
-/// concrete Rig client is constructed; [`run_chat_turn_with_builder`] then
-/// configures the agent and drives it generically over `M`.
+/// Runs one debater turn end-to-end. Builds the [`ChatClient`] for the
+/// room's low-tier provider and delegates the agent build + stream loop to
+/// it; the runtime only sees the final assistant text and lifecycle events
+/// emitted via the [`DebateHook`].
 async fn run_chat_turn(
   state: &AppState,
   handle: &RoomHandle,
@@ -252,17 +235,17 @@ async fn run_chat_turn(
   let client = build_chat_client(&room.low)
     .context("failed to construct low-tier client")?;
 
-  let result = run_chat_turn_with_builder(
-    client.agent(&room.low.model),
-    system_prompt,
-    history_messages,
-    user_prompt,
-    workspace,
-    runner,
-    leader_tool,
-    hook,
-  )
-  .await;
+  let result = client
+    .run_debate_turn(DebateTurnInputs {
+      system_prompt,
+      history: history_messages,
+      user_prompt,
+      workspace,
+      runner,
+      leader_tool,
+      hook,
+    })
+    .await;
 
   let final_text = match result {
     Ok(text) => text,
@@ -308,62 +291,6 @@ async fn run_chat_turn(
   Ok(())
 }
 
-/// Generic core of the chat turn. Lives behind a function so the two
-/// provider variants in [`run_chat_turn`] share the agent build and stream
-/// loop without duplication. `M` carries the provider's model type through.
-#[allow(clippy::too_many_arguments)]
-async fn run_chat_turn_with_builder<M>(
-  builder: AgentBuilder<M>,
-  system_prompt: String,
-  history: Vec<Message>,
-  user_prompt: String,
-  workspace: RoomWorkspace,
-  runner: PythonRunner,
-  leader_tool: RequestLeaderDecisionTool,
-  hook: DebateHook,
-) -> Result<String>
-where
-  M: CompletionModel + 'static,
-{
-  let agent = builder
-    .preamble(&system_prompt)
-    .tool(WebFetchTool::new())
-    .tool(RunPythonTool::new(workspace.clone(), runner))
-    .tool(ListSubjectFoldersTool::new(workspace.clone()))
-    .tool(CreateSubjectFolderTool::new(workspace.clone()))
-    .tool(ListFilesTool::new(workspace.clone()))
-    .tool(ReadFileTool::new(workspace.clone()))
-    .tool(WriteFileTool::new(workspace))
-    .tool(leader_tool)
-    .build();
-
-  let reasoning_sender = hook.sender().clone();
-  let reasoning_turn_id = hook.turn_id().clone();
-
-  let mut stream = agent
-    .stream_prompt(user_prompt)
-    .with_history(history)
-    .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(hook)
-    .await;
-
-  let mut final_text = String::new();
-  while let Some(item) = stream.next().await {
-    match item.map_err(|e| anyhow!(e.to_string()))? {
-      MultiTurnStreamItem::FinalResponse(final_response) => {
-        final_text = final_response.response().to_string();
-      }
-      MultiTurnStreamItem::StreamAssistantItem(content) => {
-        forward_reasoning(&reasoning_sender, &reasoning_turn_id, &content);
-        // Text deltas, tool starts, and tool results are surfaced through
-        // `DebateHook`; we only intercept reasoning here.
-      }
-      _ => {}
-    }
-  }
-  Ok(final_text)
-}
-
 // -- Hook -----------------------------------------------------------------
 
 /// Bridge between Rig's [`PromptHook`] callbacks and our WebSocket /
@@ -398,44 +325,13 @@ impl DebateHook {
     }
   }
 
-  fn sender(&self) -> &broadcast::Sender<WsEvent> {
+  pub(crate) fn sender(&self) -> &broadcast::Sender<WsEvent> {
     &self.sender
   }
 
-  fn turn_id(&self) -> &TurnId {
+  pub(crate) fn turn_id(&self) -> &TurnId {
     &self.turn_id
   }
-}
-
-/// Helper used by the chat-turn and leader-evaluation stream loops to
-/// forward reasoning tokens that arrive on the [`MultiTurnStreamItem`]
-/// stream. Reasoning is not exposed via [`PromptHook`], so we extract it
-/// here and send a [`WsEvent::TurnReasoningToken`] for live rendering.
-fn forward_reasoning<R>(
-  sender: &broadcast::Sender<WsEvent>,
-  turn_id: &TurnId,
-  item: &StreamedAssistantContent<R>,
-) {
-  let delta = match item {
-    StreamedAssistantContent::Reasoning(reasoning) => {
-      let text = reasoning.display_text();
-      if text.is_empty() {
-        return;
-      }
-      text
-    }
-    StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-      if reasoning.is_empty() {
-        return;
-      }
-      reasoning.clone()
-    }
-    _ => return,
-  };
-  let _ = sender.send(WsEvent::TurnReasoningToken {
-    turn_id: turn_id.clone(),
-    delta,
-  });
 }
 
 impl<M> PromptHook<M> for DebateHook
@@ -633,53 +529,21 @@ async fn run_leader_evaluation(
   Ok(())
 }
 
-/// Streams a leader completion (no tools) and forwards token deltas through
-/// the supplied [`DebateHook`].
 async fn stream_leader_completion(
   high: &ProviderConfig,
   system_prompt: &str,
   user_prompt: String,
   hook: DebateHook,
 ) -> Result<String> {
-  let client = build_chat_client(high)
-    .context("failed to construct high-tier client")?;
-  let model = high.model.clone();
-  run_no_tool_stream(
-    client.agent(&model),
-    system_prompt.to_string(),
-    user_prompt,
-    hook,
-  )
-  .await
-}
-
-async fn run_no_tool_stream<M>(
-  builder: AgentBuilder<M>,
-  system_prompt: String,
-  user_prompt: String,
-  hook: DebateHook,
-) -> Result<String>
-where
-  M: CompletionModel + 'static,
-{
-  let agent = builder.preamble(&system_prompt).build();
-  let reasoning_sender = hook.sender().clone();
-  let reasoning_turn_id = hook.turn_id().clone();
-  let mut stream = agent.stream_prompt(user_prompt).with_hook(hook).await;
-
-  let mut final_text = String::new();
-  while let Some(item) = stream.next().await {
-    match item.map_err(|e| anyhow!(e.to_string()))? {
-      MultiTurnStreamItem::FinalResponse(final_response) => {
-        final_text = final_response.response().to_string();
-      }
-      MultiTurnStreamItem::StreamAssistantItem(content) => {
-        forward_reasoning(&reasoning_sender, &reasoning_turn_id, &content);
-      }
-      _ => {}
-    }
-  }
-  Ok(final_text)
+  let client =
+    build_chat_client(high).context("failed to construct high-tier client")?;
+  client
+    .run_evaluation_turn(NoToolTurnInputs {
+      system_prompt: system_prompt.to_string(),
+      user_prompt,
+      hook,
+    })
+    .await
 }
 
 // -- Leader report ---------------------------------------------------------
@@ -797,43 +661,20 @@ async fn stream_leader_report(
 ) -> Result<String> {
   let client = build_chat_client(high)
     .context("failed to construct high-tier client for report")?;
-  let model = high.model.clone();
-  run_report_stream(
-    client.agent(&model),
-    system_prompt.to_string(),
-    user_prompt,
-    hook,
-  )
-  .await
-}
-
-async fn run_report_stream<M>(
-  builder: AgentBuilder<M>,
-  system_prompt: String,
-  user_prompt: String,
-  hook: ReportHook,
-) -> Result<String>
-where
-  M: CompletionModel + 'static,
-{
-  let agent = builder.preamble(&system_prompt).build();
-  let mut stream = agent.stream_prompt(user_prompt).with_hook(hook).await;
-  let mut final_text = String::new();
-  while let Some(item) = stream.next().await {
-    if let MultiTurnStreamItem::FinalResponse(final_response) =
-      item.map_err(|e| anyhow!(e.to_string()))?
-    {
-      final_text = final_response.response().to_string();
-    }
-  }
-  Ok(final_text)
+  client
+    .run_report_turn(NoToolTurnInputs {
+      system_prompt: system_prompt.to_string(),
+      user_prompt,
+      hook,
+    })
+    .await
 }
 
 /// Hook for leader-report streaming. Token deltas become `ReportToken`
 /// events; tool-call methods are unused (no tools are attached) so they
 /// stay at the trait's default no-op implementation.
 #[derive(Clone)]
-struct ReportHook {
+pub struct ReportHook {
   report_id: ReportId,
   sender: broadcast::Sender<WsEvent>,
 }
@@ -915,7 +756,9 @@ fn build_room_preamble(room: &Room) -> String {
 /// The history alternates by speaker label (the prior speaker's name is
 /// embedded in each `assistant` message so the new debater can tell turns
 /// apart).
-fn render_transcript_messages(events: &[RoomEvent]) -> Vec<Message> {
+fn render_transcript_messages(
+  events: &[RoomEvent],
+) -> Vec<rig::completion::Message> {
   events
     .iter()
     .filter(|event| {
@@ -928,7 +771,7 @@ fn render_transcript_messages(events: &[RoomEvent]) -> Vec<Message> {
       let speaker = event.agent.as_deref().unwrap_or("speaker");
       let body = format!("{speaker}: {}", event.content);
       let assistant_content = AssistantContent::text(body);
-      Message::Assistant {
+      rig::completion::Message::Assistant {
         id: None,
         content: rig::OneOrMany::one(assistant_content),
       }

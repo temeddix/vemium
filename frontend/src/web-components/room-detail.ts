@@ -1,7 +1,7 @@
 import type { DashboardState, DashboardStore } from "@/app/state";
 import type {
+  ApiType,
   ProviderConfig,
-  ReasoningField,
   Room,
   RoomView,
   ToolCallEntry,
@@ -344,6 +344,13 @@ export class RoomDetail extends LitElement {
       letter-spacing: 0.05em;
       text-transform: uppercase;
       color: var(--wa-color-text-quiet);
+    }
+
+    .form-hint {
+      font-size: 0.72rem;
+      color: var(--wa-color-text-quiet);
+      margin: 0 0 0.2rem;
+      line-height: 1.3;
     }
 
     .number-row {
@@ -768,10 +775,33 @@ export class RoomDetail extends LitElement {
     config: ProviderConfig,
     onChange: (config: ProviderConfig) => void,
   ) {
-    const reasoningField: ReasoningField = config.reasoningField ?? "reasoning";
+    const apiType: ApiType = config.apiType ?? "ollama";
     return html`
       <fieldset class="tier">
         <legend>${label}</legend>
+        <p class="form-hint">
+          Only OpenRouter requires an API key; Ollama / llama.cpp / vLLM and other
+          self-hosted endpoints leave it blank.
+        </p>
+        <label class="form-field">
+          <span class="form-label">API type</span>
+          <wa-select size="small" .value="${apiType}" @change="${(
+            e: Event,
+          ): void => {
+            const value = readInputValue(e.target);
+            if (value === "ollama" || value === "openrouter") {
+              const patch: Partial<ProviderConfig> = { apiType: value };
+              if (value === "openrouter" && !config.baseUrl.trim()) {
+                patch.baseUrl = "https://openrouter.ai/api/v1";
+              }
+              onChange({ ...config, ...patch });
+            }
+          }}">
+            <wa-option value="ollama"
+            >Ollama (also llama.cpp, vLLM, self-hosted)</wa-option>
+            <wa-option value="openrouter">OpenRouter</wa-option>
+          </wa-select>
+        </label>
         ${this.#renderTextField(
           "Base URL",
           config.baseUrl,
@@ -780,32 +810,14 @@ export class RoomDetail extends LitElement {
           "Model",
           config.model,
           (model) => onChange({ ...config, model }),
-        )} ${this.#renderTextField(
-          "API key",
-          config.apiKey ?? "",
-          (value) =>
-            onChange({ ...config, apiKey: value === "" ? null : value }),
-        )}
-        <label class="form-field">
-          <span class="form-label">Reasoning field</span>
-          <wa-select size="small" .value="${reasoningField}" @change="${(
-            e: Event,
-          ): void => {
-            const value = readInputValue(e.target);
-            if (value === "reasoning" || value === "reasoning_content") {
-              const patch: Partial<ProviderConfig> = { reasoningField: value };
-              if (value === "reasoning" && !config.baseUrl.trim()) {
-                patch.baseUrl = "https://openrouter.ai/api/v1";
-              }
-              onChange({ ...config, ...patch });
-            }
-          }}">
-            <wa-option value="reasoning"
-            >reasoning (OpenRouter, Ollama, llama.cpp)</wa-option>
-            <wa-option value="reasoning_content"
-            >reasoning_content (DeepSeek, vLLM, OpenAI o-series)</wa-option>
-          </wa-select>
-        </label>
+        )} ${apiType === "openrouter"
+          ? this.#renderTextField(
+            "API key (required for OpenRouter)",
+            config.apiKey ?? "",
+            (value) =>
+              onChange({ ...config, apiKey: value === "" ? null : value }),
+          )
+          : ""}
       </fieldset>
     `;
   }

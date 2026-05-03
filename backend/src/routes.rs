@@ -444,6 +444,16 @@ fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
   if config.base_url.trim().is_empty() {
     return Err("base_url is required".to_string());
   }
+  if matches!(config.api_type, crate::models::ApiType::OpenRouter)
+    && config
+      .api_key
+      .as_deref()
+      .map(str::trim)
+      .filter(|k| !k.is_empty())
+      .is_none()
+  {
+    return Err("api_key is required for OpenRouter".to_string());
+  }
   Ok(())
 }
 

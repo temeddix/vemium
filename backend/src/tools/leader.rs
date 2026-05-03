@@ -14,8 +14,7 @@ use crate::llm::build_chat_client;
 use crate::models::{ProviderConfig, RoomEvent, RoomEventKind};
 use crate::streaming::{TurnKind, WsEvent, new_turn_id};
 use chrono::Utc;
-use rig::client::CompletionClient;
-use rig::completion::{Prompt, ToolDefinition};
+use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -36,9 +35,6 @@ pub struct RequestLeaderDecisionTool {
   /// Snapshot of the high-tier provider config taken at turn start. Stored
   /// verbatim so the call uses whatever the room's settings say *now*.
   high_provider: ProviderConfig,
-  /// The `high.model` from the same snapshot. Stored separately to avoid
-  /// re-cloning the config when calling.
-  high_model: String,
   /// Snapshot of the room's topic / goal etc. at turn start. Used to frame
   /// the leader prompt without an extra DB read.
   context_preamble: String,
@@ -51,12 +47,10 @@ impl RequestLeaderDecisionTool {
     high_provider: ProviderConfig,
     context_preamble: String,
   ) -> Self {
-    let high_model = high_provider.model.clone();
     Self {
       state,
       room_id,
       high_provider,
-      high_model,
       context_preamble,
     }
   }
@@ -130,10 +124,7 @@ impl Tool for RequestLeaderDecisionTool {
       .map_err(|e| LeaderDecisionError::Config(e.to_string()))?;
 
     let answer = client
-      .agent(&self.high_model)
-      .preamble(&preamble)
-      .build()
-      .prompt(user)
+      .prompt_once(preamble, user)
       .await
       .map_err(|e| LeaderDecisionError::Call(e.to_string()))?;
 

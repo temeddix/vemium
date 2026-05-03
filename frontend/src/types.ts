@@ -5,28 +5,29 @@
 export type RoomStatus = "active" | "paused" | "failed";
 export type ReportStatus = "streaming" | "done" | "failed";
 /**
- * Which JSON field name the upstream provider uses to stream chain-of-thought
- * tokens. `reasoning` covers OpenRouter / Ollama / llama.cpp;
- * `reasoning_content` covers DeepSeek / vLLM / OpenAI o-series.
+ * Which provider family a `ProviderConfig` targets. Selects the underlying
+ * rig client at runtime: `ollama` uses the native `/api/chat` protocol,
+ * `openrouter` uses OpenAI-compatible streaming and works against
+ * OpenRouter (and any OpenAI-compatible endpoint that emits
+ * `delta.reasoning`, e.g. llama.cpp).
  */
-export type ReasoningField = "reasoning" | "reasoning_content";
+export type ApiType = "ollama" | "openrouter";
 
 export interface ProviderConfig {
   model: string;
   /**
    * Endpoint root, always required. Examples:
-   * - `https://openrouter.ai/api/v1`
-   * - `http://localhost:11434/v1`
+   * - Ollama: `http://localhost:11434`
+   * - OpenRouter: `https://openrouter.ai/api/v1`
    */
   baseUrl: string;
   /**
-   * Bearer token. `null` is allowed for endpoints that don't need auth
-   * (e.g. local Ollama). The backend redacts this to `***xxxx` in every
-   * API response.
+   * Bearer token. Required for OpenRouter; optional for Ollama. The backend
+   * redacts this to `***xxxx` in every API response.
    */
   apiKey: string | null;
-  /** Defaults to `"reasoning"` server-side when omitted. */
-  reasoningField?: ReasoningField;
+  /** Provider family. Defaults to `"ollama"` server-side when omitted. */
+  apiType?: ApiType;
 }
 
 export interface Room {
