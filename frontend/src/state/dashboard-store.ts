@@ -344,11 +344,24 @@ export class DashboardStore {
     for (const event of events) {
       ingestHistoryEvent(event, turns, toolCalls, pendingToolCalls);
     }
+    // The backend replays this frame whenever the broadcast receiver lags
+    // (token-heavy turns can flood the ring faster than the socket drains).
+    // When that happens mid-stream, preserve the existing in-flight turns
+    // so the next `TurnToken` / `TurnCompleted` still has a buffer to land
+    // in - otherwise the active turn would visibly disappear and resume
+    // only after its DB row is written.
+    const existing = this.#state.views[room.id];
+    const liveTurns = existing?.turns.filter((t) => t.status === "streaming") ??
+      [];
+    const liveToolCalls =
+      existing?.toolCalls.filter((c) => c.status === "running") ?? [];
+    const liveReports =
+      existing?.reports.filter((r) => r.status === "streaming") ?? [];
     const view: RoomView = {
       room,
-      turns,
-      toolCalls,
-      reports: reports.map(toReportBuffer),
+      turns: [...turns, ...liveTurns],
+      toolCalls: [...toolCalls, ...liveToolCalls],
+      reports: mergeReports(reports.map(toReportBuffer), liveReports),
     };
     this.#patch({
       views: { ...this.#state.views, [room.id]: view },
@@ -593,6 +606,19 @@ function toReportBuffer(report: RoomReport): ReportBuffer {
     status: report.status,
     completedAt: report.completedAt,
   };
+}
+
+/**
+ * Drops live (still-streaming) reports that the snapshot now contains as
+ * persisted rows, then keeps any remaining live reports on top.
+ */
+function mergeReports(
+  fromSnapshot: ReportBuffer[],
+  live: ReportBuffer[],
+): ReportBuffer[] {
+  const known = new Set(fromSnapshot.map((r) => r.reportId));
+  const stillLive = live.filter((r) => !known.has(r.reportId));
+  return [...fromSnapshot, ...stillLive];
 }
 
 // Re-export for the dashboard view's status badge convenience.

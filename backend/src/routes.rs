@@ -368,14 +368,19 @@ async fn stream_room_events(
   State(state): State<AppState>,
   ws: WebSocketUpgrade,
 ) -> axum::response::Response {
-  let room_view = {
-    let rooms = state.rooms.read().await;
-    rooms.get(&room_id).map(|room| room.view())
-  };
-  let Some(room_view) = room_view else {
+  if state.rooms.read().await.get(&room_id).is_none() {
     return not_found("room");
-  };
+  }
+  let sender = state.ensure_room_stream(room_id).await;
+  ws.on_upgrade(move |socket| {
+    handle_socket(socket, state, room_id, sender.subscribe())
+  })
+}
 
+/// Builds the snapshot frame used to (re)hydrate a connected client. Returns
+/// `None` if the room has been deleted between connection time and now.
+async fn build_snapshot(state: &AppState, room_id: Uuid) -> Option<WsEvent> {
+  let room_view = state.rooms.read().await.get(&room_id).map(Room::view)?;
   let events = db::load_room_events(&state.db, room_id)
     .await
     .report()
@@ -384,24 +389,23 @@ async fn stream_room_events(
     .await
     .report()
     .unwrap_or_default();
-
-  let snapshot = WsEvent::Snapshot {
+  Some(WsEvent::Snapshot {
     room: Box::new(room_view),
     events,
     reports,
-  };
-  let sender = state.ensure_room_stream(room_id).await;
-  ws.on_upgrade(move |socket| {
-    handle_socket(socket, sender.subscribe(), snapshot)
   })
 }
 
 async fn handle_socket(
   mut socket: WebSocket,
+  state: AppState,
+  room_id: Uuid,
   mut receiver: broadcast::Receiver<WsEvent>,
-  snapshot: WsEvent,
 ) {
-  if !send_event(&mut socket, &snapshot).await {
+  let Some(initial) = build_snapshot(&state, room_id).await else {
+    return;
+  };
+  if !send_event(&mut socket, &initial).await {
     return;
   }
   loop {
@@ -417,7 +421,20 @@ async fn handle_socket(
             break;
           }
         }
-        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+          // The client fell behind the broadcast ring (token-heavy turns
+          // can flood it faster than `socket.send` drains). Resync by
+          // replaying a fresh snapshot — the persisted history fills any
+          // turn whose `TurnStarted` was evicted, so the frontend won't
+          // be left receiving `TurnToken`s for an unknown turn.
+          tracing::warn!(%room_id, %skipped, "ws receiver lagged; replaying snapshot");
+          let Some(snapshot) = build_snapshot(&state, room_id).await else {
+            break;
+          };
+          if !send_event(&mut socket, &snapshot).await {
+            break;
+          }
+        }
         Err(broadcast::error::RecvError::Closed) => break,
       },
     }
