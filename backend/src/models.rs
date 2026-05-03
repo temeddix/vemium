@@ -59,9 +59,10 @@ impl RoomStatus {
 /// - `ReasoningContent`: DeepSeek's official API, vLLM defaults, OpenAI's
 ///   o-series via the Chat Completions endpoint.
 ///
-/// We dispatch to one of two `rig` provider clients based on this so the
-/// thinking trace gets parsed correctly. Everything else (request shape, base
-/// URL handling, tools, auth) is identical between the two.
+/// Both values use [`openai::CompletionsClient`] for the actual HTTP call.
+/// `ReasoningContent` providers will have their thinking traces forwarded to
+/// the UI; `Reasoning` providers (Ollama etc.) will work correctly but their
+/// `delta.reasoning` field is not currently parsed by the client.
 #[derive(
   Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
 )]

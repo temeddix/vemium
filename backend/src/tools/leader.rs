@@ -10,7 +10,7 @@
 use crate::app_state::AppState;
 use crate::db;
 use crate::error::ReportError;
-use crate::llm::ChatClient;
+use crate::llm::build_chat_client;
 use crate::models::{ProviderConfig, RoomEvent, RoomEventKind};
 use crate::streaming::{TurnKind, WsEvent, new_turn_id};
 use chrono::Utc;
@@ -126,25 +126,16 @@ impl Tool for RequestLeaderDecisionTool {
     let preamble = self.system_prompt();
     let user = self.user_prompt(&args);
 
-    let client = ChatClient::from_config(&self.high_provider)
+    let client = build_chat_client(&self.high_provider)
       .map_err(|e| LeaderDecisionError::Config(e.to_string()))?;
 
-    let answer = match client {
-      ChatClient::OpenRouter(c) => c
-        .agent(&self.high_model)
-        .preamble(&preamble)
-        .build()
-        .prompt(user)
-        .await
-        .map_err(|e| LeaderDecisionError::Call(e.to_string()))?,
-      ChatClient::OpenAi(c) => c
-        .agent(&self.high_model)
-        .preamble(&preamble)
-        .build()
-        .prompt(user)
-        .await
-        .map_err(|e| LeaderDecisionError::Call(e.to_string()))?,
-    };
+    let answer = client
+      .agent(&self.high_model)
+      .preamble(&preamble)
+      .build()
+      .prompt(user)
+      .await
+      .map_err(|e| LeaderDecisionError::Call(e.to_string()))?;
 
     let answer = answer.trim().to_string();
     if answer.is_empty() {

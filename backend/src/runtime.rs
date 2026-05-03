@@ -29,7 +29,7 @@
 use crate::app_state::{AppState, RoomHandle};
 use crate::db;
 use crate::error::ReportError;
-use crate::llm::ChatClient;
+use crate::llm::build_chat_client;
 use crate::models::{
   ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind, RoomStatus,
   ToolCallRecord,
@@ -249,37 +249,20 @@ async fn run_chat_turn(
     sender.clone(),
   );
 
-  let client = ChatClient::from_config(&room.low)
+  let client = build_chat_client(&room.low)
     .context("failed to construct low-tier client")?;
 
-  let result = match client {
-    ChatClient::OpenRouter(c) => {
-      run_chat_turn_with_builder(
-        c.agent(&room.low.model),
-        system_prompt,
-        history_messages,
-        user_prompt,
-        workspace,
-        runner,
-        leader_tool,
-        hook,
-      )
-      .await
-    }
-    ChatClient::OpenAi(c) => {
-      run_chat_turn_with_builder(
-        c.agent(&room.low.model),
-        system_prompt,
-        history_messages,
-        user_prompt,
-        workspace,
-        runner,
-        leader_tool,
-        hook,
-      )
-      .await
-    }
-  };
+  let result = run_chat_turn_with_builder(
+    client.agent(&room.low.model),
+    system_prompt,
+    history_messages,
+    user_prompt,
+    workspace,
+    runner,
+    leader_tool,
+    hook,
+  )
+  .await;
 
   let final_text = match result {
     Ok(text) => text,
@@ -658,29 +641,16 @@ async fn stream_leader_completion(
   user_prompt: String,
   hook: DebateHook,
 ) -> Result<String> {
-  let client = ChatClient::from_config(high)
+  let client = build_chat_client(high)
     .context("failed to construct high-tier client")?;
   let model = high.model.clone();
-  match client {
-    ChatClient::OpenRouter(c) => {
-      run_no_tool_stream(
-        c.agent(&model),
-        system_prompt.to_string(),
-        user_prompt,
-        hook,
-      )
-      .await
-    }
-    ChatClient::OpenAi(c) => {
-      run_no_tool_stream(
-        c.agent(&model),
-        system_prompt.to_string(),
-        user_prompt,
-        hook,
-      )
-      .await
-    }
-  }
+  run_no_tool_stream(
+    client.agent(&model),
+    system_prompt.to_string(),
+    user_prompt,
+    hook,
+  )
+  .await
 }
 
 async fn run_no_tool_stream<M>(
@@ -825,29 +795,16 @@ async fn stream_leader_report(
   user_prompt: String,
   hook: ReportHook,
 ) -> Result<String> {
-  let client = ChatClient::from_config(high)
+  let client = build_chat_client(high)
     .context("failed to construct high-tier client for report")?;
   let model = high.model.clone();
-  match client {
-    ChatClient::OpenRouter(c) => {
-      run_report_stream(
-        c.agent(&model),
-        system_prompt.to_string(),
-        user_prompt,
-        hook,
-      )
-      .await
-    }
-    ChatClient::OpenAi(c) => {
-      run_report_stream(
-        c.agent(&model),
-        system_prompt.to_string(),
-        user_prompt,
-        hook,
-      )
-      .await
-    }
-  }
+  run_report_stream(
+    client.agent(&model),
+    system_prompt.to_string(),
+    user_prompt,
+    hook,
+  )
+  .await
 }
 
 async fn run_report_stream<M>(
