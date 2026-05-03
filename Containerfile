@@ -6,7 +6,7 @@ RUN deno install
 
 COPY frontend/src ./src
 COPY frontend/dist ./dist
-RUN deno bundle src/entry.ts --output dist/dist/app.js --minify
+RUN deno task bundle
 
 FROM rust:1.88-bookworm AS backend-build
 WORKDIR /app/backend
