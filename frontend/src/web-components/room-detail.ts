@@ -4,6 +4,7 @@ import type {
   ProviderKind,
   Room,
   RoomView,
+  ToolCallEntry,
   TurnBuffer,
   UpdateRoomRequest,
 } from "@/app/types";
@@ -206,9 +207,15 @@ export class RoomDetail extends LitElement {
     .tool-list {
       display: grid;
       gap: 0.4rem;
-      margin: 0;
-      padding: 0;
+      margin: 0.5rem 0 0;
+      padding: 0.4rem 0 0 0.6rem;
       list-style: none;
+      border-left: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+    }
+
+    .tool-list > li {
+      display: grid;
+      gap: 0.25rem;
     }
 
     .tool-meta {
@@ -225,12 +232,14 @@ export class RoomDetail extends LitElement {
       color: var(--wa-color-text-quiet);
       white-space: pre-wrap;
       word-break: break-all;
+      margin: 0;
     }
 
     .tool-output {
       font-family: var(--wa-font-family-code, monospace);
       font-size: 0.78rem;
       white-space: pre-wrap;
+      margin: 0;
     }
 
     .form-grid {
@@ -400,13 +409,16 @@ export class RoomDetail extends LitElement {
     return html`
       <ul class="turn-list">
         ${view.turns.map((turn) =>
-          this.#renderTurn(turn)
-        )} ${view.toolCalls.length > 0 ? this.#renderToolSection(view) : ""}
+          this.#renderTurn(
+            turn,
+            view.toolCalls.filter((call) => call.turnId === turn.turnId),
+          )
+        )}
       </ul>
     `;
   }
 
-  #renderTurn(turn: TurnBuffer) {
+  #renderTurn(turn: TurnBuffer, toolCalls: ToolCallEntry[]) {
     const classes = [
       "turn-item",
       turn.kind === "leader_note" ? "turn-leader" : "",
@@ -437,7 +449,9 @@ export class RoomDetail extends LitElement {
               `
               : ""}
           </div>
-          ${renderMarkdown(turn.content || "...")} ${turn.error
+          ${renderMarkdown(turn.content || "...")}
+          ${toolCalls.length > 0 ? this.#renderTurnToolCalls(toolCalls) : ""}
+          ${turn.error
             ? html`
               <p class="tool-output">${turn.error}</p>
             `
@@ -447,48 +461,43 @@ export class RoomDetail extends LitElement {
     `;
   }
 
-  #renderToolSection(view: RoomView) {
+  #renderTurnToolCalls(toolCalls: ToolCallEntry[]) {
     return html`
-      <li>
-        <h3 class="form-label">Tool calls</h3>
-        <ul class="tool-list">
-          ${view.toolCalls.map((call) =>
-            html`
-              <li>
-                <wa-card>
-                  <div class="tool-meta">
-                    <strong>${call.tool}</strong>
-                    ${call.status === "running"
-                      ? html`
-                        <wa-badge size="small" variant="warning">running</wa-badge>
-                      `
-                      : call.status === "ok"
-                      ? html`
-                        <wa-badge size="small" variant="success">ok</wa-badge>
-                      `
-                      : html`
-                        <wa-badge size="small" variant="danger">error</wa-badge>
-                      `} ${call.durationMs !== null
-                      ? html`
-                        <span>${call.durationMs} ms</span>
-                      `
-                      : ""}
-                  </div>
-                  ${call.argsPreview !== ""
-                    ? html`
-                      <pre class="tool-args">${call.argsPreview}</pre>
-                    `
-                    : ""} ${call.outputPreview !== null
-                    ? html`
-                      <pre class="tool-output">${call.outputPreview}</pre>
-                    `
-                    : ""}
-                </wa-card>
-              </li>
-            `
-          )}
-        </ul>
-      </li>
+      <ul class="tool-list">
+        ${toolCalls.map((call) =>
+          html`
+            <li>
+              <div class="tool-meta">
+                <strong>${call.tool}</strong>
+                ${call.status === "running"
+                  ? html`
+                    <wa-badge size="small" variant="warning">running</wa-badge>
+                  `
+                  : call.status === "ok"
+                  ? html`
+                    <wa-badge size="small" variant="success">ok</wa-badge>
+                  `
+                  : html`
+                    <wa-badge size="small" variant="danger">error</wa-badge>
+                  `} ${call.durationMs !== null
+                  ? html`
+                    <span>${call.durationMs} ms</span>
+                  `
+                  : ""}
+              </div>
+              ${call.argsPreview !== ""
+                ? html`
+                  <pre class="tool-args">${call.argsPreview}</pre>
+                `
+                : ""} ${call.outputPreview !== null
+                ? html`
+                  <pre class="tool-output">${call.outputPreview}</pre>
+                `
+                : ""}
+            </li>
+          `
+        )}
+      </ul>
     `;
   }
 
