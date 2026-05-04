@@ -141,14 +141,12 @@ export class RoomSettingsDialog extends LitElement {
         <div slot="footer" class="footer-row">
           <wa-button
             size="small"
-            variant="neutral"
             @click="${this.#onResetClick}"
           >
             Reset
           </wa-button>
           <wa-button
             size="small"
-            variant="brand"
             @click="${this.#onSaveClick}"
           >
             Save

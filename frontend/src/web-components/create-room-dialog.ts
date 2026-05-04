@@ -212,7 +212,6 @@ export class CreateRoomDialog extends LitElement {
         <div slot="footer" class="footer-row">
           <wa-button
             size="small"
-            variant="neutral"
             ?disabled="${busy}"
             @click="${this.#requestClose}"
           >
@@ -220,7 +219,6 @@ export class CreateRoomDialog extends LitElement {
           </wa-button>
           <wa-button
             size="small"
-            variant="brand"
             ?disabled="${busy}"
             @click="${this.#submit}"
           >

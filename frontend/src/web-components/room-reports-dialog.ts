@@ -96,16 +96,16 @@ export class RoomReportsDialog extends LitElement {
   #renderStatus(status: ReportBuffer["status"]) {
     if (status === "streaming") {
       return html`
-        <wa-badge size="small" variant="warning">streaming</wa-badge>
+        <wa-badge size="small">streaming</wa-badge>
       `;
     }
     if (status === "failed") {
       return html`
-        <wa-badge size="small" variant="danger">failed</wa-badge>
+        <wa-badge size="small">failed</wa-badge>
       `;
     }
     return html`
-      <wa-badge size="small" variant="success">done</wa-badge>
+      <wa-badge size="small">done</wa-badge>
     `;
   }
 

@@ -370,16 +370,16 @@ export class ChatMessage extends LitElement {
   #renderToolStatus(status: ToolCallView["status"]) {
     if (status === "running") {
       return html`
-        <wa-badge size="small" variant="warning">running</wa-badge>
+        <wa-badge size="small">running</wa-badge>
       `;
     }
     if (status === "ok") {
       return html`
-        <wa-badge size="small" variant="success">ok</wa-badge>
+        <wa-badge size="small">ok</wa-badge>
       `;
     }
     return html`
-      <wa-badge size="small" variant="danger">error</wa-badge>
+      <wa-badge size="small">error</wa-badge>
     `;
   }
 

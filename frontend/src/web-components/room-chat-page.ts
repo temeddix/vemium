@@ -176,12 +176,6 @@ export class RoomChatPage extends LitElement {
       font-size: 0.85rem;
       margin-top: 0.4rem;
     }
-
-    .status-badge::part(base) {
-      background: transparent;
-      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      color: var(--wa-color-text-quiet);
-    }
   `;
 
   override connectedCallback(): void {
@@ -233,24 +227,22 @@ export class RoomChatPage extends LitElement {
               : nothing}
           </div>
           <div class="header-actions">
-            <wa-badge class="status-badge" size="small">
+            <wa-badge size="small" appearance="outlined">
               ${this.dashboardState?.wsConnected
                 ? "Connected"
                 : `Reconnecting #${this.dashboardState?.reconnectAttempt ?? 0}`}
             </wa-badge>
-            <wa-badge class="status-badge" size="small">
+            <wa-badge size="small" appearance="outlined">
               ${room.status}
             </wa-badge>
             ${this.#renderPauseButton(room)}
-            <wa-button size="small" variant="neutral" @click="${this
-              .#openSettings}">
+            <wa-button size="small" @click="${this.#openSettings}">
               Settings
             </wa-button>
-            <wa-button size="small" variant="neutral" @click="${this
-              .#openReports}">
+            <wa-button size="small" @click="${this.#openReports}">
               Reports
             </wa-button>
-            <wa-button size="small" variant="danger" @click="${(): Promise<
+            <wa-button size="small" @click="${(): Promise<
               void
             > => this.#confirmDelete(room.id)}">
               Delete
@@ -300,7 +292,7 @@ export class RoomChatPage extends LitElement {
       <div class="container">
         <p class="empty">
           No room with slug "${this.slug}".
-          <wa-button size="small" variant="brand" @click="${this.#onBack}">
+          <wa-button size="small" @click="${this.#onBack}">
             Back to rooms
           </wa-button>
         </p>
@@ -313,7 +305,6 @@ export class RoomChatPage extends LitElement {
       return html`
         <wa-button
           size="small"
-          variant="brand"
           @click="${(): Promise<void> => this.store.resumeRoom(room.id)}"
         >
           Resume
@@ -323,7 +314,6 @@ export class RoomChatPage extends LitElement {
     return html`
       <wa-button
         size="small"
-        variant="neutral"
         @click="${(): Promise<void> => this.store.pauseRoom(room.id)}"
       >
         Pause

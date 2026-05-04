@@ -134,12 +134,6 @@ export class RoomListPage extends LitElement {
       color: var(--wa-color-text-quiet);
       font-size: 0.95rem;
     }
-
-    .status-badge::part(base) {
-      background: transparent;
-      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      color: var(--wa-color-text-quiet);
-    }
   `;
 
   override connectedCallback(): void {
@@ -170,8 +164,7 @@ export class RoomListPage extends LitElement {
           <span class="logo">Vemium</span>
           <span class="tagline">Endless agent debate</span>
           <span class="actions">
-            <wa-button size="small" variant="brand" @click="${this
-              .#openCreate}">
+            <wa-button size="small" @click="${this.#openCreate}">
               + New room
             </wa-button>
           </span>
@@ -226,7 +219,7 @@ export class RoomListPage extends LitElement {
 
   #renderStatusBadge(status: RoomStatus) {
     return html`
-      <wa-badge class="status-badge" size="small">
+      <wa-badge size="small" appearance="outlined">
         ${status}
       </wa-badge>
     `;

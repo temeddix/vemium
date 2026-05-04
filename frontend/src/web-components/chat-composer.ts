@@ -82,12 +82,11 @@ export class ChatComposer extends LitElement {
           @keydown="${this.#onKeyDown}"
         ></textarea>
         <wa-button
-          variant="brand"
           size="small"
           ?disabled="${!canSend}"
           @click="${this.#submit}"
         >
-          Send
+          <wa-icon name="paper-plane" label="Send"></wa-icon>
         </wa-button>
       </div>
     `;
