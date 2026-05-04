@@ -71,7 +71,7 @@ export class ChatMessage extends LitElement {
     }
 
     .row.is-self {
-      flex-direction: row-reverse;
+      justify-content: flex-end;
     }
 
     .avatar {
