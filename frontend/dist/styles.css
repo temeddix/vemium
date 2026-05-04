@@ -7,5 +7,7 @@ body {
 }
 
 html {
+  scrollbar-width: thin;
   scrollbar-gutter: stable;
+  scrollbar-color: var(--wa-color-neutral-border-normal) transparent;
 }
