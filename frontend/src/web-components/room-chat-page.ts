@@ -5,7 +5,7 @@ import {
 } from "@/app/chat";
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
-import type { Draft, Message, Room, RoomStatus, RoomView } from "@/app/types";
+import type { Draft, Message, Room, RoomView } from "@/app/types";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -171,8 +171,10 @@ export class RoomChatPage extends LitElement {
       margin-top: 0.4rem;
     }
 
-    .ws-badge {
-      margin-right: 0.2rem;
+    .status-badge::part(base) {
+      background: transparent;
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      color: var(--wa-color-text-quiet);
     }
   `;
 
@@ -221,18 +223,12 @@ export class RoomChatPage extends LitElement {
               : nothing}
           </div>
           <div class="header-actions">
-            <wa-badge
-              class="ws-badge"
-              variant="${this.dashboardState?.wsConnected
-                ? "success"
-                : "warning"}"
-              size="small"
-            >
+            <wa-badge class="status-badge" size="small">
               ${this.dashboardState?.wsConnected
                 ? "Connected"
                 : `Reconnecting #${this.dashboardState?.reconnectAttempt ?? 0}`}
             </wa-badge>
-            <wa-badge variant="${statusBadgeVariant(room.status)}" size="small">
+            <wa-badge class="status-badge" size="small">
               ${room.status}
             </wa-badge>
             ${this.#renderPauseButton(room)}
@@ -500,16 +496,5 @@ export class RoomChatPage extends LitElement {
       this.dashboardState = this.store.getState();
     });
     this.dashboardState = this.store.getState();
-  }
-}
-
-function statusBadgeVariant(status: RoomStatus): string {
-  switch (status) {
-    case "active":
-      return "brand";
-    case "paused":
-      return "neutral";
-    case "failed":
-      return "danger";
   }
 }

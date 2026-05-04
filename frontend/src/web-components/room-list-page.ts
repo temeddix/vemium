@@ -134,6 +134,12 @@ export class RoomListPage extends LitElement {
       color: var(--wa-color-text-quiet);
       font-size: 0.95rem;
     }
+
+    .status-badge::part(base) {
+      background: transparent;
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      color: var(--wa-color-text-quiet);
+    }
   `;
 
   override connectedCallback(): void {
@@ -220,7 +226,7 @@ export class RoomListPage extends LitElement {
 
   #renderStatusBadge(status: RoomStatus) {
     return html`
-      <wa-badge variant="${statusBadgeVariant(status)}" size="small">
+      <wa-badge class="status-badge" size="small">
         ${status}
       </wa-badge>
     `;
@@ -261,16 +267,5 @@ export class RoomListPage extends LitElement {
       this.dashboardState = this.store.getState();
     });
     this.dashboardState = this.store.getState();
-  }
-}
-
-function statusBadgeVariant(status: RoomStatus): string {
-  switch (status) {
-    case "active":
-      return "brand";
-    case "paused":
-      return "neutral";
-    case "failed":
-      return "danger";
   }
 }
