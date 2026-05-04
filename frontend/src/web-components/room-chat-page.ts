@@ -86,11 +86,11 @@ export class RoomChatPage extends LitElement {
     .container {
       max-width: 80rem;
       margin: 0 auto;
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      height: 100vh;
       padding: 0 1.2rem;
       box-sizing: border-box;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
 
     .header {
@@ -98,6 +98,10 @@ export class RoomChatPage extends LitElement {
       align-items: center;
       gap: 0.6rem;
       padding: 0.8rem 0;
+      position: sticky;
+      top: 0;
+      background: var(--wa-color-surface-sunken);
+      z-index: 2;
     }
 
     .back-button {
@@ -134,12 +138,11 @@ export class RoomChatPage extends LitElement {
     }
 
     .scroll {
-      overflow-y: auto;
       padding: 0.4rem 0 1rem;
       display: flex;
       flex-direction: column;
       gap: 0.3rem;
-      min-height: 0;
+      flex: 1;
     }
 
     .time-separator {
@@ -160,6 +163,10 @@ export class RoomChatPage extends LitElement {
     .composer-wrap {
       padding: 0.4rem 0 0.8rem;
       border-top: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      position: sticky;
+      bottom: 0;
+      background: var(--wa-color-surface-sunken);
+      z-index: 2;
     }
 
     .error-banner {
@@ -181,6 +188,9 @@ export class RoomChatPage extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.#bindStore();
+    globalThis.addEventListener("scroll", this.#onWindowScroll, {
+      passive: true,
+    });
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -196,6 +206,7 @@ export class RoomChatPage extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    globalThis.removeEventListener("scroll", this.#onWindowScroll);
     this.#unsubscribe?.();
     this.#unsubscribe = null;
     super.disconnectedCallback();
@@ -330,7 +341,7 @@ export class RoomChatPage extends LitElement {
       `;
     }
     return html`
-      <div class="scroll" @scroll="${this.#onScroll}">
+      <div class="scroll">
         ${entries.map((entry, idx) => this.#renderEntry(entry, entries, idx))}
       </div>
     `;
@@ -440,15 +451,13 @@ export class RoomChatPage extends LitElement {
     this.showReports = false;
   }
 
-  #onScroll(event: Event): void {
-    const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-    const distanceFromBottom = target.scrollHeight - target.scrollTop -
-      target.clientHeight;
+  #onWindowScroll = (): void => {
+    const scrollTop = globalThis.scrollY;
+    const viewport = globalThis.innerHeight;
+    const total = document.documentElement.scrollHeight;
+    const distanceFromBottom = total - scrollTop - viewport;
     this.#pinnedToBottom = distanceFromBottom < 64;
-  }
+  };
 
   // -- Selection plumbing -------------------------------------------------
 
@@ -470,10 +479,7 @@ export class RoomChatPage extends LitElement {
   }
 
   #scrollToBottom(): void {
-    const scroll = this.renderRoot.querySelector(".scroll");
-    if (scroll instanceof HTMLElement) {
-      scroll.scrollTop = scroll.scrollHeight;
-    }
+    globalThis.scrollTo({ top: document.documentElement.scrollHeight });
   }
 
   #currentView(): RoomView | null {
