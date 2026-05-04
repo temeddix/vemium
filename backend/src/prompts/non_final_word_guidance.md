@@ -1,6 +1,7 @@
 Write a short chat-style message in 10-200 characters. You may optionally append
 a supporting data (numbers, dates, or stats) after the message, up to 1000
-characters, only when really necessary.
+characters, only when really necessary. Your whole response will be rendered in
+markdown, so do not write any markdown fences.
 
 If prior speakers already made your point, do NOT restate it. Either push back
 on a weak link in their reasoning, add a genuinely new angle, or say you have
