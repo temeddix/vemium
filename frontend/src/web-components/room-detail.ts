@@ -98,6 +98,7 @@ function renderReasoning(text: string, streaming: boolean) {
   return html`
     <details class="reasoning-block" ?open="${streaming}">
       <summary>
+        <wa-icon class="reasoning-marker" name="chevron-right"></wa-icon>
         Thinking ${streaming
           ? html`
             <span class="reasoning-streaming-dot"></span>
@@ -296,15 +297,12 @@ export class RoomDetail extends LitElement {
       display: none;
     }
 
-    .reasoning-block > summary::before {
-      content: ">";
-      display: inline-block;
-      transition: transform 0.15s ease;
+    .reasoning-marker {
       font-size: 0.7rem;
-      font-family: var(--wa-font-family-code, monospace);
+      transition: transform 0.15s ease;
     }
 
-    .reasoning-block[open] > summary::before {
+    .reasoning-block[open] > summary > .reasoning-marker {
       transform: rotate(90deg);
     }
 

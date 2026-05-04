@@ -70,7 +70,6 @@ available.
   practical.
 - Keep styles encapsulated in `static override styles`.
 - Keep CSS concise and intentional.
-- Use local icon assets/components; do not rely on CDN-hosted icon markup.
 - Avoid `setTimeout`/`requestAnimationFrame` for lifecycle orchestration when
   Lit lifecycle hooks can handle it.
 - Move large conditional blocks out of template return expressions into helper
