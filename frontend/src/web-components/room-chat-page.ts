@@ -115,27 +115,39 @@ export class RoomChatPage extends LitElement {
       place-items: center;
       border-radius: 0.4rem;
       font: inherit;
+      flex-shrink: 0;
     }
 
     .back-button:hover {
       background: var(--wa-color-fill-quiet);
     }
 
+    .title {
+      flex: 1;
+      min-width: 0;
+    }
+
     .room-name {
       font-size: 1rem;
       font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .room-topic {
       font-size: 0.82rem;
       color: var(--wa-color-text-quiet);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    .header-actions {
-      margin-left: auto;
+    .badges {
       display: flex;
       gap: 0.4rem;
       align-items: center;
+      flex-shrink: 0;
     }
 
     .scroll {
@@ -219,7 +231,7 @@ export class RoomChatPage extends LitElement {
           <button class="back-button" @click="${this.#onBack}" title="Back">
             <wa-icon name="chevron-left"></wa-icon>
           </button>
-          <div>
+          <div class="title">
             <div class="room-name">${room.name}</div>
             ${room.topic !== ""
               ? html`
@@ -227,7 +239,7 @@ export class RoomChatPage extends LitElement {
               `
               : nothing}
           </div>
-          <div class="header-actions">
+          <div class="badges">
             <wa-badge size="small" appearance="outlined">
               ${this.dashboardState?.wsConnected
                 ? "Connected"
@@ -236,19 +248,25 @@ export class RoomChatPage extends LitElement {
             <wa-badge size="small" appearance="outlined">
               ${roomStatusToText(room.status)}
             </wa-badge>
-            ${this.#renderPauseButton(room)}
-            <wa-button size="small" @click="${this.#openSettings}">
-              Settings
-            </wa-button>
-            <wa-button size="small" @click="${this.#openReports}">
-              Reports
-            </wa-button>
-            <wa-button size="small" @click="${(): Promise<
-              void
-            > => this.#confirmDelete(room.id)}">
-              Delete
-            </wa-button>
           </div>
+          <wa-dropdown placement="bottom-end">
+            <wa-button slot="trigger" size="small" title="More actions">
+              <wa-icon name="ellipsis-vertical"></wa-icon>
+            </wa-button>
+            ${this.#renderPauseItem(room)}
+            <wa-dropdown-item @click="${this.#openSettings}">
+              Settings
+            </wa-dropdown-item>
+            <wa-dropdown-item @click="${this.#openReports}">
+              Reports
+            </wa-dropdown-item>
+            <wa-dropdown-item
+              variant="danger"
+              @click="${(): Promise<void> => this.#confirmDelete(room.id)}"
+            >
+              Delete
+            </wa-dropdown-item>
+          </wa-dropdown>
         </header>
         ${this.#renderScrollArea(entries)}
         <div class="composer-wrap">
@@ -301,24 +319,22 @@ export class RoomChatPage extends LitElement {
     `;
   }
 
-  #renderPauseButton(room: Room) {
+  #renderPauseItem(room: Room) {
     if (room.status === "paused") {
       return html`
-        <wa-button
-          size="small"
+        <wa-dropdown-item
           @click="${(): Promise<void> => this.store.resumeRoom(room.id)}"
         >
           Resume
-        </wa-button>
+        </wa-dropdown-item>
       `;
     }
     return html`
-      <wa-button
-        size="small"
+      <wa-dropdown-item
         @click="${(): Promise<void> => this.store.pauseRoom(room.id)}"
       >
         Pause
-      </wa-button>
+      </wa-dropdown-item>
     `;
   }
 
