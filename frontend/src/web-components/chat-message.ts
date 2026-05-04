@@ -140,7 +140,7 @@ export class ChatMessage extends LitElement {
       display: block;
     }
 
-    .reasoning-block {
+    .collapsible-block {
       margin: 0.8rem 0;
       padding: 0.3rem 0.5rem;
       background: transparent;
@@ -150,7 +150,7 @@ export class ChatMessage extends LitElement {
       color: var(--wa-color-text-quiet);
     }
 
-    .reasoning-block > summary {
+    .collapsible-block > summary {
       cursor: pointer;
       list-style: none;
       display: flex;
@@ -164,16 +164,16 @@ export class ChatMessage extends LitElement {
       user-select: none;
     }
 
-    .reasoning-block > summary::-webkit-details-marker {
+    .collapsible-block > summary::-webkit-details-marker {
       display: none;
     }
 
-    .reasoning-marker {
+    .collapsible-marker {
       font-size: 0.65rem;
       transition: transform 0.15s ease;
     }
 
-    .reasoning-block[open] > summary > .reasoning-marker {
+    .collapsible-block[open] > summary > .collapsible-marker {
       transform: rotate(90deg);
     }
 
@@ -187,7 +187,7 @@ export class ChatMessage extends LitElement {
       overflow-y: auto;
     }
 
-    .reasoning-streaming-dot {
+    .streaming-dot {
       display: inline-block;
       width: 0.4rem;
       height: 0.4rem;
@@ -208,10 +208,9 @@ export class ChatMessage extends LitElement {
     .tool-list {
       display: grid;
       gap: 0.3rem;
-      margin: 0.8rem 0;
-      padding: 0.3rem 0 0 0.5rem;
+      margin: 0.3rem 0 0;
+      padding: 0;
       list-style: none;
-      border-left: var(--wa-border-width-s) solid var(--wa-color-border-normal);
     }
 
     .tool-list > li {
@@ -313,31 +312,45 @@ export class ChatMessage extends LitElement {
     if (content === "") {
       return streaming
         ? html`
-          <span class="reasoning-streaming-dot"></span>
+          <span class="streaming-dot"></span>
         `
         : nothing;
     }
     return renderMarkdown(content);
   }
 
-  #renderReasoning(text: string, streaming: boolean) {
+  #renderCollapsible(title: string, streaming: boolean, body: unknown) {
     return html`
-      <details class="reasoning-block" ?open="${streaming}">
+      <details class="collapsible-block" ?open="${streaming}">
         <summary>
-          <wa-icon class="reasoning-marker" name="chevron-right"></wa-icon>
-          Thinking ${streaming
+          <wa-icon class="collapsible-marker" name="chevron-right"></wa-icon>
+          ${title} ${streaming
             ? html`
-              <span class="reasoning-streaming-dot"></span>
+              <span class="streaming-dot"></span>
             `
             : nothing}
         </summary>
-        <pre class="reasoning-text">${text}</pre>
+        ${body}
       </details>
     `;
   }
 
+  #renderReasoning(text: string, streaming: boolean) {
+    return this.#renderCollapsible(
+      "Thinking",
+      streaming,
+      html`
+        <pre class="reasoning-text">${text}</pre>
+      `,
+    );
+  }
+
   #renderToolCalls(calls: ToolCallView[]) {
-    return html`
+    const anyRunning = calls.some((c) => c.status === "running");
+    const title = `${calls.length} ${
+      calls.length === 1 ? "TOOL" : "TOOLS"
+    } USED`;
+    const body = html`
       <ul class="tool-list">
         ${calls.map((call) =>
           html`
@@ -365,6 +378,7 @@ export class ChatMessage extends LitElement {
         )}
       </ul>
     `;
+    return this.#renderCollapsible(title, anyRunning, body);
   }
 
   #renderToolStatus(status: ToolCallView["status"]) {
