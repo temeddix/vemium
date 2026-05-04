@@ -1,3 +1,5 @@
+import type { RoomStatus } from "@/app/types";
+
 export function formatTimestamp(timestamp: string): string {
   const date = new Date(timestamp);
   return date.toLocaleString("en-US", {
@@ -8,6 +10,17 @@ export function formatTimestamp(timestamp: string): string {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+export function roomStatusToText(status: RoomStatus): string {
+  switch (status) {
+    case "active":
+      return "Active";
+    case "paused":
+      return "Paused";
+    case "failed":
+      return "Failed";
+  }
 }
 
 export function sleep(milliseconds: number): Promise<void> {

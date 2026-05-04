@@ -1,4 +1,9 @@
 import "./app-shell.ts";
+import "./chat-composer.ts";
+import "./chat-message.ts";
+import "./create-room-dialog.ts";
 import "./dashboard-provider.ts";
-import "./dashboard-view.ts";
-import "./room-detail.ts";
+import "./room-chat-page.ts";
+import "./room-list-page.ts";
+import "./room-reports-dialog.ts";
+import "./room-settings-dialog.ts";

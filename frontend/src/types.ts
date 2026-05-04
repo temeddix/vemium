@@ -87,10 +87,11 @@ export interface ToolCallRecord {
 // -- WebSocket events -----------------------------------------------------
 
 /**
- * Both kinds participate in the LLM-visible transcript and render as
- * message cards. Used by `Message`, `Draft`, and the WS draft frames.
+ * All kinds participate in the LLM-visible transcript and render as message
+ * bubbles. `user_chat` only ever appears on a finalized `Message` (humans
+ * don't stream tokens, so there are no `user_chat` drafts).
  */
-export type TurnKind = "agent_chat" | "leader_note";
+export type TurnKind = "agent_chat" | "leader_note" | "user_chat";
 
 /**
  * First frame on every connect. Carries the room state and the persisted
@@ -198,6 +199,10 @@ export type WsEvent =
   | WsReportCompleted;
 
 // -- Request DTOs ---------------------------------------------------------
+
+export interface CreateMessageRequest {
+  content: string;
+}
 
 export interface CreateRoomRequest {
   name: string;
