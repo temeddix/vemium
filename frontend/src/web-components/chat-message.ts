@@ -109,7 +109,7 @@ export class ChatMessage extends LitElement {
     }
 
     .bubble {
-      padding: 0.55rem 0.85rem;
+      padding: 0.3rem 1.2rem;
       border-radius: 1rem;
       background: var(--wa-color-neutral-fill-quiet);
       color: var(--wa-color-text-normal);
@@ -141,12 +141,11 @@ export class ChatMessage extends LitElement {
     }
 
     .reasoning-block {
-      margin: 0 0 0.4rem;
+      margin: 0.8rem 0;
       padding: 0.3rem 0.5rem;
-      background: var(--wa-color-neutral-fill-quiet);
+      background: transparent;
       border-left: var(--wa-border-width-s) solid
         var(--wa-color-neutral-border-normal);
-      border-radius: 0.3rem;
       font-size: 0.74rem;
       color: var(--wa-color-text-quiet);
     }
@@ -209,7 +208,7 @@ export class ChatMessage extends LitElement {
     .tool-list {
       display: grid;
       gap: 0.3rem;
-      margin: 0.4rem 0 0;
+      margin: 0.8rem 0;
       padding: 0.3rem 0 0 0.5rem;
       list-style: none;
       border-left: var(--wa-border-width-s) solid var(--wa-color-border-normal);
