@@ -44,6 +44,8 @@ pub struct RoomHandle {
   /// Signal fired whenever `paused` changes. The orchestrator awaits this
   /// to wake up from a pause.
   pub pause_notify: Arc<Notify>,
+  /// True when the current paused state was initiated by auto-convergence.
+  pub auto_paused: Arc<AtomicBool>,
   /// Permanent stop signal. When `true`, the orchestrator finishes its
   /// current turn (if any) and exits. Used by the delete handler.
   pub stopped: Arc<AtomicBool>,
@@ -63,6 +65,7 @@ impl RoomHandle {
     Self {
       paused: Arc::new(AtomicBool::new(false)),
       pause_notify: Arc::new(Notify::new()),
+      auto_paused: Arc::new(AtomicBool::new(false)),
       stopped: Arc::new(AtomicBool::new(false)),
       stop_notify: Arc::new(Notify::new()),
       next_event_sequence: Arc::new(AtomicU64::new(seed_event_seq + 1)),
@@ -82,11 +85,19 @@ impl RoomHandle {
 
   pub fn request_pause(&self) {
     self.paused.store(true, Ordering::SeqCst);
+    self.auto_paused.store(false, Ordering::SeqCst);
+    self.pause_notify.notify_waiters();
+  }
+
+  pub fn request_auto_pause(&self) {
+    self.paused.store(true, Ordering::SeqCst);
+    self.auto_paused.store(true, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
   }
 
   pub fn request_resume(&self) {
     self.paused.store(false, Ordering::SeqCst);
+    self.auto_paused.store(false, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
   }
 
@@ -103,6 +114,10 @@ impl RoomHandle {
 
   pub fn is_stopped(&self) -> bool {
     self.stopped.load(Ordering::SeqCst)
+  }
+
+  pub fn is_auto_paused(&self) -> bool {
+    self.auto_paused.load(Ordering::SeqCst)
   }
 }
 

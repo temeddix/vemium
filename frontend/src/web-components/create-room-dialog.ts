@@ -20,9 +20,27 @@ interface CreateRoomForm {
   goal: string;
   instruction: string;
   background: string;
+  autoPauseWhenConverged: boolean;
+  resumeScheduleCron: string;
+  resumeScheduleLabel: string;
   low: ProviderConfig;
   high: ProviderConfig;
 }
+
+interface ResumeScheduleOption {
+  label: string;
+  cron: string;
+}
+
+const RESUME_SCHEDULE_OPTIONS: ResumeScheduleOption[] = [
+  { label: "Every 15 minutes", cron: "*/15 * * * *" },
+  { label: "Every 30 minutes", cron: "*/30 * * * *" },
+  { label: "Every hour", cron: "0 * * * *" },
+  { label: "Every 3 hours", cron: "0 */3 * * *" },
+  { label: "Every 6 hours", cron: "0 */6 * * *" },
+  { label: "Daily at 09:00 UTC", cron: "0 9 * * *" },
+  { label: "Daily at 18:00 UTC", cron: "0 18 * * *" },
+];
 
 const EMPTY_PROVIDER: ProviderConfig = {
   model: "",
@@ -37,6 +55,9 @@ const EMPTY_FORM: CreateRoomForm = {
   goal: "",
   instruction: "",
   background: "",
+  autoPauseWhenConverged: false,
+  resumeScheduleCron: "0 * * * *",
+  resumeScheduleLabel: "Every hour",
   low: { ...EMPTY_PROVIDER },
   high: { ...EMPTY_PROVIDER },
 };
@@ -106,6 +127,14 @@ export class CreateRoomDialog extends LitElement {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 0.6rem;
+    }
+
+    .schedule-grid {
+      display: grid;
+      gap: 0.6rem;
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      border-radius: 0.5rem;
+      padding: 0.6rem;
     }
 
     fieldset.tier {
@@ -197,6 +226,13 @@ export class CreateRoomDialog extends LitElement {
             form.background,
             (v) => this.#patchForm({ background: v }),
           )}
+          <div class="schedule-grid">
+            ${this.#renderBooleanSelect(
+              "Auto-pause after convergence",
+              form.autoPauseWhenConverged,
+              (value) => this.#patchForm({ autoPauseWhenConverged: value }),
+            )} ${this.#renderScheduleSelect(form)}
+          </div>
           <div class="provider-grid">
             ${this.#renderProvider(
               "Low tier",
@@ -316,6 +352,60 @@ export class CreateRoomDialog extends LitElement {
     `;
   }
 
+  #renderBooleanSelect(
+    label: string,
+    value: boolean,
+    onChange: (value: boolean) => void,
+  ) {
+    return html`
+      <label class="form-field">
+        <span class="form-label">${label}</span>
+        <wa-select
+          size="small"
+          .value="${value ? "enabled" : "disabled"}"
+          @change="${(e: Event): void => {
+            const selected = readInputValue(e.target);
+            onChange(selected === "enabled");
+          }}"
+        >
+          <wa-option value="enabled">Enabled</wa-option>
+          <wa-option value="disabled">Disabled</wa-option>
+        </wa-select>
+      </label>
+    `;
+  }
+
+  #renderScheduleSelect(form: CreateRoomForm) {
+    return html`
+      <label class="form-field">
+        <span class="form-label">Wake-check schedule (UTC)</span>
+        <wa-select
+          size="small"
+          .value="${form.resumeScheduleCron}"
+          @change="${(e: Event): void => {
+            const selected = readInputValue(e.target);
+            const option = RESUME_SCHEDULE_OPTIONS.find((item) =>
+              item.cron === selected
+            );
+            if (option === undefined) {
+              return;
+            }
+            this.#patchForm({
+              resumeScheduleCron: option.cron,
+              resumeScheduleLabel: option.label,
+            });
+          }}"
+        >
+          ${RESUME_SCHEDULE_OPTIONS.map((option) =>
+            html`
+              <wa-option value="${option.cron}">${option.label}</wa-option>
+            `
+          )}
+        </wa-select>
+      </label>
+    `;
+  }
+
   #patchForm(patch: Partial<CreateRoomForm>): void {
     this.formState = { ...this.formState, ...patch };
   }
@@ -331,6 +421,9 @@ export class CreateRoomDialog extends LitElement {
       background: this.formState.background === ""
         ? null
         : this.formState.background,
+      autoPauseWhenConverged: this.formState.autoPauseWhenConverged,
+      resumeScheduleCron: this.formState.resumeScheduleCron,
+      resumeScheduleLabel: this.formState.resumeScheduleLabel,
       low: this.formState.low,
       high: this.formState.high,
     };

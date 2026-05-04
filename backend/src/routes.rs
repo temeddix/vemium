@@ -90,6 +90,11 @@ async fn create_room(
   if let Err(error) = validate_provider_config(&payload.high) {
     return bad_request("high", &error);
   }
+  if let Some(cron) = payload.resume_schedule_cron.as_deref()
+    && let Err(error) = validate_supported_resume_cron(cron)
+  {
+    return bad_request("resumeScheduleCron", &error);
+  }
 
   let name = payload.name.trim();
   if name.is_empty() {
@@ -135,6 +140,19 @@ async fn create_room(
     python_feedback_every: payload
       .python_feedback_every
       .unwrap_or(room_defaults::PYTHON_FEEDBACK_EVERY),
+    auto_pause_when_converged: payload
+      .auto_pause_when_converged
+      .unwrap_or(room_defaults::AUTO_PAUSE_WHEN_CONVERGED),
+    resume_schedule_cron: payload
+      .resume_schedule_cron
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+      .unwrap_or_else(|| room_defaults::RESUME_SCHEDULE_CRON.to_string()),
+    resume_schedule_label: payload
+      .resume_schedule_label
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+      .unwrap_or_else(|| room_defaults::RESUME_SCHEDULE_LABEL.to_string()),
     low: payload.low,
     high: payload.high,
     created_at: now,
@@ -191,6 +209,11 @@ async fn update_room(
   {
     return bad_request("high", &error);
   }
+  if let Some(value) = payload.resume_schedule_cron.as_deref()
+    && let Err(error) = validate_supported_resume_cron(value)
+  {
+    return bad_request("resumeScheduleCron", &error);
+  }
 
   if let Some(value) = payload.name {
     let trimmed = value.trim();
@@ -238,6 +261,21 @@ async fn update_room(
   }
   if let Some(value) = payload.python_feedback_every {
     updated.python_feedback_every = value;
+  }
+  if let Some(value) = payload.auto_pause_when_converged {
+    updated.auto_pause_when_converged = value;
+  }
+  if let Some(value) = payload.resume_schedule_cron {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+      updated.resume_schedule_cron = trimmed.to_string();
+    }
+  }
+  if let Some(value) = payload.resume_schedule_label {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+      updated.resume_schedule_label = trimmed.to_string();
+    }
   }
   if let Some(value) = payload.low {
     updated.low = value;
@@ -531,6 +569,36 @@ fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
     return Err("api_key is required for OpenRouter".to_string());
   }
   Ok(())
+}
+
+fn validate_supported_resume_cron(cron: &str) -> Result<(), String> {
+  let trimmed = cron.trim();
+  if trimmed.is_empty() {
+    return Err("must not be empty".to_string());
+  }
+  if matches!(trimmed, "*/15 * * * *" | "*/30 * * * *" | "0 * * * *") {
+    return Ok(());
+  }
+  if matches!(trimmed, "0 */3 * * *" | "0 */6 * * *") {
+    return Ok(());
+  }
+  // Also accept strict daily schedule `M H * * *`.
+  let parts: Vec<&str> = trimmed.split_whitespace().collect();
+  if parts.len() != 5 {
+    return Err("unsupported cron expression".to_string());
+  }
+  let minute = parts[0].parse::<u32>().ok();
+  let hour = parts[1].parse::<u32>().ok();
+  if let (Some(m), Some(h)) = (minute, hour)
+    && m < 60
+    && h < 24
+    && parts[2] == "*"
+    && parts[3] == "*"
+    && parts[4] == "*"
+  {
+    return Ok(());
+  }
+  Err("unsupported cron expression".to_string())
 }
 
 async fn unique_slug(

@@ -1,6 +1,6 @@
 //! Per-room orchestration.
 //!
-//! Starting a room spawns three Tokio tasks:
+//! Starting a room spawns four Tokio tasks:
 //!
 //! 1. **Debate loop** ([`run_debate_loop`]): the heartbeat. Picks the next
 //!    persona, runs one streaming turn through the low-tier model with tool
@@ -11,6 +11,9 @@
 //! 3. **Report tick** ([`run_report_loop`]): every
 //!    `report_interval_seconds`, the high model writes a long-form report
 //!    streamed token-by-token into a `room_reports` row.
+//! 4. **Wake tick** ([`run_resume_schedule_loop`]): while auto-paused,
+//!    waits for the next configured cron time and asks the leader whether
+//!    to resume.
 //!
 //! All three honor the room's `paused` and `stopped` flags. They observe
 //! changes at task-natural boundaries (turn end, timer wake) - nothing is
@@ -40,10 +43,11 @@ use crate::streaming::{
 use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::workspace::{DebateRoot, RoomWorkspace};
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,6 +89,18 @@ const CHAT_LENGTH_GUARDRAIL: &str =
 const LEADER_EVAL_AGENT: &str = "Leader (evaluation)";
 const LEADER_EVAL_PROMPT: &str = include_str!("prompts/leader_evaluation.md");
 const LEADER_REPORT_PROMPT: &str = include_str!("prompts/leader_report.md");
+const LEADER_HALT_AGENT: &str = "Leader (halt gate)";
+const LEADER_HALT_GATE_PROMPT: &str =
+  include_str!("prompts/leader_halt_gate.md");
+const LEADER_RESUME_GATE_PROMPT: &str =
+  include_str!("prompts/leader_resume_gate.md");
+const LEADER_HALT_GATE_USER_PROMPT: &str =
+  include_str!("prompts/leader_halt_gate_user.md");
+const LEADER_RESUME_GATE_USER_PROMPT: &str =
+  include_str!("prompts/leader_resume_gate_user.md");
+
+const NO_FURTHER_INPUT_MARKER: &str = "[NO_FURTHER_INPUT]";
+const DEFAULT_WAKE_LABEL: &str = "Every hour";
 
 /// Maximum bytes emitted in tool args/output previews to the WebSocket.
 const PREVIEW_MAX_CHARS: usize = 240;
@@ -135,7 +151,8 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
     workspace.clone(),
   ));
   tokio::spawn(run_evaluation_loop(state.clone(), handle.clone(), room_id));
-  tokio::spawn(run_report_loop(state, handle, room_id));
+  tokio::spawn(run_report_loop(state.clone(), handle.clone(), room_id));
+  tokio::spawn(run_resume_schedule_loop(state, handle, room_id));
 
   Ok(())
 }
@@ -149,6 +166,10 @@ async fn run_debate_loop(
   workspace: RoomWorkspace,
 ) {
   let mut persona_index: usize = 0;
+  let mut no_further_by_persona: HashMap<&'static str, bool> = DEBATE_PERSONAS
+    .iter()
+    .map(|persona| (persona.name, false))
+    .collect();
 
   loop {
     if handle.is_stopped() {
@@ -171,8 +192,29 @@ async fn run_debate_loop(
       run_chat_turn(&state, &handle, &snapshot, persona, workspace.clone())
         .await;
 
-    if let Err(error) = result {
-      tracing::warn!(%room_id, persona = %persona.name, %error, "chat turn failed");
+    match result {
+      Ok(outcome) => {
+        no_further_by_persona.insert(persona.name, outcome.no_further_input);
+
+        if !snapshot.auto_pause_when_converged {
+          no_further_by_persona
+            .values_mut()
+            .for_each(|value| *value = false);
+        }
+
+        let everyone_idle = no_further_by_persona.values().all(|v| *v);
+        if everyone_idle
+          && snapshot.auto_pause_when_converged
+          && let Err(error) =
+            evaluate_and_maybe_auto_pause(&state, &handle, &snapshot).await
+        {
+          tracing::warn!(%room_id, %error, "failed convergence halt gate");
+        }
+      }
+      Err(error) => {
+        no_further_by_persona.insert(persona.name, false);
+        tracing::warn!(%room_id, persona = %persona.name, %error, "chat turn failed");
+      }
     }
 
     let interval = snapshot.chat_interval_seconds.max(1);
@@ -181,6 +223,10 @@ async fn run_debate_loop(
       _ = handle.stop_notify.notified() => return,
     }
   }
+}
+
+struct ChatTurnOutcome {
+  no_further_input: bool,
 }
 
 /// Runs one debater turn end-to-end. Builds the [`ChatClient`] for the
@@ -193,7 +239,7 @@ async fn run_chat_turn(
   room: &Room,
   persona: DebatePersona,
   workspace: RoomWorkspace,
-) -> Result<()> {
+) -> Result<ChatTurnOutcome> {
   let history = db::load_room_events(&state.db, room.id).await?;
   let history_messages = render_transcript_messages(&history);
   let system_prompt = build_chat_system_prompt(room, persona);
@@ -252,8 +298,12 @@ async fn run_chat_turn(
       turn_id,
       error: "model produced no text after tool loop".to_string(),
     });
-    return Ok(());
+    return Ok(ChatTurnOutcome {
+      no_further_input: false,
+    });
   }
+
+  let no_further_input = trimmed.contains(NO_FURTHER_INPUT_MARKER);
 
   let (reasoning, tool_calls) = recorder.snapshot().await;
   let sequence = handle.allocate_event_sequence();
@@ -274,7 +324,7 @@ async fn run_chat_turn(
     turn_id,
     message: event,
   });
-  Ok(())
+  Ok(ChatTurnOutcome { no_further_input })
 }
 
 // -- Hook -----------------------------------------------------------------
@@ -449,6 +499,345 @@ where
     });
     HookAction::cont()
   }
+}
+
+#[derive(Debug, Deserialize)]
+struct HaltGateDecision {
+  halt: bool,
+  #[serde(default)]
+  note: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResumeGateDecision {
+  action: String,
+  #[serde(default)]
+  note: String,
+}
+
+async fn evaluate_and_maybe_auto_pause(
+  state: &AppState,
+  handle: &RoomHandle,
+  room: &Room,
+) -> Result<()> {
+  let history = db::load_room_events(&state.db, room.id).await?;
+  if history.is_empty() {
+    return Ok(());
+  }
+
+  let preamble = build_room_preamble(room);
+  let transcript = render_transcript_text(&history);
+  let system_prompt = LEADER_HALT_GATE_PROMPT;
+  let user_prompt = render_gate_user_prompt(
+    LEADER_HALT_GATE_USER_PROMPT,
+    &preamble,
+    &room.resume_schedule_label,
+    &transcript,
+  );
+
+  let raw =
+    run_internal_leader_gate(&room.high, system_prompt, user_prompt).await?;
+
+  let decision: HaltGateDecision =
+    serde_json::from_str(raw.trim()).unwrap_or(HaltGateDecision {
+      halt: false,
+      note: String::new(),
+    });
+  if !decision.halt {
+    return Ok(());
+  }
+
+  let label = if room.resume_schedule_label.trim().is_empty() {
+    DEFAULT_WAKE_LABEL
+  } else {
+    room.resume_schedule_label.as_str()
+  };
+  let note = if decision.note.trim().is_empty() {
+    format!(
+      "All personas reported no further contribution. I approve pausing now. \
+       I will re-check on schedule: {label}."
+    )
+  } else {
+    decision.note
+  };
+
+  persist_leader_note(state, handle, room.id, LEADER_HALT_AGENT, &note).await;
+  set_room_status_from_runtime(
+    state,
+    handle,
+    room.id,
+    RoomStatus::Paused,
+    true,
+  )
+  .await?;
+  Ok(())
+}
+
+async fn run_internal_leader_gate(
+  high: &ProviderConfig,
+  system_prompt: &str,
+  user_prompt: String,
+) -> Result<String> {
+  let client =
+    build_chat_client(high).context("failed to construct high-tier client")?;
+  client
+    .prompt_once(system_prompt.to_string(), user_prompt)
+    .await
+}
+
+async fn run_resume_schedule_loop(
+  state: AppState,
+  handle: RoomHandle,
+  room_id: Uuid,
+) {
+  loop {
+    if handle.is_stopped() {
+      return;
+    }
+
+    let Some(room) = load_room_snapshot(&state, room_id).await else {
+      return;
+    };
+
+    if !room.auto_pause_when_converged {
+      tokio::select! {
+        _ = sleep(Duration::from_secs(30)) => {}
+        _ = handle.stop_notify.notified() => return,
+      }
+      continue;
+    }
+
+    if !handle.is_paused() || !handle.is_auto_paused() {
+      tokio::select! {
+        _ = handle.pause_notify.notified() => {}
+        _ = handle.stop_notify.notified() => return,
+      }
+      continue;
+    }
+
+    let now = Utc::now();
+    let Some(next_tick) =
+      next_supported_cron_tick(&room.resume_schedule_cron, now)
+    else {
+      tracing::warn!(%room_id, cron = %room.resume_schedule_cron, "unsupported resume cron; skipping wake check");
+      tokio::select! {
+        _ = sleep(Duration::from_secs(300)) => {}
+        _ = handle.stop_notify.notified() => return,
+      }
+      continue;
+    };
+
+    let wait = (next_tick - now)
+      .to_std()
+      .unwrap_or_else(|_| Duration::from_secs(1));
+    tokio::select! {
+      _ = sleep(wait) => {}
+      _ = handle.pause_notify.notified() => continue,
+      _ = handle.stop_notify.notified() => return,
+    }
+
+    if handle.is_stopped() || !handle.is_paused() || !handle.is_auto_paused() {
+      continue;
+    }
+
+    let Some(room) = load_room_snapshot(&state, room_id).await else {
+      return;
+    };
+    if let Err(error) = evaluate_scheduled_resume(&state, &handle, &room).await
+    {
+      tracing::warn!(%room_id, %error, "scheduled resume gate failed");
+    }
+  }
+}
+
+async fn evaluate_scheduled_resume(
+  state: &AppState,
+  handle: &RoomHandle,
+  room: &Room,
+) -> Result<()> {
+  let history = db::load_room_events(&state.db, room.id).await?;
+  if history.is_empty() {
+    return Ok(());
+  }
+
+  let preamble = build_room_preamble(room);
+  let transcript = render_transcript_text(&history);
+  let system_prompt = LEADER_RESUME_GATE_PROMPT;
+  let user_prompt = render_gate_user_prompt(
+    LEADER_RESUME_GATE_USER_PROMPT,
+    &preamble,
+    &room.resume_schedule_label,
+    &transcript,
+  );
+
+  let raw =
+    run_internal_leader_gate(&room.high, system_prompt, user_prompt).await?;
+
+  let decision: ResumeGateDecision = serde_json::from_str(raw.trim())
+    .unwrap_or(ResumeGateDecision {
+      action: "wait".to_string(),
+      note: String::new(),
+    });
+
+  if decision.action.trim().eq_ignore_ascii_case("resume") {
+    let note = if decision.note.trim().is_empty() {
+      "Scheduled check approved restart. Resuming debate now.".to_string()
+    } else {
+      decision.note
+    };
+    persist_leader_note(state, handle, room.id, LEADER_HALT_AGENT, &note).await;
+    set_room_status_from_runtime(
+      state,
+      handle,
+      room.id,
+      RoomStatus::Active,
+      false,
+    )
+    .await?;
+  }
+  Ok(())
+}
+
+async fn persist_leader_note(
+  state: &AppState,
+  handle: &RoomHandle,
+  room_id: Uuid,
+  agent: &str,
+  content: &str,
+) {
+  let event = RoomEvent {
+    room_id,
+    sequence: handle.allocate_event_sequence(),
+    kind: RoomEventKind::LeaderNote,
+    agent: Some(agent.to_string()),
+    content: content.to_string(),
+    reasoning: String::new(),
+    tool_calls: Vec::new(),
+    timestamp: Utc::now(),
+  };
+  db::insert_event(&state.db, &event).await.report();
+
+  let stream = state.ensure_room_stream(room_id).await;
+  stream.send(WsEvent::MessageAdded {
+    turn_id: new_turn_id(),
+    message: event,
+  });
+}
+
+async fn set_room_status_from_runtime(
+  state: &AppState,
+  handle: &RoomHandle,
+  room_id: Uuid,
+  status: RoomStatus,
+  auto_pause: bool,
+) -> Result<()> {
+  let updated_at = Utc::now();
+  {
+    let mut rooms = state.rooms.write().await;
+    let Some(room) = rooms.get_mut(&room_id) else {
+      return Ok(());
+    };
+    room.status = status;
+    room.updated_at = updated_at;
+  }
+
+  db::update_room_status(&state.db, room_id, status, updated_at).await?;
+
+  match status {
+    RoomStatus::Paused => {
+      if auto_pause {
+        handle.request_auto_pause();
+      } else {
+        handle.request_pause();
+      }
+    }
+    RoomStatus::Active => handle.request_resume(),
+    RoomStatus::Failed => handle.request_stop(),
+  }
+
+  let stream = state.ensure_room_stream(room_id).await;
+  stream.send(WsEvent::RoomStatus { status });
+  Ok(())
+}
+
+fn next_supported_cron_tick(
+  cron: &str,
+  now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+  let trimmed = cron.trim();
+  if trimmed == "*/15 * * * *" {
+    return next_every_n_minutes(now, 15);
+  }
+  if trimmed == "*/30 * * * *" {
+    return next_every_n_minutes(now, 30);
+  }
+  if trimmed == "0 * * * *" {
+    return next_every_n_hours(now, 1);
+  }
+  if trimmed == "0 */3 * * *" {
+    return next_every_n_hours(now, 3);
+  }
+  if trimmed == "0 */6 * * *" {
+    return next_every_n_hours(now, 6);
+  }
+
+  let parts: Vec<&str> = trimmed.split_whitespace().collect();
+  if parts.len() != 5 || parts[2] != "*" || parts[3] != "*" || parts[4] != "*" {
+    return None;
+  }
+  let minute = parts[0].parse::<u32>().ok()?;
+  let hour = parts[1].parse::<u32>().ok()?;
+  if minute > 59 || hour > 23 {
+    return None;
+  }
+  next_daily_utc(now, hour, minute)
+}
+
+fn next_every_n_minutes(
+  now: DateTime<Utc>,
+  step: u32,
+) -> Option<DateTime<Utc>> {
+  if step == 0 {
+    return None;
+  }
+  let mut candidate =
+    now.with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
+  loop {
+    if candidate.minute().is_multiple_of(step) {
+      return Some(candidate);
+    }
+    candidate += ChronoDuration::minutes(1);
+  }
+}
+
+fn next_every_n_hours(now: DateTime<Utc>, step: u32) -> Option<DateTime<Utc>> {
+  if step == 0 {
+    return None;
+  }
+  let mut candidate =
+    now.with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
+  loop {
+    if candidate.minute() == 0 && candidate.hour().is_multiple_of(step) {
+      return Some(candidate);
+    }
+    candidate += ChronoDuration::minutes(1);
+  }
+}
+
+fn next_daily_utc(
+  now: DateTime<Utc>,
+  hour: u32,
+  minute: u32,
+) -> Option<DateTime<Utc>> {
+  let today = now
+    .with_hour(hour)?
+    .with_minute(minute)?
+    .with_second(0)?
+    .with_nanosecond(0)?;
+  if today > now {
+    return Some(today);
+  }
+  Some(today + ChronoDuration::days(1))
 }
 
 // -- Leader evaluation -----------------------------------------------------
@@ -807,6 +1196,18 @@ fn render_transcript_text(events: &[RoomEvent]) -> String {
     })
     .collect::<Vec<_>>()
     .join("\n\n")
+}
+
+fn render_gate_user_prompt(
+  template: &str,
+  preamble: &str,
+  schedule_label: &str,
+  transcript: &str,
+) -> String {
+  template
+    .replace("{preamble}", preamble)
+    .replace("{schedule_label}", schedule_label)
+    .replace("{transcript}", transcript)
 }
 
 fn preview(text: &str) -> String {

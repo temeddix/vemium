@@ -25,6 +25,12 @@ pub mod room_defaults {
   pub const PYTHON_TIMEOUT_SECONDS: u64 = 600;
   /// Every 10 failed Python attempts the runner pings the debate.
   pub const PYTHON_FEEDBACK_EVERY: u32 = 10;
+  /// Whether convergence-based auto-pause is enabled by default.
+  pub const AUTO_PAUSE_WHEN_CONVERGED: bool = false;
+  /// Default wake-check cron (UTC): at minute 0 of every hour.
+  pub const RESUME_SCHEDULE_CRON: &str = "0 * * * *";
+  /// User-facing label for the default wake schedule.
+  pub const RESUME_SCHEDULE_LABEL: &str = "Every hour";
 }
 
 /// Process-level configuration. Construct via [`AppConfig::default`]; the

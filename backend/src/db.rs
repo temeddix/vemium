@@ -64,9 +64,10 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
         id, name, slug, topic, goal, instruction, background, status,
         chat_interval_seconds, evaluation_interval_seconds,
         report_interval_seconds, python_timeout_seconds,
-        python_feedback_every, low_provider_config, high_provider_config,
-        created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        python_feedback_every, auto_pause_when_converged,
+        resume_schedule_cron, resume_schedule_label,
+        low_provider_config, high_provider_config, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(room.id.to_string())
   .bind(&room.name)
@@ -81,6 +82,9 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(room.report_interval_seconds as i64)
   .bind(room.python_timeout_seconds as i64)
   .bind(room.python_feedback_every as i64)
+  .bind(room.auto_pause_when_converged)
+  .bind(&room.resume_schedule_cron)
+  .bind(&room.resume_schedule_label)
   .bind(&low_json)
   .bind(&high_json)
   .bind(room.created_at.to_rfc3339())
@@ -106,7 +110,9 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
         background = ?, status = ?, chat_interval_seconds = ?,
         evaluation_interval_seconds = ?, report_interval_seconds = ?,
         python_timeout_seconds = ?, python_feedback_every = ?,
-        low_provider_config = ?, high_provider_config = ?, updated_at = ?
+        auto_pause_when_converged = ?, resume_schedule_cron = ?,
+        resume_schedule_label = ?, low_provider_config = ?,
+        high_provider_config = ?, updated_at = ?
      WHERE id = ?",
   )
   .bind(&room.name)
@@ -121,6 +127,9 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(room.report_interval_seconds as i64)
   .bind(room.python_timeout_seconds as i64)
   .bind(room.python_feedback_every as i64)
+  .bind(room.auto_pause_when_converged)
+  .bind(&room.resume_schedule_cron)
+  .bind(&room.resume_schedule_label)
   .bind(&low_json)
   .bind(&high_json)
   .bind(room.updated_at.to_rfc3339())
@@ -229,6 +238,15 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
   let python_feedback: i64 = row
     .try_get("python_feedback_every")
     .context("rooms.python_feedback_every missing")?;
+  let auto_pause_when_converged: bool = row
+    .try_get("auto_pause_when_converged")
+    .context("rooms.auto_pause_when_converged missing")?;
+  let resume_schedule_cron: String = row
+    .try_get("resume_schedule_cron")
+    .context("rooms.resume_schedule_cron missing")?;
+  let resume_schedule_label: String = row
+    .try_get("resume_schedule_label")
+    .context("rooms.resume_schedule_label missing")?;
 
   Ok(Room {
     id,
@@ -248,6 +266,9 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
     report_interval_seconds: report_interval as u64,
     python_timeout_seconds: python_timeout as u64,
     python_feedback_every: python_feedback as u32,
+    auto_pause_when_converged,
+    resume_schedule_cron,
+    resume_schedule_label,
     low,
     high,
     created_at: parse_timestamp(&row, "created_at")?,

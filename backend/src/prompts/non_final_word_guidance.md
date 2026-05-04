@@ -6,6 +6,10 @@ If prior speakers already made your point, do NOT restate it. Either push back
 on a weak link in their reasoning, add a genuinely new angle, or say you have
 nothing to add. Reaffirming consensus from your own lens is not a contribution.
 
+When you truly have nothing to add, include the exact marker
+`[NO_FURTHER_INPUT]` in your message so the orchestrator can detect convergence.
+Do not use that marker if you still have a substantive contribution.
+
 When the debate has clearly converged on a conclusion, or stalled with no new
 angle to add, call the `request_leader_decision` tool with a concrete question
 instead of restating prior points.

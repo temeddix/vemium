@@ -24,9 +24,27 @@ interface SettingsForm {
   reportIntervalSeconds: number;
   pythonTimeoutSeconds: number;
   pythonFeedbackEvery: number;
+  autoPauseWhenConverged: boolean;
+  resumeScheduleCron: string;
+  resumeScheduleLabel: string;
   low: ProviderConfig;
   high: ProviderConfig;
 }
+
+interface ResumeScheduleOption {
+  label: string;
+  cron: string;
+}
+
+const RESUME_SCHEDULE_OPTIONS: ResumeScheduleOption[] = [
+  { label: "Every 15 minutes", cron: "*/15 * * * *" },
+  { label: "Every 30 minutes", cron: "*/30 * * * *" },
+  { label: "Every hour", cron: "0 * * * *" },
+  { label: "Every 3 hours", cron: "0 */3 * * *" },
+  { label: "Every 6 hours", cron: "0 */6 * * *" },
+  { label: "Daily at 09:00 UTC", cron: "0 9 * * *" },
+  { label: "Daily at 18:00 UTC", cron: "0 18 * * *" },
+];
 
 function readInputValue(target: EventTarget | null): string {
   if (!(target instanceof HTMLElement)) {
@@ -95,6 +113,14 @@ export class RoomSettingsDialog extends LitElement {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 0.6rem;
+    }
+
+    .schedule-grid {
+      display: grid;
+      gap: 0.6rem;
+      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      border-radius: 0.5rem;
+      padding: 0.6rem;
     }
 
     fieldset.tier {
@@ -199,6 +225,13 @@ export class RoomSettingsDialog extends LitElement {
             (v) => this.#patchForm({ pythonFeedbackEvery: v }),
           )}
         </div>
+        <div class="schedule-grid">
+          ${this.#renderBooleanSelect(
+            "Auto-pause after convergence",
+            form.autoPauseWhenConverged,
+            (value) => this.#patchForm({ autoPauseWhenConverged: value }),
+          )} ${this.#renderScheduleSelect(form)}
+        </div>
         <div class="provider-grid">
           ${this.#renderProvider(
             "Low tier",
@@ -268,6 +301,71 @@ export class RoomSettingsDialog extends LitElement {
             }
           }}"
         ></wa-input>
+      </label>
+    `;
+  }
+
+  #renderBooleanSelect(
+    label: string,
+    value: boolean,
+    onChange: (value: boolean) => void,
+  ) {
+    return html`
+      <label class="form-field">
+        <span class="form-label">${label}</span>
+        <wa-select
+          size="small"
+          .value="${value ? "enabled" : "disabled"}"
+          @change="${(e: Event): void => {
+            const selected = readInputValue(e.target);
+            onChange(selected === "enabled");
+          }}"
+        >
+          <wa-option value="enabled">Enabled</wa-option>
+          <wa-option value="disabled">Disabled</wa-option>
+        </wa-select>
+      </label>
+    `;
+  }
+
+  #renderScheduleSelect(form: SettingsForm) {
+    const known = RESUME_SCHEDULE_OPTIONS.some((item) =>
+      item.cron === form.resumeScheduleCron
+    );
+    return html`
+      <label class="form-field">
+        <span class="form-label">Wake-check schedule (UTC)</span>
+        <wa-select
+          size="small"
+          .value="${form.resumeScheduleCron}"
+          @change="${(e: Event): void => {
+            const selected = readInputValue(e.target);
+            const option = RESUME_SCHEDULE_OPTIONS.find((item) =>
+              item.cron === selected
+            );
+            if (option === undefined) {
+              return;
+            }
+            this.#patchForm({
+              resumeScheduleCron: option.cron,
+              resumeScheduleLabel: option.label,
+            });
+          }}"
+        >
+          ${!known
+            ? html`
+              <wa-option value="${form.resumeScheduleCron}">
+                ${form.resumeScheduleLabel === ""
+                  ? `Custom (${form.resumeScheduleCron})`
+                  : form.resumeScheduleLabel}
+              </wa-option>
+            `
+            : nothing} ${RESUME_SCHEDULE_OPTIONS.map((option) =>
+              html`
+                <wa-option value="${option.cron}">${option.label}</wa-option>
+              `
+            )}
+        </wa-select>
       </label>
     `;
   }
@@ -352,6 +450,9 @@ export class RoomSettingsDialog extends LitElement {
       reportIntervalSeconds: this.form.reportIntervalSeconds,
       pythonTimeoutSeconds: this.form.pythonTimeoutSeconds,
       pythonFeedbackEvery: this.form.pythonFeedbackEvery,
+      autoPauseWhenConverged: this.form.autoPauseWhenConverged,
+      resumeScheduleCron: this.form.resumeScheduleCron,
+      resumeScheduleLabel: this.form.resumeScheduleLabel,
       low: this.form.low,
       high: this.form.high,
     };
@@ -379,6 +480,9 @@ function formFromRoom(room: Room): SettingsForm {
     reportIntervalSeconds: room.reportIntervalSeconds,
     pythonTimeoutSeconds: room.pythonTimeoutSeconds,
     pythonFeedbackEvery: room.pythonFeedbackEvery,
+    autoPauseWhenConverged: room.autoPauseWhenConverged,
+    resumeScheduleCron: room.resumeScheduleCron,
+    resumeScheduleLabel: room.resumeScheduleLabel,
     low: { ...room.low },
     high: { ...room.high },
   };

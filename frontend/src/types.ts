@@ -44,6 +44,9 @@ export interface Room {
   reportIntervalSeconds: number;
   pythonTimeoutSeconds: number;
   pythonFeedbackEvery: number;
+  autoPauseWhenConverged: boolean;
+  resumeScheduleCron: string;
+  resumeScheduleLabel: string;
   low: ProviderConfig;
   high: ProviderConfig;
   createdAt: string;
@@ -215,6 +218,9 @@ export interface CreateRoomRequest {
   reportIntervalSeconds?: number;
   pythonTimeoutSeconds?: number;
   pythonFeedbackEvery?: number;
+  autoPauseWhenConverged?: boolean;
+  resumeScheduleCron?: string;
+  resumeScheduleLabel?: string;
   low: ProviderConfig;
   high: ProviderConfig;
 }
