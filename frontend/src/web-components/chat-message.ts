@@ -125,11 +125,6 @@ export class ChatMessage extends LitElement {
       color: var(--wa-color-brand-on-loud);
     }
 
-    .bubble.is-streaming {
-      border-style: dashed;
-      border-color: var(--wa-color-warning-border-normal);
-    }
-
     .bubble.is-failed {
       border-color: var(--wa-color-danger-border-normal);
       background: var(--wa-color-danger-fill-quiet);
@@ -258,11 +253,7 @@ export class ChatMessage extends LitElement {
     const rowClasses = ["row", isSelf ? "is-self" : ""]
       .filter(Boolean)
       .join(" ");
-    const bubbleClasses = [
-      "bubble",
-      view.streaming ? "is-streaming" : "",
-      view.failed ? "is-failed" : "",
-    ]
+    const bubbleClasses = ["bubble", view.failed ? "is-failed" : ""]
       .filter(Boolean)
       .join(" ");
     return html`
