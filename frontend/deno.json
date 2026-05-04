@@ -11,7 +11,7 @@
     "./utils": "./src/utils.ts"
   },
   "tasks": {
-    "bundle": "deno bundle src/entry.ts --output dist/js/bundle.js --minify",
+    "bundle": "deno bundle src/entry.ts --platform browser --output dist/js/bundle.js --minify",
     "import-check": "deno run -A jsr:@cunarist/deno-circular-deps src/entry.ts"
   },
   "compilerOptions": {
