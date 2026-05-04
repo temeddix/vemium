@@ -1,7 +1,7 @@
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
 import type { Room, RoomStatus } from "@/app/types";
-import { formatTimestamp } from "@/app/utils";
+import { formatTimestamp, roomStatusToText } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -220,7 +220,7 @@ export class RoomListPage extends LitElement {
   #renderStatusBadge(status: RoomStatus) {
     return html`
       <wa-badge size="small" appearance="outlined">
-        ${status}
+        ${roomStatusToText(status)}
       </wa-badge>
     `;
   }

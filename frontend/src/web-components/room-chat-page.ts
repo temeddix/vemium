@@ -6,6 +6,7 @@ import {
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
 import type { Draft, Message, Room, RoomView } from "@/app/types";
+import { roomStatusToText } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -233,7 +234,7 @@ export class RoomChatPage extends LitElement {
                 : `Reconnecting #${this.dashboardState?.reconnectAttempt ?? 0}`}
             </wa-badge>
             <wa-badge size="small" appearance="outlined">
-              ${room.status}
+              ${roomStatusToText(room.status)}
             </wa-badge>
             ${this.#renderPauseButton(room)}
             <wa-button size="small" @click="${this.#openSettings}">
