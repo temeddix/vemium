@@ -1,5 +1,6 @@
 import { BACKEND_BASE_URL } from "@/app/config";
 import type {
+  CreateMessageRequest,
   CreateRoomRequest,
   Draft,
   DraftToolCall,
@@ -121,6 +122,32 @@ export class DashboardStore {
     this.#client.connect(roomId);
   }
 
+  /**
+   * Drops the active WS subscription and clears the current selection.
+   * Called by the router when navigating away from `/room/:slug` so we
+   * don't keep streaming events for an off-screen room.
+   */
+  clearSelection(): void {
+    if (this.#state.currentRoomId === null) {
+      return;
+    }
+    this.#client.disconnect();
+    this.#patch({
+      currentRoomId: null,
+      wsConnected: false,
+      reconnectAttempt: 0,
+    });
+  }
+
+  /**
+   * Returns the loaded room matching `slug`, or null if none has loaded
+   * yet. The router uses this to translate `/room/:slug` URLs into a
+   * `selectRoom(id)` call once the rooms list has populated.
+   */
+  findRoomBySlug(slug: string): Room | null {
+    return this.#state.rooms.find((room) => room.slug === slug) ?? null;
+  }
+
   async createRoom(request: CreateRoomRequest): Promise<Room | null> {
     this.#patch({ isCreatingRoom: true, errorMessage: null });
     try {
@@ -170,6 +197,36 @@ export class DashboardStore {
       this.#mergeRoom(payload.room);
     } catch {
       this.#patch({ errorMessage: "Network error while updating room." });
+    }
+  }
+
+  /**
+   * POSTs a human-authored message into the room. The backend persists it
+   * and broadcasts a `messageAdded` WS frame, so we don't need to mutate
+   * local state here; the active subscription will deliver the event and
+   * `#applyEvent` will append it to the view.
+   */
+  async sendUserMessage(roomId: string, content: string): Promise<void> {
+    const trimmed = content.trim();
+    if (trimmed === "") {
+      return;
+    }
+    const request: CreateMessageRequest = { content: trimmed };
+    try {
+      const response = await fetch(
+        `${BACKEND_BASE_URL}/v1/rooms/${roomId}/messages`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        this.#patch({ errorMessage: `Send failed: ${text}` });
+      }
+    } catch {
+      this.#patch({ errorMessage: "Network error while sending message." });
     }
   }
 

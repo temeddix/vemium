@@ -204,8 +204,8 @@ pub struct RoomView {
   pub updated_at: DateTime<Utc>,
 }
 
-/// Categorisation of a row in `room_events`. Both kinds are part of the
-/// LLM-visible transcript and are rendered as message cards by the UI.
+/// Categorisation of a row in `room_events`. All kinds are part of the
+/// LLM-visible transcript and are rendered as message bubbles by the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoomEventKind {
@@ -213,6 +213,9 @@ pub enum RoomEventKind {
   AgentChat,
   /// The leader (high-model) emitted a steering note.
   LeaderNote,
+  /// The human operator injected a message into the room. The orchestrator
+  /// picks it up like any other transcript entry on the next turn.
+  UserChat,
 }
 
 impl RoomEventKind {
@@ -220,6 +223,7 @@ impl RoomEventKind {
     match self {
       Self::AgentChat => "agent_chat",
       Self::LeaderNote => "leader_note",
+      Self::UserChat => "user_chat",
     }
   }
 
@@ -227,6 +231,7 @@ impl RoomEventKind {
     match value {
       "agent_chat" => Ok(Self::AgentChat),
       "leader_note" => Ok(Self::LeaderNote),
+      "user_chat" => Ok(Self::UserChat),
       other => Err(anyhow::anyhow!("unknown room event kind: {other}")),
     }
   }
@@ -335,6 +340,15 @@ pub struct CreateRoomRequest {
   pub python_feedback_every: Option<u32>,
   pub low: ProviderConfig,
   pub high: ProviderConfig,
+}
+
+/// Input for `POST /v1/rooms/:id/messages`. Carries one human-authored
+/// message to inject into the room's transcript so the AI personas can
+/// react to it on the next turn.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMessageRequest {
+  pub content: String,
 }
 
 /// Input for `PATCH /v1/rooms/:id`. Every field is optional; absent fields

@@ -15,6 +15,7 @@
 //! DELETE /v1/rooms/:id
 //! POST   /v1/rooms/:id/pause
 //! POST   /v1/rooms/:id/resume
+//! POST   /v1/rooms/:id/messages
 //! GET    /v1/rooms/:id/reports
 //! GET    /v1/rooms/:id/reports/:seq
 //! GET    /v1/rooms/:id/stream    (WebSocket)
@@ -25,10 +26,11 @@ use crate::config::room_defaults;
 use crate::db;
 use crate::error::ReportError;
 use crate::models::{
-  CreateRoomRequest, ProviderConfig, Room, RoomStatus, UpdateRoomRequest,
+  CreateMessageRequest, CreateRoomRequest, ProviderConfig, Room, RoomEvent,
+  RoomEventKind, RoomStatus, UpdateRoomRequest,
 };
 use crate::runtime;
-use crate::streaming::{RoomReceiver, WsEvent};
+use crate::streaming::{RoomReceiver, WsEvent, new_turn_id};
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -54,6 +56,7 @@ pub fn create_router(state: AppState) -> Router {
     )
     .route("/v1/rooms/:room_id/pause", post(pause_room))
     .route("/v1/rooms/:room_id/resume", post(resume_room))
+    .route("/v1/rooms/:room_id/messages", post(post_user_message))
     .route("/v1/rooms/:room_id/reports", get(list_reports))
     .route("/v1/rooms/:room_id/reports/:sequence", get(get_report))
     .route("/v1/rooms/:room_id/stream", get(stream_room_events))
@@ -327,6 +330,60 @@ async fn set_room_status(
   stream.send(WsEvent::RoomStatus { status });
 
   (StatusCode::OK, Json(json!({"status": status.as_str()}))).into_response()
+}
+
+/// Author of a `user_chat` row. Stable string so the frontend can pick the
+/// "self" alignment + color without per-room user accounts.
+const USER_AGENT_NAME: &str = "user";
+
+/// Injects a human-authored message into a room. Allowed regardless of the
+/// room's lifecycle state — the orchestrator will see it on its next turn
+/// when the room resumes (or immediately, if active).
+async fn post_user_message(
+  Path(room_id): Path<Uuid>,
+  State(state): State<AppState>,
+  Json(payload): Json<CreateMessageRequest>,
+) -> impl IntoResponse {
+  let content = payload.content.trim().to_string();
+  if content.is_empty() {
+    return bad_request("content", "must not be empty");
+  }
+
+  if !state.rooms.read().await.contains_key(&room_id) {
+    return not_found("room");
+  }
+
+  let handle = {
+    let handles = state.room_handles.read().await;
+    match handles.get(&room_id).cloned() {
+      Some(handle) => handle,
+      None => return not_found("room"),
+    }
+  };
+
+  let event = RoomEvent {
+    room_id,
+    sequence: handle.allocate_event_sequence(),
+    kind: RoomEventKind::UserChat,
+    agent: Some(USER_AGENT_NAME.to_string()),
+    content,
+    reasoning: String::new(),
+    tool_calls: Vec::new(),
+    timestamp: Utc::now(),
+  };
+
+  if let Err(error) = db::insert_event(&state.db, &event).await {
+    tracing::warn!(%error, "failed to insert user message");
+    return internal("failed to persist message");
+  }
+
+  let stream = state.ensure_room_stream(room_id).await;
+  stream.send(WsEvent::MessageAdded {
+    turn_id: new_turn_id(),
+    message: event.clone(),
+  });
+
+  (StatusCode::CREATED, Json(json!({"message": event}))).into_response()
 }
 
 async fn list_reports(

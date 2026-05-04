@@ -4,6 +4,7 @@
     "./context": "./src/context/mod.ts",
     "./state": "./src/state/mod.ts",
     "./web-components": "./src/web-components/mod.ts",
+    "./chat": "./src/chat.ts",
     "./config": "./src/config.ts",
     "./entry": "./src/entry.ts",
     "./types": "./src/types.ts",
@@ -41,6 +42,7 @@
   "imports": {
     "lit": "npm:lit@^3.2.0",
     "@lit/context": "npm:@lit/context@^1.1.0",
+    "@lit-labs/router": "npm:@lit-labs/router@^0.1.4",
     "@awesome.me/webawesome": "npm:@awesome.me/webawesome@^3.5.0"
   }
 }
