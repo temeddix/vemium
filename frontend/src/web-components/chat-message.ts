@@ -264,7 +264,11 @@ export class ChatMessage extends LitElement {
       .join(" ");
     return html`
       <div class="${rowClasses}">
-        ${isSelf ? nothing : this.#renderAvatar(view)}
+        ${isSelf
+          ? html`
+            <div class="avatar is-hidden"></div>
+          `
+          : this.#renderAvatar(view)}
         <div class="stack">
           ${this.showLabel && view.agentName !== "" && !isSelf
             ? html`
