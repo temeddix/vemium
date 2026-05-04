@@ -85,6 +85,7 @@ export class ChatComposer extends LitElement {
           size="small"
           ?disabled="${!canSend}"
           @click="${this.#submit}"
+          pill
         >
           <wa-icon name="paper-plane" label="Send"></wa-icon>
         </wa-button>
