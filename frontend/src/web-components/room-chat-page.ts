@@ -10,6 +10,7 @@ import { roomStatusToText } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
 import "./chat-composer.ts";
 import "./chat-message.ts";
@@ -56,13 +57,13 @@ export class RoomChatPage extends LitElement {
   private accessor dashboardState: DashboardState | null = null;
 
   @state()
-  private accessor showSettings = false;
-
-  @state()
-  private accessor showReports = false;
-
-  @state()
   private accessor sending = false;
+
+  #settingsDialogRef: Ref<HTMLElementTagNameMap["te-room-settings-dialog"]> =
+    createRef();
+
+  #reportsDialogRef: Ref<HTMLElementTagNameMap["te-room-reports-dialog"]> =
+    createRef();
 
   #unsubscribe: (() => void) | null = null;
 
@@ -254,10 +255,14 @@ export class RoomChatPage extends LitElement {
               <wa-icon name="ellipsis-vertical"></wa-icon>
             </wa-button>
             ${this.#renderPauseItem(room)}
-            <wa-dropdown-item @click="${this.#openSettings}">
+            <wa-dropdown-item
+              @click="${(): void => this.#settingsDialogRef.value?.show(room)}"
+            >
               Settings
             </wa-dropdown-item>
-            <wa-dropdown-item @click="${this.#openReports}">
+            <wa-dropdown-item
+              @click="${(): void => this.#reportsDialogRef.value?.show()}"
+            >
               Reports
             </wa-dropdown-item>
             <wa-dropdown-item
@@ -284,15 +289,12 @@ export class RoomChatPage extends LitElement {
         </div>
       </div>
       <te-room-settings-dialog
+        ${ref(this.#settingsDialogRef)}
         .store="${this.store}"
-        .room="${room}"
-        ?open="${this.showSettings}"
-        @te-close="${this.#closeSettings}"
       ></te-room-settings-dialog>
       <te-room-reports-dialog
+        ${ref(this.#reportsDialogRef)}
         .reports="${view.reports}"
-        ?open="${this.showReports}"
-        @te-close="${this.#closeReports}"
       ></te-room-reports-dialog>
     `;
   }
@@ -439,22 +441,6 @@ export class RoomChatPage extends LitElement {
     }
     await this.store.deleteRoom(roomId);
     this.#onBack();
-  }
-
-  #openSettings(): void {
-    this.showSettings = true;
-  }
-
-  #closeSettings(): void {
-    this.showSettings = false;
-  }
-
-  #openReports(): void {
-    this.showReports = true;
-  }
-
-  #closeReports(): void {
-    this.showReports = false;
   }
 
   #onWindowScroll = (): void => {

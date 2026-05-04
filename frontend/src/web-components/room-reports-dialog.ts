@@ -2,7 +2,7 @@ import type { ReportBuffer } from "@/app/types";
 import { formatTimestamp } from "@/app/utils";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
-import { ref } from "lit/directives/ref.js";
+import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -10,17 +10,22 @@ declare global {
   }
 }
 
+interface DialogElement extends HTMLElement {
+  open: boolean;
+}
+
 /**
  * Modal that lists every leader-generated report for a room. Reports are
  * presented newest first; long markdown bodies render via `wa-markdown`.
+ * The parent calls `show()` to open the dialog; dismissal (ESC, backdrop,
+ * close button) is handled by `wa-dialog` itself.
  */
 @customElement("te-room-reports-dialog")
 export class RoomReportsDialog extends LitElement {
   @property({ attribute: false })
   accessor reports: ReportBuffer[] = [];
 
-  @property({ type: Boolean })
-  accessor open = false;
+  #dialogRef: Ref<DialogElement> = createRef();
 
   static override styles = css`
     .report-list {
@@ -53,13 +58,17 @@ export class RoomReportsDialog extends LitElement {
     }
   `;
 
+  /** Open the dialog. */
+  show(): void {
+    const dialog = this.#dialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = true;
+    }
+  }
+
   override render() {
     return html`
-      <wa-dialog
-        label="Reports"
-        ?open="${this.open}"
-        @wa-hide="${this.#onHide}"
-      >
+      <wa-dialog ${ref(this.#dialogRef)} label="Reports">
         ${this.#renderBody()}
       </wa-dialog>
     `;
@@ -107,15 +116,6 @@ export class RoomReportsDialog extends LitElement {
     return html`
       <wa-badge size="small">done</wa-badge>
     `;
-  }
-
-  #onHide(): void {
-    if (!this.open) {
-      return;
-    }
-    this.dispatchEvent(
-      new CustomEvent("te-close", { bubbles: true, composed: true }),
-    );
   }
 }
 

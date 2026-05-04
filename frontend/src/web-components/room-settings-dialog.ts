@@ -7,6 +7,7 @@ import type {
 } from "@/app/types";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -28,6 +29,10 @@ interface SettingsForm {
   high: ProviderConfig;
 }
 
+interface DialogElement extends HTMLElement {
+  open: boolean;
+}
+
 function readInputValue(target: EventTarget | null): string {
   if (!(target instanceof HTMLElement)) {
     return "";
@@ -40,24 +45,24 @@ function readInputValue(target: EventTarget | null): string {
 }
 
 /**
- * Modal that edits a single room's settings. Owns its own draft form
- * state, seeded from the `room` property whenever the dialog opens. Saves
- * are delegated to the store; the dialog keeps itself open so the user
- * can see error messages, and only closes on explicit cancel.
+ * Modal that edits a single room's settings. Owns its own open state
+ * and draft form; the parent calls `show(room)` to open the dialog,
+ * and the dialog handles its own dismissal (ESC, backdrop, close
+ * button). Saves are delegated to the store; the dialog stays open on
+ * save so the user can see error messages.
  */
 @customElement("te-room-settings-dialog")
 export class RoomSettingsDialog extends LitElement {
   @property({ attribute: false })
   accessor store!: DashboardStore;
 
-  @property({ attribute: false })
-  accessor room: Room | null = null;
-
-  @property({ type: Boolean })
-  accessor open = false;
+  @state()
+  private accessor room: Room | null = null;
 
   @state()
   private accessor form: SettingsForm | null = null;
+
+  #dialogRef: Ref<DialogElement> = createRef();
 
   static override styles = css`
     .form-grid {
@@ -118,11 +123,13 @@ export class RoomSettingsDialog extends LitElement {
     }
   `;
 
-  override updated(changed: Map<string, unknown>): void {
-    const justOpened = changed.has("open") && this.open && !changed.get("open");
-    const roomChanged = changed.has("room");
-    if ((justOpened || roomChanged) && this.room !== null) {
-      this.form = formFromRoom(this.room);
+  /** Seed the form from the given room and open the dialog. */
+  show(room: Room): void {
+    this.room = room;
+    this.form = formFromRoom(room);
+    const dialog = this.#dialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = true;
     }
   }
 
@@ -130,11 +137,7 @@ export class RoomSettingsDialog extends LitElement {
     const room = this.room;
     const form = this.form;
     return html`
-      <wa-dialog
-        label="Room settings"
-        ?open="${this.open}"
-        @wa-hide="${this.#onHide}"
-      >
+      <wa-dialog ${ref(this.#dialogRef)} label="Room settings">
         ${room === null || form === null
           ? nothing
           : this.#renderForm(room, form)}
@@ -356,15 +359,6 @@ export class RoomSettingsDialog extends LitElement {
       high: this.form.high,
     };
     await this.store.updateRoom(this.room.id, request);
-  }
-
-  #onHide(): void {
-    if (!this.open) {
-      return;
-    }
-    this.dispatchEvent(
-      new CustomEvent("te-close", { bubbles: true, composed: true }),
-    );
   }
 }
 
