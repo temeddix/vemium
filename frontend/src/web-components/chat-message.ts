@@ -131,7 +131,13 @@ export class ChatMessage extends LitElement {
       color: var(--wa-color-danger-on-quiet);
     }
 
-    wa-markdown {
+    .markdown {
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+
+    .markdown wa-markdown {
       display: block;
     }
 
@@ -470,20 +476,22 @@ function previewArgsValue(value: unknown): string {
 
 function renderMarkdown(content: string) {
   return html`
-    <wa-markdown ${ref((el) => {
-      if (el === undefined) {
-        return;
-      }
-      let script = el.querySelector('script[type="text/markdown"]');
-      if (script === null) {
-        script = document.createElement("script");
-        script.setAttribute("type", "text/markdown");
-        el.appendChild(script);
-      }
-      if (script.textContent !== content) {
-        script.textContent = content;
-        (el as { renderMarkdown?: () => void }).renderMarkdown?.();
-      }
-    })}></wa-markdown>
+    <div class="markdown">
+      <wa-markdown ${ref((el) => {
+        if (el === undefined) {
+          return;
+        }
+        let script = el.querySelector('script[type="text/markdown"]');
+        if (script === null) {
+          script = document.createElement("script");
+          script.setAttribute("type", "text/markdown");
+          el.appendChild(script);
+        }
+        if (script.textContent !== content) {
+          script.textContent = content;
+          (el as { renderMarkdown?: () => void }).renderMarkdown?.();
+        }
+      })}></wa-markdown>
+    </div>
   `;
 }
