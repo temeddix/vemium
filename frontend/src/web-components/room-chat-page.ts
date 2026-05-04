@@ -79,7 +79,7 @@ export class RoomChatPage extends LitElement {
     :host {
       display: block;
       min-height: 100vh;
-      background: var(--wa-color-surface-sunken);
+      background: var(--wa-color-surface-default);
       box-sizing: border-box;
     }
 
@@ -100,7 +100,7 @@ export class RoomChatPage extends LitElement {
       padding: 0.8rem 0;
       position: sticky;
       top: 0;
-      background: var(--wa-color-surface-sunken);
+      background: var(--wa-color-surface-default);
       z-index: 2;
     }
 
@@ -162,10 +162,9 @@ export class RoomChatPage extends LitElement {
 
     .composer-wrap {
       padding: 0.4rem 0 0.8rem;
-      border-top: var(--wa-border-width-s) solid var(--wa-color-border-normal);
       position: sticky;
       bottom: 0;
-      background: var(--wa-color-surface-sunken);
+      background: var(--wa-color-surface-default);
       z-index: 2;
     }
 

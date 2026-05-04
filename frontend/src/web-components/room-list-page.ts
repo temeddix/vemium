@@ -38,7 +38,7 @@ export class RoomListPage extends LitElement {
     :host {
       display: block;
       min-height: 100vh;
-      background: var(--wa-color-surface-sunken);
+      background: var(--wa-color-surface-default);
       padding: 1.2rem;
       box-sizing: border-box;
     }
@@ -89,7 +89,7 @@ export class RoomListPage extends LitElement {
       gap: 0.4rem;
       padding: 0.85rem 1rem;
       border-radius: 0.6rem;
-      background: var(--wa-color-surface-default);
+      background: var(--wa-color-surface-raised);
       border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
       text-decoration: none;
       color: inherit;
