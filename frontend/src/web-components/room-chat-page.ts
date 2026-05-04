@@ -141,7 +141,7 @@ export class RoomChatPage extends LitElement {
       padding: 0.4rem 0 1rem;
       display: flex;
       flex-direction: column;
-      gap: 0.3rem;
+      gap: 1rem;
       flex: 1;
     }
 
