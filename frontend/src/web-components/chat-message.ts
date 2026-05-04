@@ -277,10 +277,8 @@ export class ChatMessage extends LitElement {
           <div class="${bubbleClasses}">
             ${view.reasoning !== ""
               ? this.#renderReasoning(view.reasoning, view.streaming)
-              : nothing} ${this.#renderContent(
-                view.content,
-                view.streaming,
-              )} ${view.toolCalls.length > 0
+              : nothing} ${this.#renderContent(view.content)} ${view.toolCalls
+                .length > 0
               ? this.#renderToolCalls(view.toolCalls)
               : nothing} ${view.error !== null
               ? html`
@@ -308,13 +306,9 @@ export class ChatMessage extends LitElement {
     `;
   }
 
-  #renderContent(content: string, streaming: boolean) {
+  #renderContent(content: string) {
     if (content === "") {
-      return streaming
-        ? html`
-          <span class="streaming-dot"></span>
-        `
-        : nothing;
+      return nothing;
     }
     return renderMarkdown(content);
   }
