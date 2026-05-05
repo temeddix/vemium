@@ -66,8 +66,9 @@ function readInputValue(target: EventTarget | null): string {
  * Modal that edits a single room's settings. Owns its own open state
  * and draft form; the parent calls `show(room)` to open the dialog,
  * and the dialog handles its own dismissal (ESC, backdrop, close
- * button). Saves are delegated to the store; the dialog stays open on
- * save so the user can see error messages.
+ * button). Saves are delegated to the store; on success the dialog
+ * closes itself, on failure it stays open while the global error
+ * banner surfaces the message.
  */
 @customElement("te-room-settings-dialog")
 export class RoomSettingsDialog extends LitElement {
@@ -596,7 +597,13 @@ export class RoomSettingsDialog extends LitElement {
       low: this.form.low,
       high: this.form.high,
     };
-    await this.store.updateRoom(this.room.id, request);
+    const ok = await this.store.updateRoom(this.room.id, request);
+    if (ok) {
+      const dialog = this.#dialogRef.value;
+      if (dialog !== undefined) {
+        dialog.open = false;
+      }
+    }
   }
 }
 

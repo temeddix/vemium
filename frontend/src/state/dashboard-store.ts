@@ -181,7 +181,7 @@ export class DashboardStore {
   async updateRoom(
     roomId: string,
     request: UpdateRoomRequest,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomId}`, {
         method: "PATCH",
@@ -191,12 +191,14 @@ export class DashboardStore {
       if (!response.ok) {
         const text = await response.text();
         this.#patch({ errorMessage: `Update failed: ${text}` });
-        return;
+        return false;
       }
       const payload = (await response.json()) as { room: Room };
       this.#mergeRoom(payload.room);
+      return true;
     } catch {
       this.#patch({ errorMessage: "Network error while updating room." });
+      return false;
     }
   }
 
