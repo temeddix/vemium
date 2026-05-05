@@ -7,6 +7,9 @@ import type {
   Draft,
   DraftToolCall,
   Message,
+  ProviderConfig,
+  ProviderModelOption,
+  ProviderModelsResponse,
   ReportBuffer,
   Room,
   RoomReport,
@@ -160,6 +163,45 @@ export class DashboardStore {
         errorMessage: "Network error while saving settings.",
       });
       return false;
+    }
+  }
+
+  /**
+   * Probes the provider configured by `config` and returns the model
+   * identifiers it advertises. Used by the settings page to populate a
+   * dropdown from the form's in-progress values; `tier` selects which
+   * stored API key the redacted sentinel `***` falls back to on the
+   * backend. Errors (network, upstream non-2xx, unparseable response)
+   * resolve with an `error` string instead of throwing so the caller can
+   * render a per-tier message without polluting global state.
+   */
+  async fetchProviderModels(
+    tier: "low" | "high",
+    config: ProviderConfig,
+  ): Promise<{ models: ProviderModelOption[]; error: string | null }> {
+    try {
+      const response = await fetch(
+        `${BACKEND_BASE_URL}/v1/providers/${tier}/models`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(config),
+        },
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        return {
+          models: [],
+          error: extractErrorMessage(text, response.status),
+        };
+      }
+      const payload = (await response.json()) as ProviderModelsResponse;
+      return { models: payload.models, error: null };
+    } catch {
+      return {
+        models: [],
+        error: "Network error while listing models.",
+      };
     }
   }
 
@@ -701,6 +743,26 @@ function mapReport(
     report.reportId === reportId ? transform(report) : report
   );
   return { ...view, reports };
+}
+
+/**
+ * Extracts a human-readable message from a non-2xx response body. The
+ * backend returns `{"error": "..."}` JSON for known failures; falls back to
+ * the raw text if the body is not the expected shape, and to a generic
+ * status-coded message when even that is empty.
+ */
+function extractErrorMessage(body: string, status: number): string {
+  if (body !== "") {
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown };
+      if (typeof parsed.error === "string" && parsed.error !== "") {
+        return parsed.error;
+      }
+    } catch {
+      return body;
+    }
+  }
+  return `Could not list models (HTTP ${status}).`;
 }
 
 function toReportBuffer(report: RoomReport): ReportBuffer {

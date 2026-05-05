@@ -1,5 +1,4 @@
 import {
-  avatarInitials,
   formatSeparatorTimestamp,
   isLastInRun,
   resolveAvatarColor,
@@ -513,7 +512,6 @@ export class RoomChatPage extends LitElement {
       next === null ? null : { kind: next.kind, agent: next.agentKey },
     );
     const color = resolveAvatarColor(kind, note.author);
-    const initials = avatarInitials(kind, note.author);
     const avatarStyle =
       `background:${color.background};color:${color.foreground}`;
     return html`
@@ -529,7 +527,6 @@ export class RoomChatPage extends LitElement {
           class="inline-note-avatar ${showAvatar ? "" : "is-hidden"}"
           style="${avatarStyle}"
         >
-          ${initials}
         </div>
         <button
           type="button"

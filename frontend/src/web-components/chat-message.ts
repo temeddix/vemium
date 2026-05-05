@@ -1,8 +1,4 @@
-import {
-  avatarInitials,
-  type PersonaColor,
-  resolveAvatarColor,
-} from "@/app/chat";
+import { type PersonaColor, resolveAvatarColor } from "@/app/chat";
 import type {
   Draft,
   DraftToolCall,
@@ -302,7 +298,7 @@ export class ChatMessage extends LitElement {
           ? html`
             <wa-spinner style="font-size: 1rem;"></wa-spinner>
           `
-          : view.initials}
+          : nothing}
       </div>
     `;
   }
@@ -406,7 +402,6 @@ export class ChatMessage extends LitElement {
 interface ChatRowView {
   kind: TurnKind;
   agentName: string;
-  initials: string;
   color: PersonaColor;
   content: string;
   reasoning: string;
@@ -420,7 +415,6 @@ function messageView(message: Message): ChatRowView {
   return {
     kind: message.kind,
     agentName: message.agent ?? "",
-    initials: avatarInitials(message.kind, message.agent),
     color: resolveAvatarColor(message.kind, message.agent),
     content: message.content,
     reasoning: message.reasoning,
@@ -435,7 +429,6 @@ function draftView(draft: Draft): ChatRowView {
   return {
     kind: draft.kind,
     agentName: draft.agent,
-    initials: avatarInitials(draft.kind, draft.agent),
     color: resolveAvatarColor(draft.kind, draft.agent),
     content: draft.content,
     reasoning: draft.reasoning,

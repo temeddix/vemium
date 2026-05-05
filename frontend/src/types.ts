@@ -45,6 +45,19 @@ export interface UpdateAppSettingsRequest {
   high?: ProviderConfig;
 }
 
+/**
+ * One entry returned by `POST /v1/providers/:tier/models`. The `id` is the
+ * exact identifier the provider expects in subsequent chat calls (e.g.
+ * `qwen3:14b`, `anthropic/claude-sonnet-4-6`).
+ */
+export interface ProviderModelOption {
+  id: string;
+}
+
+export interface ProviderModelsResponse {
+  models: ProviderModelOption[];
+}
+
 export interface Room {
   /**
    * Readable id in `xxx-xxxx-xxx` lowercase letter format. Used as the
