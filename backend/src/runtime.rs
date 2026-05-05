@@ -51,7 +51,6 @@ use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -141,7 +140,7 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   }
   state.ensure_room_stream(&room_code).await;
 
-  let debate_root = DebateRoot::new(state.data_root.as_path());
+  let debate_root = DebateRoot::new(&state.data_root);
   let workspace = debate_root
     .workspace_for(&room.code)
     .await
@@ -1107,15 +1106,4 @@ fn preview(text: &str) -> String {
   let mut out: String = text.chars().take(PREVIEW_MAX_CHARS).collect();
   out.push_str("...");
   out
-}
-
-// Workspace dir convenience for the [`AppState`] data root.
-trait DataRootExt {
-  fn as_path(&self) -> &std::path::Path;
-}
-
-impl DataRootExt for Arc<PathBuf> {
-  fn as_path(&self) -> &std::path::Path {
-    self.as_ref().as_path()
-  }
 }

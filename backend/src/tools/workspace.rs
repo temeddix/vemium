@@ -18,6 +18,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::Path;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -234,9 +235,9 @@ impl Tool for ListFilesTool {
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
     let relative = args.path.unwrap_or_default();
     let target = if relative.is_empty() {
-      "."
+      Path::new(".")
     } else {
-      relative.as_str()
+      Path::new(relative.as_str())
     };
     let files = self
       .workspace
@@ -310,7 +311,7 @@ impl Tool for ReadFileTool {
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
     let contents = self
       .workspace
-      .read_file(&args.path)
+      .read_file(Path::new(&args.path))
       .await
       .map_err(WorkspaceToolError::from_anyhow)?;
     Ok(ReadFileOutput {
@@ -384,7 +385,7 @@ impl Tool for WriteFileTool {
     let bytes_written = args.contents.len();
     self
       .workspace
-      .write_file(&args.path, &args.contents)
+      .write_file(Path::new(&args.path), &args.contents)
       .await
       .map_err(WorkspaceToolError::from_anyhow)?;
     Ok(WriteFileOutput {

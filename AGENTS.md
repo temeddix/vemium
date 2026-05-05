@@ -120,6 +120,7 @@ Run Rust checks before completion:
 - Use `tracing` for logs. Do not use `println!`/`eprintln!`.
 - Keep REST handlers thin; move business logic into services/modules.
 - Keep transport models (request/response DTOs) explicit and stable.
+- Always use `PathBuf` for representing file paths.
 
 ## API Conventions
 

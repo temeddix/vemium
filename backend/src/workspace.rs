@@ -109,24 +109,23 @@ impl RoomWorkspace {
   /// that resolution is side-effect free and safe to call before the path
   /// exists. Callers that need the canonical path must call
   /// `tokio::fs::canonicalize` *after* writing, then re-validate.
-  pub fn resolve(&self, relative: &str) -> Result<PathBuf> {
-    let candidate = Path::new(relative);
-    if candidate.is_absolute() {
-      bail!("absolute paths are not allowed: {relative}");
+  pub fn resolve(&self, relative: &Path) -> Result<PathBuf> {
+    if relative.is_absolute() {
+      bail!("absolute paths are not allowed: {}", relative.display());
     }
-    for component in candidate.components() {
+    for component in relative.components() {
       match component {
         Component::Normal(_) => {}
         Component::CurDir => {}
         Component::ParentDir => {
-          bail!("path escapes the room workspace: {relative}");
+          bail!("path escapes the room workspace: {}", relative.display());
         }
         Component::Prefix(_) | Component::RootDir => {
-          bail!("absolute paths are not allowed: {relative}");
+          bail!("absolute paths are not allowed: {}", relative.display());
         }
       }
     }
-    Ok(self.root.join(candidate))
+    Ok(self.root.join(relative))
   }
 
   /// Lists immediate children of the room root that look like subject
@@ -171,7 +170,7 @@ impl RoomWorkspace {
 
     let timestamp = Utc::now().format(SUBJECT_FOLDER_TIMESTAMP);
     let folder_name = format!("{timestamp} ({cleaned})");
-    let target = self.resolve(&folder_name)?;
+    let target = self.resolve(Path::new(&folder_name))?;
     fs::create_dir_all(&target).await.with_context(|| {
       format!("failed to create subject folder {}", target.display())
     })?;
@@ -183,7 +182,7 @@ impl RoomWorkspace {
   /// folder.
   pub async fn list_files(
     &self,
-    relative_dir: &str,
+    relative_dir: &Path,
   ) -> Result<Vec<WorkspaceFile>> {
     let dir = self.resolve(relative_dir)?;
     let mut out = Vec::new();
@@ -194,7 +193,7 @@ impl RoomWorkspace {
 
   /// Reads a UTF-8 text file. Returns at most [`MAX_READ_BYTES`] characters
   /// to keep tool outputs from blowing up the model's context window.
-  pub async fn read_file(&self, relative: &str) -> Result<String> {
+  pub async fn read_file(&self, relative: &Path) -> Result<String> {
     let path = self.resolve(relative)?;
     let raw = fs::read(&path)
       .await
@@ -205,7 +204,11 @@ impl RoomWorkspace {
 
   /// Writes (or overwrites) a UTF-8 text file, creating any missing parent
   /// directories along the way.
-  pub async fn write_file(&self, relative: &str, contents: &str) -> Result<()> {
+  pub async fn write_file(
+    &self,
+    relative: &Path,
+    contents: &str,
+  ) -> Result<()> {
     let path = self.resolve(relative)?;
     if let Some(parent) = path.parent() {
       fs::create_dir_all(parent).await.with_context(|| {

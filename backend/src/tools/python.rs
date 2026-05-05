@@ -22,6 +22,7 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use thiserror::Error;
 
 const NAME: &str = "run_python";
@@ -146,7 +147,8 @@ impl Tool for RunPythonTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let relative = format!("{}/{}", args.subject_folder, args.script_name);
+    let relative: PathBuf =
+      PathBuf::from(&args.subject_folder).join(&args.script_name);
     self
       .workspace
       .write_file(&relative, &args.source)
@@ -159,7 +161,7 @@ impl Tool for RunPythonTool {
       .map_err(RunPythonError::from_anyhow)?;
     self.emit_inline_note(&result).await;
     Ok(RunPythonOutput {
-      script_path: relative,
+      script_path: relative.to_string_lossy().replace('\\', "/"),
       result,
     })
   }

@@ -18,7 +18,7 @@
 use crate::workspace::{PYPROJECT_FILENAME, RoomWorkspace};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
@@ -123,7 +123,7 @@ impl PythonRunner {
   /// script unchanged.
   pub async fn run(
     &self,
-    script_relative_path: &str,
+    script_relative_path: &Path,
     args: &[String],
   ) -> Result<PythonRunResult> {
     let absolute = self.workspace.resolve(script_relative_path)?;
@@ -131,8 +131,11 @@ impl PythonRunner {
       .await
       .context("failed to probe script path")?
     {
-      bail!("script not found: {script_relative_path}");
+      bail!("script not found: {}", script_relative_path.display());
     }
+    let script_arg = script_relative_path
+      .to_str()
+      .context("script path is not valid UTF-8")?;
     self.ensure_pyproject().await?;
 
     let mut stages = Vec::new();
@@ -140,7 +143,7 @@ impl PythonRunner {
     let format_stage = self
       .stage(
         PythonStage::RuffFormat,
-        ["uv", "run", "ruff", "format", script_relative_path],
+        ["uv", "run", "ruff", "format", script_arg],
         LINT_STAGE_TIMEOUT,
       )
       .await?;
@@ -153,7 +156,7 @@ impl PythonRunner {
     let check_stage = self
       .stage(
         PythonStage::RuffCheck,
-        ["uv", "run", "ruff", "check", script_relative_path],
+        ["uv", "run", "ruff", "check", script_arg],
         LINT_STAGE_TIMEOUT,
       )
       .await?;
@@ -166,7 +169,7 @@ impl PythonRunner {
     let ty_stage = self
       .stage(
         PythonStage::TyCheck,
-        ["uv", "run", "ty", "check", script_relative_path],
+        ["uv", "run", "ty", "check", script_arg],
         LINT_STAGE_TIMEOUT,
       )
       .await?;
@@ -176,7 +179,7 @@ impl PythonRunner {
       return Ok(finalize(stages, Some(PythonStage::TyCheck)));
     }
 
-    let run_stage = self.run_stage(script_relative_path, args).await?;
+    let run_stage = self.run_stage(script_arg, args).await?;
     let run_ok = run_stage.passed;
     stages.push(run_stage);
     let failed_at = if run_ok { None } else { Some(PythonStage::Run) };
