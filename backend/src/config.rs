@@ -17,8 +17,8 @@ const DEFAULT_DATA_ROOT: &str = "/data";
 pub mod room_defaults {
   /// One debater turn every 5 seconds.
   pub const CHAT_INTERVAL_SECONDS: u64 = 5;
-  /// Leader emits a `leader_note` once an hour.
-  pub const EVALUATION_INTERVAL_SECONDS: u64 = 3_600;
+  /// Leader emits a steering `leader_note` once an hour.
+  pub const STEERING_INTERVAL_SECONDS: u64 = 3_600;
   /// Leader writes a long-form report once a day.
   pub const REPORT_INTERVAL_SECONDS: u64 = 86_400;
   /// Single Python script run capped at 10 minutes.

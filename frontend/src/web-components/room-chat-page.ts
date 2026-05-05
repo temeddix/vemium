@@ -1,6 +1,8 @@
 import {
+  avatarInitials,
   formatSeparatorTimestamp,
   isLastInRun,
+  resolveAvatarColor,
   shouldShowTimeSeparator,
 } from "@/app/chat";
 import { dashboardContext } from "@/app/context";
@@ -17,6 +19,18 @@ import "./chat-message.ts";
 import "./room-reports-dialog.ts";
 import "./room-settings-dialog.ts";
 
+interface InlineNoteEntry {
+  author: string;
+  text: string;
+  reason: string;
+  timestamp: string;
+}
+
+interface NoteDialogState {
+  author: string;
+  reason: string;
+}
+
 declare global {
   interface HTMLElementTagNameMap {
     "te-room-chat-page": RoomChatPage;
@@ -24,9 +38,10 @@ declare global {
 }
 
 interface BubbleEntry {
-  type: "message" | "draft";
+  type: "message" | "draft" | "inline-note";
   message: Message | null;
   draft: Draft | null;
+  inlineNote: InlineNoteEntry | null;
   /** Sort key shared between persisted messages and live drafts. */
   sortKey: number;
   /** ISO timestamp used for time-gap separators and grouping decisions. */
@@ -58,6 +73,11 @@ export class RoomChatPage extends LitElement {
 
   @state()
   private accessor sending = false;
+
+  @state()
+  private accessor noteDialog: NoteDialogState | null = null;
+
+  #noteDialogRef: Ref<HTMLElement & { open: boolean }> = createRef();
 
   #settingsDialogRef: Ref<HTMLElementTagNameMap["te-room-settings-dialog"]> =
     createRef();
@@ -164,6 +184,66 @@ export class RoomChatPage extends LitElement {
       font-size: 0.72rem;
       color: var(--wa-color-text-quiet);
       padding: 0.5rem 0;
+    }
+
+    .inline-note-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .inline-note-avatar {
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      flex-shrink: 0;
+    }
+
+    .inline-note-avatar.is-hidden {
+      visibility: hidden;
+    }
+
+    .inline-note-button {
+      background: none;
+      border: none;
+      padding: 0.1rem 0.4rem;
+      margin: 0;
+      font: inherit;
+      font-size: 0.78rem;
+      color: var(--wa-color-text-quiet);
+      cursor: pointer;
+      text-align: left;
+      border-radius: 0.4rem;
+    }
+
+    .inline-note-button:hover,
+    .inline-note-button:focus-visible {
+      background: var(--wa-color-fill-quiet);
+      color: var(--wa-color-text-normal);
+      outline: none;
+    }
+
+    .inline-note-author {
+      font-weight: 600;
+    }
+
+    .reason-dialog-author {
+      font-size: 0.78rem;
+      color: var(--wa-color-text-quiet);
+      margin-bottom: 0.4rem;
+    }
+
+    .reason-dialog-body {
+      font-size: 0.95rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
     }
 
     .empty {
@@ -296,6 +376,16 @@ export class RoomChatPage extends LitElement {
         ${ref(this.#reportsDialogRef)}
         .reports="${view.reports}"
       ></te-room-reports-dialog>
+      <wa-dialog
+        ${ref(this.#noteDialogRef)}
+        label="Decided to do nothing"
+        @wa-hide="${this.#onNoteDialogHide}"
+      >
+        ${this.noteDialog === null ? nothing : html`
+          <div class="reason-dialog-author">${this.noteDialog.author}</div>
+          <div class="reason-dialog-body">${this.noteDialog.reason}</div>
+        `}
+      </wa-dialog>
     `;
   }
 
@@ -362,6 +452,16 @@ export class RoomChatPage extends LitElement {
       previous?.timestamp ?? null,
       entry.timestamp,
     );
+    if (entry.type === "inline-note" && entry.inlineNote !== null) {
+      return this.#renderInlineNote(
+        entry.inlineNote,
+        showSeparator,
+        entry.timestamp,
+        next,
+        entry.agentKey,
+        entry.kind,
+      );
+    }
     const isLast = isLastInRun(
       { kind: entry.kind, agent: entry.agentKey },
       next === null ? null : { kind: next.kind, agent: next.agentKey },
@@ -387,20 +487,95 @@ export class RoomChatPage extends LitElement {
     `;
   }
 
+  /** Renders a `do_nothing` breadcrumb. The avatar matches the chat-bubble
+   * row layout so the note visually attaches to the author's identity, and
+   * the dim text is a button that opens a dialog with the full reason. */
+  #renderInlineNote(
+    note: InlineNoteEntry,
+    showSeparator: boolean,
+    timestamp: string,
+    next: BubbleEntry | null,
+    agentKey: string,
+    kind: BubbleKind,
+  ) {
+    const showAvatar = isLastInRun(
+      { kind, agent: agentKey },
+      next === null ? null : { kind: next.kind, agent: next.agentKey },
+    );
+    const color = resolveAvatarColor(kind, note.author);
+    const initials = avatarInitials(kind, note.author);
+    const avatarStyle =
+      `background:${color.background};color:${color.foreground}`;
+    return html`
+      ${showSeparator
+        ? html`
+          <div class="time-separator">
+            ${formatSeparatorTimestamp(timestamp)}
+          </div>
+        `
+        : nothing}
+      <div class="inline-note-row">
+        <div
+          class="inline-note-avatar ${showAvatar ? "" : "is-hidden"}"
+          style="${avatarStyle}"
+        >
+          ${initials}
+        </div>
+        <button
+          type="button"
+          class="inline-note-button"
+          @click="${(): void => this.#openNoteDialog(note)}"
+        >
+          <span class="inline-note-author">${note.author}</span>
+          <span> ${note.text}</span>
+        </button>
+      </div>
+    `;
+  }
+
+  #openNoteDialog(note: InlineNoteEntry): void {
+    this.noteDialog = { author: note.author, reason: note.reason };
+    const dialog = this.#noteDialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = true;
+    }
+  }
+
+  #onNoteDialogHide(): void {
+    this.noteDialog = null;
+  }
+
   #bubbleEntries(view: RoomView): BubbleEntry[] {
     const messages: BubbleEntry[] = view.messages.map((message) => ({
       type: "message",
       message,
       draft: null,
+      inlineNote: null,
       sortKey: message.sequence,
       timestamp: message.timestamp,
       agentKey: message.agent ?? "",
       kind: message.kind,
     }));
+    const notes: BubbleEntry[] = view.inlineNotes.map((note, idx) => ({
+      type: "inline-note",
+      message: null,
+      draft: null,
+      inlineNote: {
+        author: note.author,
+        text: note.text,
+        reason: note.reason,
+        timestamp: note.timestamp,
+      },
+      sortKey: Number.MAX_SAFE_INTEGER - 1 + idx,
+      timestamp: note.timestamp,
+      agentKey: note.author,
+      kind: "leader_note",
+    }));
     const drafts: BubbleEntry[] = view.drafts.map((draft) => ({
       type: "draft",
       message: null,
       draft,
+      inlineNote: null,
       // Drafts always sort after every persisted message (sequences live in
       // the same monotonic counter, so any unfinished draft is "newer than
       // anything we've seen").
@@ -409,7 +584,9 @@ export class RoomChatPage extends LitElement {
       agentKey: draft.agent,
       kind: draft.kind,
     }));
-    return [...messages, ...drafts].sort((a, b) => a.sortKey - b.sortKey);
+    return [...messages, ...notes, ...drafts].sort((a, b) =>
+      a.sortKey - b.sortKey
+    );
   }
 
   // -- Actions ------------------------------------------------------------

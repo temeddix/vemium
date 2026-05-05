@@ -140,8 +140,9 @@ pub struct Room {
   pub status: RoomStatus,
   /// Sleep between consecutive debater turns, in seconds.
   pub chat_interval_seconds: u64,
-  /// Cadence (in seconds) at which the leader emits a `leader_note`.
-  pub evaluation_interval_seconds: u64,
+  /// Cadence (in seconds) at which the leader emits a steering `leader_note`
+  /// nudging the debate forward.
+  pub steering_interval_seconds: u64,
   /// Cadence (in seconds) at which the leader emits a long-form report.
   pub report_interval_seconds: u64,
   /// Wall-clock cap (seconds) for a single Python script execution.
@@ -176,7 +177,7 @@ impl Room {
       background: self.background.clone(),
       status: self.status,
       chat_interval_seconds: self.chat_interval_seconds,
-      evaluation_interval_seconds: self.evaluation_interval_seconds,
+      steering_interval_seconds: self.steering_interval_seconds,
       report_interval_seconds: self.report_interval_seconds,
       python_timeout_seconds: self.python_timeout_seconds,
       python_feedback_every: self.python_feedback_every,
@@ -205,7 +206,7 @@ pub struct RoomView {
   pub background: Option<String>,
   pub status: RoomStatus,
   pub chat_interval_seconds: u64,
-  pub evaluation_interval_seconds: u64,
+  pub steering_interval_seconds: u64,
   pub report_interval_seconds: u64,
   pub python_timeout_seconds: u64,
   pub python_feedback_every: u32,
@@ -348,7 +349,7 @@ pub struct CreateRoomRequest {
   pub instruction: Option<String>,
   pub background: Option<String>,
   pub chat_interval_seconds: Option<u64>,
-  pub evaluation_interval_seconds: Option<u64>,
+  pub steering_interval_seconds: Option<u64>,
   pub report_interval_seconds: Option<u64>,
   pub python_timeout_seconds: Option<u64>,
   pub python_feedback_every: Option<u32>,
@@ -382,7 +383,7 @@ pub struct UpdateRoomRequest {
   pub instruction: Option<Option<String>>,
   pub background: Option<Option<String>>,
   pub chat_interval_seconds: Option<u64>,
-  pub evaluation_interval_seconds: Option<u64>,
+  pub steering_interval_seconds: Option<u64>,
   pub report_interval_seconds: Option<u64>,
   pub python_timeout_seconds: Option<u64>,
   pub python_feedback_every: Option<u32>,

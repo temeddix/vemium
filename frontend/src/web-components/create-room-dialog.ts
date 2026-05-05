@@ -209,28 +209,34 @@ export class CreateRoomDialog extends LitElement {
             "Name",
             form.name,
             (v) => this.#patchForm({ name: v }),
+            "Display name shown in the rooms list. Also seeds the URL slug.",
           )} ${this.#renderTextField(
             "Topic",
             form.topic,
             (v) => this.#patchForm({ topic: v }),
+            "Short subject the debaters argue about. Shown to every persona at the top of every turn.",
           )} ${this.#renderTextField(
             "Goal",
             form.goal,
             (v) => this.#patchForm({ goal: v }),
+            "What you want the room to produce. Used by the leader to judge whether the discussion is on track.",
           )} ${this.#renderTextArea(
             "Instruction (optional)",
             form.instruction,
             (v) => this.#patchForm({ instruction: v }),
+            "Optional rules personas must follow (e.g. tone, scope). Appended to every persona prompt.",
           )} ${this.#renderTextArea(
             "Background (optional)",
             form.background,
             (v) => this.#patchForm({ background: v }),
+            "Optional context personas should treat as already-known facts. Useful for proprietary data the model cannot search.",
           )}
           <div class="schedule-grid">
             ${this.#renderBooleanSelect(
               "Auto-pause after convergence",
               form.autoPauseWhenConverged,
               (value) => this.#patchForm({ autoPauseWhenConverged: value }),
+              "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
             )} ${this.#renderScheduleSelect(form)}
           </div>
           <div class="provider-grid">
@@ -269,13 +275,18 @@ export class CreateRoomDialog extends LitElement {
     label: string,
     value: string,
     onChange: (value: string) => void,
+    hint?: string,
   ) {
     return html`
       <label class="form-field">
         <span class="form-label">${label}</span>
-        <wa-input size="small" .value="${value}" @input="${(
-          e: InputEvent,
-        ): void => onChange(readInputValue(e.target))}"></wa-input>
+        <wa-input
+          size="small"
+          .value="${value}"
+          hint="${hint ?? ""}"
+          @input="${(e: InputEvent): void =>
+            onChange(readInputValue(e.target))}"
+        ></wa-input>
       </label>
     `;
   }
@@ -284,6 +295,7 @@ export class CreateRoomDialog extends LitElement {
     label: string,
     value: string,
     onChange: (value: string) => void,
+    hint?: string,
   ) {
     return html`
       <label class="form-field">
@@ -292,6 +304,7 @@ export class CreateRoomDialog extends LitElement {
           size="small"
           rows="3"
           .value="${value}"
+          hint="${hint ?? ""}"
           @input="${(e: InputEvent): void =>
             onChange(readInputValue(e.target))}"
         ></wa-textarea>
@@ -305,47 +318,57 @@ export class CreateRoomDialog extends LitElement {
     onChange: (config: ProviderConfig) => void,
   ) {
     const apiType: ApiType = config.apiType ?? "ollama";
+    const tierHint = label === "Low tier"
+      ? "Cheaper / faster model used for every debater turn."
+      : "Higher-quality model used for steering nudges, halt/proceed gates, and reports.";
     return html`
       <fieldset class="tier">
         <legend>${label}</legend>
+        <p class="form-hint">${tierHint}</p>
         <p class="form-hint">
           Only OpenRouter requires an API key; Ollama / llama.cpp / vLLM and other
           self-hosted endpoints leave it blank.
         </p>
         <label class="form-field">
           <span class="form-label">API type</span>
-          <wa-select size="small" .value="${apiType}" @change="${(
-            e: Event,
-          ): void => {
-            const value = readInputValue(e.target);
-            if (value === "ollama" || value === "openRouter") {
-              const patch: Partial<ProviderConfig> = { apiType: value };
-              if (value === "openRouter") {
-                patch.baseUrl = "https://openrouter.ai/api/v1";
+          <wa-select
+            size="small"
+            .value="${apiType}"
+            hint="Pick OpenRouter for any OpenAI-compatible endpoint (cloud or proxied) or Ollama for the native /api/chat protocol."
+            @change="${(e: Event): void => {
+              const value = readInputValue(e.target);
+              if (value === "ollama" || value === "openRouter") {
+                const patch: Partial<ProviderConfig> = { apiType: value };
+                if (value === "openRouter") {
+                  patch.baseUrl = "https://openrouter.ai/api/v1";
+                }
+                onChange({ ...config, ...patch });
               }
-              onChange({ ...config, ...patch });
-            }
-          }}">
+            }}"
+          >
             <wa-option value="ollama">Ollama</wa-option>
             <wa-option value="openRouter">OpenRouter</wa-option>
           </wa-select>
         </label>
         ${apiType === "ollama"
           ? this.#renderTextField(
-            "Base URL (e.g. http://localhost:11434)",
+            "Base URL",
             config.baseUrl,
             (value) => onChange({ ...config, baseUrl: value }),
+            "Server root, e.g. http://localhost:11434. Do not include /v1.",
           )
           : nothing} ${this.#renderTextField(
             "Model",
             config.model,
             (model) => onChange({ ...config, model }),
+            "Exact model identifier accepted by the provider, e.g. qwen3:14b or anthropic/claude-sonnet-4-6.",
           )} ${apiType === "openRouter"
           ? this.#renderTextField(
             "API key (required for OpenRouter)",
             config.apiKey ?? "",
             (value) =>
               onChange({ ...config, apiKey: value === "" ? null : value }),
+            "Stored plaintext locally and redacted in API responses.",
           )
           : nothing}
       </fieldset>
@@ -356,6 +379,7 @@ export class CreateRoomDialog extends LitElement {
     label: string,
     value: boolean,
     onChange: (value: boolean) => void,
+    hint?: string,
   ) {
     return html`
       <label class="form-field">
@@ -363,6 +387,7 @@ export class CreateRoomDialog extends LitElement {
         <wa-select
           size="small"
           .value="${value ? "enabled" : "disabled"}"
+          hint="${hint ?? ""}"
           @change="${(e: Event): void => {
             const selected = readInputValue(e.target);
             onChange(selected === "enabled");
@@ -382,6 +407,7 @@ export class CreateRoomDialog extends LitElement {
         <wa-select
           size="small"
           .value="${form.resumeScheduleCron}"
+          hint="When auto-paused, the leader checks at this cadence whether to resume the debate."
           @change="${(e: Event): void => {
             const selected = readInputValue(e.target);
             const option = RESUME_SCHEDULE_OPTIONS.find((item) =>

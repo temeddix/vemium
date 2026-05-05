@@ -40,7 +40,7 @@ export interface Room {
   background: string | null;
   status: RoomStatus;
   chatIntervalSeconds: number;
-  evaluationIntervalSeconds: number;
+  steeringIntervalSeconds: number;
   reportIntervalSeconds: number;
   pythonTimeoutSeconds: number;
   pythonFeedbackEvery: number;
@@ -111,6 +111,14 @@ export interface WsSnapshot {
 export interface WsRoomStatus {
   type: "roomStatus";
   status: RoomStatus;
+}
+
+export interface WsInlineNote {
+  type: "inlineNote";
+  author: string;
+  text: string;
+  reason: string;
+  timestamp: string;
 }
 
 export interface WsDraftStarted {
@@ -190,6 +198,7 @@ export interface WsReportCompleted {
 export type WsEvent =
   | WsSnapshot
   | WsRoomStatus
+  | WsInlineNote
   | WsDraftStarted
   | WsDraftText
   | WsDraftReasoning
@@ -214,7 +223,7 @@ export interface CreateRoomRequest {
   instruction?: string | null;
   background?: string | null;
   chatIntervalSeconds?: number;
-  evaluationIntervalSeconds?: number;
+  steeringIntervalSeconds?: number;
   reportIntervalSeconds?: number;
   pythonTimeoutSeconds?: number;
   pythonFeedbackEvery?: number;
@@ -285,6 +294,10 @@ export interface RoomView {
   drafts: Draft[];
   /** All reports for this room, newest last. */
   reports: ReportBuffer[];
+  /** Non-bubble short notes rendered next to the author's avatar. */
+  inlineNotes: Array<
+    { author: string; text: string; reason: string; timestamp: string }
+  >;
 }
 
 // -- Misc -----------------------------------------------------------------

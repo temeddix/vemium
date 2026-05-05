@@ -224,6 +224,16 @@ pub enum WsEvent {
   /// Room lifecycle change: active <-> paused, or terminal failure.
   RoomStatus { status: RoomStatus },
 
+  /// Non-bubble short note (dim text) for lightweight status breadcrumbs.
+  /// `reason` is shown only when the user clicks the note; `text` is the
+  /// always-visible label (e.g. "Decided to do nothing.").
+  InlineNote {
+    author: String,
+    text: String,
+    reason: String,
+    timestamp: DateTime<Utc>,
+  },
+
   /// A new turn has started. Subsequent `Draft*` frames with the same
   /// `turnId` belong to this draft until a matching `MessageAdded` /
   /// `DraftFailed` retires it. Replayed to new subscribers for any
@@ -303,8 +313,8 @@ impl WsEvent {
 pub enum TurnKind {
   /// A debater (low-model persona) speaking.
   AgentChat,
-  /// A leader steering note triggered by the periodic evaluation timer or
-  /// the `request_leader_decision` tool.
+  /// A leader steering note triggered by the periodic steering timer, the
+  /// `request_leader_decision` tool, or a halt/proceed gate decision.
   LeaderNote,
 }
 

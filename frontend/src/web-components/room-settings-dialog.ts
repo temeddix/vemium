@@ -21,7 +21,7 @@ interface SettingsForm {
   instruction: string;
   background: string;
   chatIntervalSeconds: number;
-  evaluationIntervalSeconds: number;
+  steeringIntervalSeconds: number;
   reportIntervalSeconds: number;
   pythonTimeoutSeconds: number;
   pythonFeedbackEvery: number;
@@ -192,40 +192,49 @@ export class RoomSettingsDialog extends LitElement {
           "Topic",
           form.topic,
           (v) => this.#patchForm({ topic: v }),
+          "Short subject the debaters argue about. Shown to every persona at the top of every turn.",
         )} ${this.#renderTextField(
           "Goal",
           form.goal,
           (v) => this.#patchForm({ goal: v }),
+          "What you want the room to produce. Used by the leader to judge whether the discussion is on track.",
         )} ${this.#renderTextArea(
           "Instruction",
           form.instruction,
           (v) => this.#patchForm({ instruction: v }),
+          "Optional rules personas must follow (e.g. tone, scope). Appended to every persona prompt.",
         )} ${this.#renderTextArea(
           "Background",
           form.background,
           (v) => this.#patchForm({ background: v }),
+          "Optional context personas should treat as already-known facts. Useful for proprietary data the model cannot search.",
         )}
         <div class="number-row">
           ${this.#renderNumberField(
             "Chat interval (sec)",
             form.chatIntervalSeconds,
             (v) => this.#patchForm({ chatIntervalSeconds: v }),
+            "Pause between consecutive debater turns. Lower = faster cadence, higher token spend.",
           )} ${this.#renderNumberField(
-            "Eval interval (sec)",
-            form.evaluationIntervalSeconds,
-            (v) => this.#patchForm({ evaluationIntervalSeconds: v }),
+            "Steering interval (sec)",
+            form.steeringIntervalSeconds,
+            (v) => this.#patchForm({ steeringIntervalSeconds: v }),
+            "How often the leader steps in to nudge the debate. Higher = more autonomy for personas.",
           )} ${this.#renderNumberField(
             "Report interval (sec)",
             form.reportIntervalSeconds,
             (v) => this.#patchForm({ reportIntervalSeconds: v }),
+            "How often the leader writes a long-form report summarizing the room.",
           )} ${this.#renderNumberField(
             "Python timeout (sec)",
             form.pythonTimeoutSeconds,
             (v) => this.#patchForm({ pythonTimeoutSeconds: v }),
+            "Hard cap for a single Python script run. Scripts that exceed this are killed.",
           )} ${this.#renderNumberField(
             "Python feedback every",
             form.pythonFeedbackEvery,
             (v) => this.#patchForm({ pythonFeedbackEvery: v }),
+            "Inject a status message back into the debate every N failed Python attempts so personas can react.",
           )}
         </div>
         <div class="schedule-grid">
@@ -233,6 +242,7 @@ export class RoomSettingsDialog extends LitElement {
             "Auto-pause after convergence",
             form.autoPauseWhenConverged,
             (value) => this.#patchForm({ autoPauseWhenConverged: value }),
+            "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
           )} ${this.#renderScheduleSelect(form)}
         </div>
         <div class="provider-grid">
@@ -254,13 +264,18 @@ export class RoomSettingsDialog extends LitElement {
     label: string,
     value: string,
     onChange: (value: string) => void,
+    hint?: string,
   ) {
     return html`
       <label class="form-field">
         <span class="form-label">${label}</span>
-        <wa-input size="small" .value="${value}" @input="${(
-          e: InputEvent,
-        ): void => onChange(readInputValue(e.target))}"></wa-input>
+        <wa-input
+          size="small"
+          .value="${value}"
+          hint="${hint ?? ""}"
+          @input="${(e: InputEvent): void =>
+            onChange(readInputValue(e.target))}"
+        ></wa-input>
       </label>
     `;
   }
@@ -269,6 +284,7 @@ export class RoomSettingsDialog extends LitElement {
     label: string,
     value: string,
     onChange: (value: string) => void,
+    hint?: string,
   ) {
     return html`
       <label class="form-field">
@@ -277,6 +293,7 @@ export class RoomSettingsDialog extends LitElement {
           size="small"
           rows="3"
           .value="${value}"
+          hint="${hint ?? ""}"
           @input="${(e: InputEvent): void =>
             onChange(readInputValue(e.target))}"
         ></wa-textarea>
@@ -288,6 +305,7 @@ export class RoomSettingsDialog extends LitElement {
     label: string,
     value: number,
     onChange: (value: number) => void,
+    hint?: string,
   ) {
     return html`
       <label class="form-field">
@@ -297,6 +315,7 @@ export class RoomSettingsDialog extends LitElement {
           size="small"
           min="1"
           .value="${String(value)}"
+          hint="${hint ?? ""}"
           @input="${(e: InputEvent): void => {
             const parsed = Number.parseInt(readInputValue(e.target), 10);
             if (Number.isFinite(parsed)) {
@@ -312,6 +331,7 @@ export class RoomSettingsDialog extends LitElement {
     label: string,
     value: boolean,
     onChange: (value: boolean) => void,
+    hint?: string,
   ) {
     return html`
       <label class="form-field">
@@ -319,6 +339,7 @@ export class RoomSettingsDialog extends LitElement {
         <wa-select
           size="small"
           .value="${value ? "enabled" : "disabled"}"
+          hint="${hint ?? ""}"
           @change="${(e: Event): void => {
             const selected = readInputValue(e.target);
             onChange(selected === "enabled");
@@ -341,6 +362,7 @@ export class RoomSettingsDialog extends LitElement {
         <wa-select
           size="small"
           .value="${form.resumeScheduleCron}"
+          hint="When auto-paused, the leader checks at this cadence whether to resume the debate."
           @change="${(e: Event): void => {
             const selected = readInputValue(e.target);
             const option = RESUME_SCHEDULE_OPTIONS.find((item) =>
@@ -379,27 +401,34 @@ export class RoomSettingsDialog extends LitElement {
     onChange: (config: ProviderConfig) => void,
   ) {
     const apiType: ApiType = config.apiType ?? "ollama";
+    const tierHint = label === "Low tier"
+      ? "Cheaper / faster model used for every debater turn."
+      : "Higher-quality model used for steering nudges, halt/proceed gates, and reports.";
     return html`
       <fieldset class="tier">
         <legend>${label}</legend>
+        <p class="form-hint">${tierHint}</p>
         <p class="form-hint">
           Only OpenRouter requires an API key; Ollama / llama.cpp / vLLM and other
           self-hosted endpoints leave it blank.
         </p>
         <label class="form-field">
           <span class="form-label">API type</span>
-          <wa-select size="small" .value="${apiType}" @change="${(
-            e: Event,
-          ): void => {
-            const value = readInputValue(e.target);
-            if (value === "ollama" || value === "openRouter") {
-              const patch: Partial<ProviderConfig> = { apiType: value };
-              if (value === "openRouter") {
-                patch.baseUrl = "https://openrouter.ai/api/v1";
+          <wa-select
+            size="small"
+            .value="${apiType}"
+            hint="Pick OpenRouter for any OpenAI-compatible endpoint (cloud or proxied) or Ollama for the native /api/chat protocol."
+            @change="${(e: Event): void => {
+              const value = readInputValue(e.target);
+              if (value === "ollama" || value === "openRouter") {
+                const patch: Partial<ProviderConfig> = { apiType: value };
+                if (value === "openRouter") {
+                  patch.baseUrl = "https://openrouter.ai/api/v1";
+                }
+                onChange({ ...config, ...patch });
               }
-              onChange({ ...config, ...patch });
-            }
-          }}">
+            }}"
+          >
             <wa-option value="ollama">Ollama</wa-option>
             <wa-option value="openRouter">OpenRouter</wa-option>
           </wa-select>
@@ -409,17 +438,20 @@ export class RoomSettingsDialog extends LitElement {
             "Base URL",
             config.baseUrl,
             (value) => onChange({ ...config, baseUrl: value }),
+            "Server root, e.g. http://localhost:11434. Do not include /v1.",
           )
           : nothing} ${this.#renderTextField(
             "Model",
             config.model,
             (model) => onChange({ ...config, model }),
+            "Exact model identifier accepted by the provider, e.g. qwen3:14b or anthropic/claude-sonnet-4-6.",
           )} ${apiType === "openRouter"
           ? this.#renderTextField(
             "API key (required for OpenRouter)",
             config.apiKey ?? "",
             (value) =>
               onChange({ ...config, apiKey: value === "" ? null : value }),
+            "Stored plaintext locally and redacted in API responses.",
           )
           : nothing}
       </fieldset>
@@ -449,7 +481,7 @@ export class RoomSettingsDialog extends LitElement {
       instruction: this.form.instruction === "" ? null : this.form.instruction,
       background: this.form.background === "" ? null : this.form.background,
       chatIntervalSeconds: this.form.chatIntervalSeconds,
-      evaluationIntervalSeconds: this.form.evaluationIntervalSeconds,
+      steeringIntervalSeconds: this.form.steeringIntervalSeconds,
       reportIntervalSeconds: this.form.reportIntervalSeconds,
       pythonTimeoutSeconds: this.form.pythonTimeoutSeconds,
       pythonFeedbackEvery: this.form.pythonFeedbackEvery,
@@ -470,7 +502,7 @@ function formFromRoom(room: Room): SettingsForm {
     instruction: room.instruction ?? "",
     background: room.background ?? "",
     chatIntervalSeconds: room.chatIntervalSeconds,
-    evaluationIntervalSeconds: room.evaluationIntervalSeconds,
+    steeringIntervalSeconds: room.steeringIntervalSeconds,
     reportIntervalSeconds: room.reportIntervalSeconds,
     pythonTimeoutSeconds: room.pythonTimeoutSeconds,
     pythonFeedbackEvery: room.pythonFeedbackEvery,

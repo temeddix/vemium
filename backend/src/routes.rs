@@ -128,9 +128,9 @@ async fn create_room(
     chat_interval_seconds: payload
       .chat_interval_seconds
       .unwrap_or(room_defaults::CHAT_INTERVAL_SECONDS),
-    evaluation_interval_seconds: payload
-      .evaluation_interval_seconds
-      .unwrap_or(room_defaults::EVALUATION_INTERVAL_SECONDS),
+    steering_interval_seconds: payload
+      .steering_interval_seconds
+      .unwrap_or(room_defaults::STEERING_INTERVAL_SECONDS),
     report_interval_seconds: payload
       .report_interval_seconds
       .unwrap_or(room_defaults::REPORT_INTERVAL_SECONDS),
@@ -250,8 +250,8 @@ async fn update_room(
   if let Some(value) = payload.chat_interval_seconds {
     updated.chat_interval_seconds = value;
   }
-  if let Some(value) = payload.evaluation_interval_seconds {
-    updated.evaluation_interval_seconds = value;
+  if let Some(value) = payload.steering_interval_seconds {
+    updated.steering_interval_seconds = value;
   }
   if let Some(value) = payload.report_interval_seconds {
     updated.report_interval_seconds = value;

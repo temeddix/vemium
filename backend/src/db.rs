@@ -62,7 +62,7 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   sqlx::query(
     "INSERT INTO rooms (
         id, name, slug, topic, goal, instruction, background, status,
-        chat_interval_seconds, evaluation_interval_seconds,
+        chat_interval_seconds, steering_interval_seconds,
         report_interval_seconds, python_timeout_seconds,
         python_feedback_every, auto_pause_when_converged,
         resume_schedule_cron, resume_schedule_label,
@@ -78,7 +78,7 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(room.background.as_deref())
   .bind(room.status.as_str())
   .bind(room.chat_interval_seconds as i64)
-  .bind(room.evaluation_interval_seconds as i64)
+  .bind(room.steering_interval_seconds as i64)
   .bind(room.report_interval_seconds as i64)
   .bind(room.python_timeout_seconds as i64)
   .bind(room.python_feedback_every as i64)
@@ -108,7 +108,7 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
     "UPDATE rooms SET
         name = ?, slug = ?, topic = ?, goal = ?, instruction = ?,
         background = ?, status = ?, chat_interval_seconds = ?,
-        evaluation_interval_seconds = ?, report_interval_seconds = ?,
+        steering_interval_seconds = ?, report_interval_seconds = ?,
         python_timeout_seconds = ?, python_feedback_every = ?,
         auto_pause_when_converged = ?, resume_schedule_cron = ?,
         resume_schedule_label = ?, low_provider_config = ?,
@@ -123,7 +123,7 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(room.background.as_deref())
   .bind(room.status.as_str())
   .bind(room.chat_interval_seconds as i64)
-  .bind(room.evaluation_interval_seconds as i64)
+  .bind(room.steering_interval_seconds as i64)
   .bind(room.report_interval_seconds as i64)
   .bind(room.python_timeout_seconds as i64)
   .bind(room.python_feedback_every as i64)
@@ -226,9 +226,9 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
   let chat_interval: i64 = row
     .try_get("chat_interval_seconds")
     .context("rooms.chat_interval_seconds missing")?;
-  let eval_interval: i64 = row
-    .try_get("evaluation_interval_seconds")
-    .context("rooms.evaluation_interval_seconds missing")?;
+  let steering_interval: i64 = row
+    .try_get("steering_interval_seconds")
+    .context("rooms.steering_interval_seconds missing")?;
   let report_interval: i64 = row
     .try_get("report_interval_seconds")
     .context("rooms.report_interval_seconds missing")?;
@@ -262,7 +262,7 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
       .context("rooms.background missing")?,
     status,
     chat_interval_seconds: chat_interval as u64,
-    evaluation_interval_seconds: eval_interval as u64,
+    steering_interval_seconds: steering_interval as u64,
     report_interval_seconds: report_interval as u64,
     python_timeout_seconds: python_timeout as u64,
     python_feedback_every: python_feedback as u32,

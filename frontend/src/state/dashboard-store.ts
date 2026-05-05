@@ -287,6 +287,17 @@ export class DashboardStore {
       case "roomStatus":
         this.#patchCurrentRoom((room) => ({ ...room, status: event.status }));
         break;
+      case "inlineNote":
+        this.#mutateView((view) => ({
+          ...view,
+          inlineNotes: [...view.inlineNotes, {
+            author: event.author,
+            text: event.text,
+            reason: event.reason,
+            timestamp: event.timestamp,
+          }],
+        }));
+        break;
       case "draftStarted":
         this.#mutateView((view) =>
           upsertDraft(view, event.turnId, event.agent, event.kind)
@@ -402,6 +413,7 @@ export class DashboardStore {
       messages,
       drafts: [],
       reports: reports.map(toReportBuffer),
+      inlineNotes: [],
     };
     this.#patch({
       views: { ...this.#state.views, [room.id]: view },
