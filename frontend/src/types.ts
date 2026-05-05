@@ -23,31 +23,46 @@ export interface ProviderConfig {
   baseUrl: string;
   /**
    * Bearer token. Required for OpenRouter; optional for Ollama. The backend
-   * redacts this to `***xxxx` in every API response.
+   * redacts this to `***` in every API response.
    */
   apiKey: string | null;
   /** Provider family. Defaults to `"ollama"` server-side when omitted. */
   apiType?: ApiType;
 }
 
+/**
+ * Process-wide low/high tier configuration shared by every room. Edited via
+ * the home-screen Settings page.
+ */
+export interface AppSettings {
+  low: ProviderConfig;
+  high: ProviderConfig;
+  updatedAt: string;
+}
+
+export interface UpdateAppSettingsRequest {
+  low?: ProviderConfig;
+  high?: ProviderConfig;
+}
+
 export interface Room {
-  id: string;
-  name: string;
-  slug: string;
+  /**
+   * Readable id in `xxx-xxxx-xxx` lowercase letter format. Used as the
+   * room's primary key, the URL segment, and the workspace directory name.
+   */
+  code: string;
   topic: string;
   goal: string;
   instruction: string | null;
-  background: string | null;
   status: RoomStatus;
   chatIntervalSeconds: number;
   steeringIntervalSeconds: number;
-  reportIntervalSeconds: number;
+  reportScheduleCron: string;
+  reportScheduleLabel: string;
   pythonTimeoutSeconds: number;
   autoPauseWhenConverged: boolean;
   resumeScheduleCron: string;
   resumeScheduleLabel: string;
-  low: ProviderConfig;
-  high: ProviderConfig;
   createdAt: string;
   updatedAt: string;
 }
@@ -58,7 +73,7 @@ export interface Room {
  * there is no separate "tool_call" event type any more.
  */
 export interface Message {
-  roomId: string;
+  roomCode: string;
   sequence: number;
   kind: TurnKind;
   agent: string | null;
@@ -70,7 +85,7 @@ export interface Message {
 
 export interface RoomReport {
   id: number;
-  roomId: string;
+  roomCode: string;
   sequence: number;
   content: string;
   startedAt: string;
@@ -216,30 +231,20 @@ export interface CreateMessageRequest {
 }
 
 export interface CreateRoomRequest {
-  name: string;
   topic: string;
   goal: string;
   instruction?: string | null;
-  background?: string | null;
   chatIntervalSeconds?: number;
   steeringIntervalSeconds?: number;
-  reportIntervalSeconds?: number;
+  reportScheduleCron?: string;
+  reportScheduleLabel?: string;
   pythonTimeoutSeconds?: number;
   autoPauseWhenConverged?: boolean;
   resumeScheduleCron?: string;
   resumeScheduleLabel?: string;
-  low: ProviderConfig;
-  high: ProviderConfig;
 }
 
-export type UpdateRoomRequest =
-  & Partial<
-    Omit<CreateRoomRequest, "low" | "high">
-  >
-  & {
-    low?: ProviderConfig;
-    high?: ProviderConfig;
-  };
+export type UpdateRoomRequest = Partial<CreateRoomRequest>;
 
 // -- Live in-memory state -------------------------------------------------
 
@@ -310,4 +315,8 @@ export interface RoomEnvelope {
 
 export interface ReportsListResponse {
   reports: RoomReport[];
+}
+
+export interface SettingsEnvelope {
+  settings: AppSettings;
 }

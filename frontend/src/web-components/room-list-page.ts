@@ -16,9 +16,11 @@ declare global {
 
 /**
  * Top-level page for `/`. Lists every loaded room and lets the user open
- * one (navigates to `/room/:slug`) or create a new one (opens the
- * create-room dialog). Owns no chat state of its own; the dashboard
- * provider supplies the rooms list via context.
+ * one (navigates to `/room/:code`), create a new one (opens the
+ * create-room dialog), or jump to global settings.
+ *
+ * The room actions live behind a `...` dropdown so the header collapses
+ * cleanly on narrow viewports without sacrificing the desktop affordance.
  */
 @customElement("te-room-list-page")
 export class RoomListPage extends LitElement {
@@ -75,6 +77,10 @@ export class RoomListPage extends LitElement {
       align-items: center;
     }
 
+    .menu-button-wrap {
+      margin-left: auto;
+    }
+
     .room-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
@@ -100,19 +106,20 @@ export class RoomListPage extends LitElement {
       border-color: var(--wa-color-brand-border-normal);
     }
 
-    .room-name {
+    .room-topic {
       font-size: 0.95rem;
       font-weight: 600;
-    }
-
-    .room-topic {
-      font-size: 0.8rem;
-      color: var(--wa-color-text-quiet);
       overflow: hidden;
       text-overflow: ellipsis;
       display: -webkit-box;
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
+    }
+
+    .room-code {
+      font-size: 0.72rem;
+      color: var(--wa-color-text-quiet);
+      font-family: var(--wa-font-family-code, ui-monospace, monospace);
     }
 
     .room-meta {
@@ -163,11 +170,19 @@ export class RoomListPage extends LitElement {
         <header class="header">
           <span class="logo">Vemium</span>
           <span class="tagline">Endless agent debate</span>
-          <span class="actions">
-            <wa-button size="small" @click="${this.#openCreate}">
-              + New room
-            </wa-button>
-          </span>
+          <div class="menu-button-wrap">
+            <wa-dropdown placement="bottom-end">
+              <wa-button slot="trigger" size="small" title="More actions">
+                <wa-icon name="ellipsis-vertical"></wa-icon>
+              </wa-button>
+              <wa-dropdown-item @click="${this.#openCreate}">
+                New room
+              </wa-dropdown-item>
+              <wa-dropdown-item @click="${this.#openSettings}">
+                Settings
+              </wa-dropdown-item>
+            </wa-dropdown>
+          </div>
         </header>
         ${rooms.length === 0
           ? html`
@@ -194,15 +209,15 @@ export class RoomListPage extends LitElement {
             <li>
               <a
                 class="room-card"
-                href="/room/${room.slug}"
+                href="/room/${room.code}"
                 @click="${(e: MouseEvent): void => this.#onRoomClick(e, room)}"
               >
-                <span class="room-name">${room.name}</span>
                 ${room.topic !== ""
                   ? html`
                     <span class="room-topic">${room.topic}</span>
                   `
                   : nothing}
+                <span class="room-code">${room.code}</span>
                 <span class="room-meta">
                   <span class="room-time">${formatTimestamp(
                     room.createdAt,
@@ -230,18 +245,23 @@ export class RoomListPage extends LitElement {
       return;
     }
     event.preventDefault();
-    this.#navigateToRoom(room.slug);
+    this.#navigateToRoom(room.code);
   }
 
-  #navigateToRoom(slug: string): void {
-    const url = `/room/${slug}`;
+  #navigateToRoom(code: string): void {
+    const url = `/room/${code}`;
     globalThis.history.pushState({}, "", url);
     globalThis.dispatchEvent(new PopStateEvent("popstate"));
   }
 
-  #openCreate(): void {
+  #openCreate = (): void => {
     this.showCreateDialog = true;
-  }
+  };
+
+  #openSettings = (): void => {
+    globalThis.history.pushState({}, "", "/settings");
+    globalThis.dispatchEvent(new PopStateEvent("popstate"));
+  };
 
   #closeCreate(): void {
     this.showCreateDialog = false;
@@ -249,7 +269,7 @@ export class RoomListPage extends LitElement {
 
   #onRoomCreated(event: CustomEvent<{ room: Room }>): void {
     this.showCreateDialog = false;
-    this.#navigateToRoom(event.detail.room.slug);
+    this.#navigateToRoom(event.detail.room.code);
   }
 
   #bindStore(): void {

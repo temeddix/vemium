@@ -19,7 +19,6 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
-use uuid::Uuid;
 
 const NAME: &str = "request_leader_decision";
 const LEADER_AGENT_LABEL: &str = "Leader (on demand)";
@@ -31,9 +30,9 @@ const LEADER_AGENT_LABEL: &str = "Leader (on demand)";
 #[derive(Clone)]
 pub struct RequestLeaderDecisionTool {
   state: AppState,
-  room_id: Uuid,
+  room_code: String,
   /// Snapshot of the high-tier provider config taken at turn start. Stored
-  /// verbatim so the call uses whatever the room's settings say *now*.
+  /// verbatim so the call uses whatever the global settings say *now*.
   high_provider: ProviderConfig,
   /// Snapshot of the room's topic / goal etc. at turn start. Used to frame
   /// the leader prompt without an extra DB read.
@@ -43,13 +42,13 @@ pub struct RequestLeaderDecisionTool {
 impl RequestLeaderDecisionTool {
   pub fn new(
     state: AppState,
-    room_id: Uuid,
+    room_code: String,
     high_provider: ProviderConfig,
     context_preamble: String,
   ) -> Self {
     Self {
       state,
-      room_id,
+      room_code,
       high_provider,
       context_preamble,
     }
@@ -167,7 +166,7 @@ impl RequestLeaderDecisionTool {
   async fn persist_and_broadcast(&self, content: &str) {
     let handle = {
       let handles = self.state.room_handles.read().await;
-      handles.get(&self.room_id).cloned()
+      handles.get(&self.room_code).cloned()
     };
     let Some(handle) = handle else {
       return;
@@ -175,7 +174,7 @@ impl RequestLeaderDecisionTool {
     let sequence = handle.allocate_event_sequence();
     let timestamp = Utc::now();
     let event = RoomEvent {
-      room_id: self.room_id,
+      room_code: self.room_code.clone(),
       sequence,
       kind: RoomEventKind::LeaderNote,
       agent: Some(LEADER_AGENT_LABEL.to_string()),
@@ -187,7 +186,7 @@ impl RequestLeaderDecisionTool {
 
     db::insert_event(&self.state.db, &event).await.report();
 
-    let stream = self.state.ensure_room_stream(self.room_id).await;
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
     // No draft phase: the on-demand leader call resolves synchronously
     // before the calling agent's turn continues, so there is nothing to
     // stream incrementally. Emit `MessageAdded` directly with a fresh

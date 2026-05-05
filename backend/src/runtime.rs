@@ -8,24 +8,20 @@
 //! 2. **Steering tick** ([`run_steering_loop`]): every
 //!    `steering_interval_seconds`, the high model emits a `leader_note`
 //!    that compliments / criticizes / redirects the debate.
-//! 3. **Report tick** ([`run_report_loop`]): every
-//!    `report_interval_seconds`, the high model writes a long-form report
+//! 3. **Report tick** ([`run_report_loop`]): on every firing of
+//!    `report_schedule_cron`, the high model writes a long-form report
 //!    streamed token-by-token into a `room_reports` row.
 //! 4. **Wake tick** ([`run_resume_schedule_loop`]): while auto-paused,
 //!    waits for the next configured cron time and asks the leader whether
 //!    to resume.
 //!
-//! All three honor the room's `paused` and `stopped` flags. They observe
+//! All loops honor the room's `paused` and `stopped` flags. They observe
 //! changes at task-natural boundaries (turn end, timer wake) - nothing is
 //! preempted mid-LLM-call.
 //!
-//! ## How streaming + tools are wired
-//!
-//! Each turn delegates to [`crate::llm::ChatClient`], which adapts the
-//! room's [`ProviderConfig`] to one of the supported rig providers. The
-//! runtime supplies turn inputs (system prompt, history, hook) and receives
-//! the final assistant text once the stream completes; per-token deltas
-//! flow through the [`DebateHook`] / [`ReportHook`] passed in.
+//! Provider configuration is process-global ([`crate::models::AppSettings`]).
+//! The orchestrator snapshots `low`/`high` at the start of each LLM call so
+//! a settings update lands at the next turn rather than mid-stream.
 
 use crate::app_state::{AppState, RoomHandle};
 use crate::db;
@@ -49,17 +45,18 @@ use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::proceed_room::{LEADER_PROCEED_AGENT, ProceedRoomTool};
 use crate::workspace::{DebateRoot, RoomWorkspace};
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
+use chrono::{DateTime, Utc};
+use cron::Schedule;
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use uuid::Uuid;
 
 /// Persona definition for one of the four rotating debaters.
 #[derive(Clone, Copy)]
@@ -122,12 +119,12 @@ pub async fn restore_rooms(state: AppState) -> Result<()> {
   Ok(())
 }
 
-/// Loads (or registers) the room into [`AppState`] and spawns its three
+/// Loads (or registers) the room into [`AppState`] and spawns its four
 /// background tasks.
 pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
-  let room_id = room.id;
-  let event_seq = db::max_event_sequence(&state.db, room_id).await?;
-  let report_seq = db::max_report_sequence(&state.db, room_id).await?;
+  let room_code = room.code.clone();
+  let event_seq = db::max_event_sequence(&state.db, &room_code).await?;
+  let report_seq = db::max_report_sequence(&state.db, &room_code).await?;
 
   let handle = RoomHandle::new(event_seq, report_seq);
   if matches!(room.status, RoomStatus::Paused) {
@@ -136,29 +133,37 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
 
   {
     let mut rooms = state.rooms.write().await;
-    rooms.insert(room_id, room.clone());
+    rooms.insert(room_code.clone(), room.clone());
   }
   {
     let mut handles = state.room_handles.write().await;
-    handles.insert(room_id, handle.clone());
+    handles.insert(room_code.clone(), handle.clone());
   }
-  state.ensure_room_stream(room_id).await;
+  state.ensure_room_stream(&room_code).await;
 
   let debate_root = DebateRoot::new(state.data_root.as_path());
   let workspace = debate_root
-    .workspace_for(&room.slug)
+    .workspace_for(&room.code)
     .await
     .context("failed to ensure room workspace")?;
 
   tokio::spawn(run_debate_loop(
     state.clone(),
     handle.clone(),
-    room_id,
+    room_code.clone(),
     workspace.clone(),
   ));
-  tokio::spawn(run_steering_loop(state.clone(), handle.clone(), room_id));
-  tokio::spawn(run_report_loop(state.clone(), handle.clone(), room_id));
-  tokio::spawn(run_resume_schedule_loop(state, handle, room_id));
+  tokio::spawn(run_steering_loop(
+    state.clone(),
+    handle.clone(),
+    room_code.clone(),
+  ));
+  tokio::spawn(run_report_loop(
+    state.clone(),
+    handle.clone(),
+    room_code.clone(),
+  ));
+  tokio::spawn(run_resume_schedule_loop(state, handle, room_code));
 
   Ok(())
 }
@@ -168,7 +173,7 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
 async fn run_debate_loop(
   state: AppState,
   handle: RoomHandle,
-  room_id: Uuid,
+  room_code: String,
   workspace: RoomWorkspace,
 ) {
   let mut persona_index: usize = 0;
@@ -186,8 +191,8 @@ async fn run_debate_loop(
       continue;
     }
 
-    let Some(snapshot) = load_room_snapshot(&state, room_id).await else {
-      tracing::warn!(%room_id, "room vanished from state; ending debate loop");
+    let Some(snapshot) = load_room_snapshot(&state, &room_code).await else {
+      tracing::warn!(%room_code, "room vanished from state; ending debate loop");
       return;
     };
 
@@ -214,12 +219,12 @@ async fn run_debate_loop(
           && let Err(error) =
             evaluate_and_maybe_auto_pause(&state, &handle, &snapshot).await
         {
-          tracing::warn!(%room_id, %error, "failed convergence halt gate");
+          tracing::warn!(%room_code, %error, "failed convergence halt gate");
         }
       }
       Err(error) => {
         no_further_by_persona.insert(persona.name, false);
-        tracing::warn!(%room_id, persona = %persona.name, %error, "chat turn failed");
+        tracing::warn!(%room_code, persona = %persona.name, %error, "chat turn failed");
       }
     }
 
@@ -237,9 +242,9 @@ struct ChatTurnOutcome {
 }
 
 /// Runs one debater turn end-to-end. Builds the [`ChatClient`] for the
-/// room's low-tier provider and delegates the agent build + stream loop to
-/// it; the runtime only sees the final assistant text and lifecycle events
-/// emitted via the [`DebateHook`].
+/// process-wide low tier and delegates the agent build + stream loop to
+/// it; the runtime only sees the final assistant text once the stream
+/// completes; per-token deltas flow through the [`DebateHook`] passed in.
 async fn run_chat_turn(
   state: &AppState,
   handle: &RoomHandle,
@@ -247,13 +252,13 @@ async fn run_chat_turn(
   persona: DebatePersona,
   workspace: RoomWorkspace,
 ) -> Result<ChatTurnOutcome> {
-  let history = db::load_room_events(&state.db, room.id).await?;
+  let history = db::load_room_events(&state.db, &room.code).await?;
   let history_messages = render_transcript_messages(&history);
   let system_prompt = build_chat_system_prompt(room, persona);
   let user_prompt = build_chat_user_prompt(room, persona);
   let preamble = build_room_preamble(room);
 
-  let stream = state.ensure_room_stream(room.id).await;
+  let stream = state.ensure_room_stream(&room.code).await;
   let turn_id = new_turn_id();
 
   stream.send(WsEvent::DraftStarted {
@@ -264,19 +269,23 @@ async fn run_chat_turn(
 
   let runner =
     PythonRunner::new(workspace.clone(), room.python_timeout_seconds);
+  let (low, high) = current_provider_configs(state).await;
   let leader_tool = RequestLeaderDecisionTool::new(
     state.clone(),
-    room.id,
-    room.high.clone(),
+    room.code.clone(),
+    high.clone(),
     preamble,
   );
-  let do_nothing_tool =
-    DoNothingTool::new(state.clone(), room.id, persona.name.to_string());
+  let do_nothing_tool = DoNothingTool::new(
+    state.clone(),
+    room.code.clone(),
+    persona.name.to_string(),
+  );
   let hook = DebateHook::new(turn_id.clone(), stream.clone());
   let recorder = hook.recorder();
 
-  let client = build_chat_client(&room.low)
-    .context("failed to construct low-tier client")?;
+  let client =
+    build_chat_client(&low).context("failed to construct low-tier client")?;
 
   let result = client
     .run_debate_turn(DebateTurnInputs {
@@ -289,7 +298,7 @@ async fn run_chat_turn(
       do_nothing_tool,
       hook,
       state: state.clone(),
-      room_id: room.id,
+      room_code: room.code.clone(),
       author: persona.name.to_string(),
     })
     .await;
@@ -335,7 +344,7 @@ async fn run_chat_turn(
   let sequence = handle.allocate_event_sequence();
   let timestamp = Utc::now();
   let event = RoomEvent {
-    room_id: room.id,
+    room_code: room.code.clone(),
     sequence,
     kind: RoomEventKind::AgentChat,
     agent: Some(persona.name.to_string()),
@@ -532,7 +541,7 @@ async fn evaluate_and_maybe_auto_pause(
   _handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, room.id).await?;
+  let history = db::load_room_events(&state.db, &room.code).await?;
   if history.is_empty() {
     return Ok(());
   }
@@ -552,12 +561,17 @@ async fn evaluate_and_maybe_auto_pause(
     &transcript,
   );
 
-  let halt_tool = HaltRoomTool::new(state.clone(), room.id, label.clone());
-  let do_nothing_tool =
-    DoNothingTool::new(state.clone(), room.id, LEADER_HALT_AGENT.to_string());
+  let halt_tool =
+    HaltRoomTool::new(state.clone(), room.code.clone(), label.clone());
+  let do_nothing_tool = DoNothingTool::new(
+    state.clone(),
+    room.code.clone(),
+    LEADER_HALT_AGENT.to_string(),
+  );
 
-  let client = build_chat_client(&room.high)
-    .context("failed to construct high-tier client")?;
+  let (_low, high) = current_provider_configs(state).await;
+  let client =
+    build_chat_client(&high).context("failed to construct high-tier client")?;
   client
     .run_halt_gate_turn(HaltGateInputs {
       system_prompt: LEADER_HALT_GATE_PROMPT.to_string(),
@@ -571,14 +585,14 @@ async fn evaluate_and_maybe_auto_pause(
 async fn run_resume_schedule_loop(
   state: AppState,
   handle: RoomHandle,
-  room_id: Uuid,
+  room_code: String,
 ) {
   loop {
     if handle.is_stopped() {
       return;
     }
 
-    let Some(room) = load_room_snapshot(&state, room_id).await else {
+    let Some(room) = load_room_snapshot(&state, &room_code).await else {
       return;
     };
 
@@ -599,10 +613,9 @@ async fn run_resume_schedule_loop(
     }
 
     let now = Utc::now();
-    let Some(next_tick) =
-      next_supported_cron_tick(&room.resume_schedule_cron, now)
+    let Some(next_tick) = next_cron_tick(&room.resume_schedule_cron, now)
     else {
-      tracing::warn!(%room_id, cron = %room.resume_schedule_cron, "unsupported resume cron; skipping wake check");
+      tracing::warn!(%room_code, cron = %room.resume_schedule_cron, "unparsable resume cron; skipping wake check");
       tokio::select! {
         _ = sleep(Duration::from_secs(300)) => {}
         _ = handle.stop_notify.notified() => return,
@@ -624,12 +637,12 @@ async fn run_resume_schedule_loop(
       continue;
     }
 
-    let Some(room) = load_room_snapshot(&state, room_id).await else {
+    let Some(room) = load_room_snapshot(&state, &room_code).await else {
       return;
     };
     if let Err(error) = evaluate_scheduled_resume(&state, &handle, &room).await
     {
-      tracing::warn!(%room_id, %error, "scheduled resume gate failed");
+      tracing::warn!(%room_code, %error, "scheduled resume gate failed");
     }
   }
 }
@@ -639,7 +652,7 @@ async fn evaluate_scheduled_resume(
   _handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, room.id).await?;
+  let history = db::load_room_events(&state.db, &room.code).await?;
   if history.is_empty() {
     return Ok(());
   }
@@ -659,15 +672,16 @@ async fn evaluate_scheduled_resume(
     &transcript,
   );
 
-  let proceed_tool = ProceedRoomTool::new(state.clone(), room.id);
+  let proceed_tool = ProceedRoomTool::new(state.clone(), room.code.clone());
   let do_nothing_tool = DoNothingTool::new(
     state.clone(),
-    room.id,
+    room.code.clone(),
     LEADER_PROCEED_AGENT.to_string(),
   );
 
-  let client = build_chat_client(&room.high)
-    .context("failed to construct high-tier client")?;
+  let (_low, high) = current_provider_configs(state).await;
+  let client =
+    build_chat_client(&high).context("failed to construct high-tier client")?;
   client
     .run_proceed_gate_turn(ProceedGateInputs {
       system_prompt: LEADER_PROCEED_GATE_PROMPT.to_string(),
@@ -678,91 +692,28 @@ async fn evaluate_scheduled_resume(
     .await
 }
 
-fn next_supported_cron_tick(
-  cron: &str,
-  now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+/// Computes the next firing time of `cron` after `now` using the `cron`
+/// crate. The crate expects a 7-field schedule (sec min hour dom mon dow
+/// year); the user-facing format is the standard 5 fields, so we wrap it.
+fn next_cron_tick(cron: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
   let trimmed = cron.trim();
-  if trimmed == "*/15 * * * *" {
-    return next_every_n_minutes(now, 15);
-  }
-  if trimmed == "*/30 * * * *" {
-    return next_every_n_minutes(now, 30);
-  }
-  if trimmed == "0 * * * *" {
-    return next_every_n_hours(now, 1);
-  }
-  if trimmed == "0 */3 * * *" {
-    return next_every_n_hours(now, 3);
-  }
-  if trimmed == "0 */6 * * *" {
-    return next_every_n_hours(now, 6);
-  }
-
-  let parts: Vec<&str> = trimmed.split_whitespace().collect();
-  if parts.len() != 5 || parts[2] != "*" || parts[3] != "*" || parts[4] != "*" {
+  if trimmed.split_whitespace().count() != 5 {
     return None;
   }
-  let minute = parts[0].parse::<u32>().ok()?;
-  let hour = parts[1].parse::<u32>().ok()?;
-  if minute > 59 || hour > 23 {
-    return None;
-  }
-  next_daily_utc(now, hour, minute)
-}
-
-fn next_every_n_minutes(
-  now: DateTime<Utc>,
-  step: u32,
-) -> Option<DateTime<Utc>> {
-  if step == 0 {
-    return None;
-  }
-  let mut candidate =
-    now.with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
-  loop {
-    if candidate.minute().is_multiple_of(step) {
-      return Some(candidate);
-    }
-    candidate += ChronoDuration::minutes(1);
-  }
-}
-
-fn next_every_n_hours(now: DateTime<Utc>, step: u32) -> Option<DateTime<Utc>> {
-  if step == 0 {
-    return None;
-  }
-  let mut candidate =
-    now.with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
-  loop {
-    if candidate.minute() == 0 && candidate.hour().is_multiple_of(step) {
-      return Some(candidate);
-    }
-    candidate += ChronoDuration::minutes(1);
-  }
-}
-
-fn next_daily_utc(
-  now: DateTime<Utc>,
-  hour: u32,
-  minute: u32,
-) -> Option<DateTime<Utc>> {
-  let today = now
-    .with_hour(hour)?
-    .with_minute(minute)?
-    .with_second(0)?
-    .with_nanosecond(0)?;
-  if today > now {
-    return Some(today);
-  }
-  Some(today + ChronoDuration::days(1))
+  let extended = format!("0 {trimmed} *");
+  let schedule = Schedule::from_str(&extended).ok()?;
+  schedule.after(&now).next()
 }
 
 // -- Leader steering -------------------------------------------------------
 
-async fn run_steering_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
+async fn run_steering_loop(
+  state: AppState,
+  handle: RoomHandle,
+  room_code: String,
+) {
   loop {
-    let interval = match load_room_snapshot(&state, room_id).await {
+    let interval = match load_room_snapshot(&state, &room_code).await {
       Some(room) => room.steering_interval_seconds.max(60),
       None => return,
     };
@@ -779,12 +730,12 @@ async fn run_steering_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
       continue;
     }
 
-    let Some(room) = load_room_snapshot(&state, room_id).await else {
+    let Some(room) = load_room_snapshot(&state, &room_code).await else {
       return;
     };
 
     if let Err(error) = run_leader_steering(&state, &handle, &room).await {
-      tracing::warn!(%room_id, %error, "leader steering failed");
+      tracing::warn!(%room_code, %error, "leader steering failed");
     }
   }
 }
@@ -794,7 +745,7 @@ async fn run_leader_steering(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, room.id).await?;
+  let history = db::load_room_events(&state.db, &room.code).await?;
   if history.is_empty() {
     return Ok(()); // nothing to steer yet
   }
@@ -807,7 +758,7 @@ async fn run_leader_steering(
      your steering note now."
   );
 
-  let stream = state.ensure_room_stream(room.id).await;
+  let stream = state.ensure_room_stream(&room.code).await;
   let turn_id = new_turn_id();
 
   stream.send(WsEvent::DraftStarted {
@@ -819,8 +770,9 @@ async fn run_leader_steering(
   let hook = DebateHook::new(turn_id.clone(), stream.clone());
   let recorder = hook.recorder();
 
-  let client = build_chat_client(&room.high)
-    .context("failed to construct high-tier client")?;
+  let (_low, high) = current_provider_configs(state).await;
+  let client =
+    build_chat_client(&high).context("failed to construct high-tier client")?;
   let final_text = client
     .run_steering_turn(NoToolTurnInputs {
       system_prompt: system,
@@ -848,7 +800,7 @@ async fn run_leader_steering(
   let sequence = handle.allocate_event_sequence();
   let timestamp = Utc::now();
   let event = RoomEvent {
-    room_id: room.id,
+    room_code: room.code.clone(),
     sequence,
     kind: RoomEventKind::LeaderNote,
     agent: Some(LEADER_STEERING_AGENT.to_string()),
@@ -868,14 +820,44 @@ async fn run_leader_steering(
 
 // -- Leader report ---------------------------------------------------------
 
-async fn run_report_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
+/// The report loop fires on every cron tick of `report_schedule_cron`. We
+/// re-read the room each iteration so a settings change takes effect at
+/// the next firing rather than at restart.
+async fn run_report_loop(
+  state: AppState,
+  handle: RoomHandle,
+  room_code: String,
+) {
   loop {
-    let interval = match load_room_snapshot(&state, room_id).await {
-      Some(room) => room.report_interval_seconds.max(60),
-      None => return,
+    if handle.is_stopped() {
+      return;
+    }
+
+    let Some(room) = load_room_snapshot(&state, &room_code).await else {
+      return;
     };
+
+    let now = Utc::now();
+    let Some(next_tick) = next_cron_tick(&room.report_schedule_cron, now)
+    else {
+      tracing::warn!(
+        %room_code,
+        cron = %room.report_schedule_cron,
+        "unparsable report cron; backing off 5 minutes"
+      );
+      tokio::select! {
+        _ = sleep(Duration::from_secs(300)) => {}
+        _ = handle.stop_notify.notified() => return,
+        _ = handle.config_notify.notified() => continue,
+      }
+      continue;
+    };
+
+    let wait = (next_tick - now)
+      .to_std()
+      .unwrap_or_else(|_| Duration::from_secs(1));
     tokio::select! {
-      _ = sleep(Duration::from_secs(interval)) => {}
+      _ = sleep(wait) => {}
       _ = handle.stop_notify.notified() => return,
       _ = handle.config_notify.notified() => continue,
     }
@@ -886,12 +868,12 @@ async fn run_report_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
       continue;
     }
 
-    let Some(room) = load_room_snapshot(&state, room_id).await else {
+    let Some(room) = load_room_snapshot(&state, &room_code).await else {
       return;
     };
 
     if let Err(error) = run_leader_report(&state, &handle, &room).await {
-      tracing::warn!(%room_id, %error, "leader report failed");
+      tracing::warn!(%room_code, %error, "leader report failed");
     }
   }
 }
@@ -901,7 +883,7 @@ async fn run_leader_report(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, room.id).await?;
+  let history = db::load_room_events(&state.db, &room.code).await?;
   if history.is_empty() {
     return Ok(());
   }
@@ -917,10 +899,10 @@ async fn run_leader_report(
   let sequence = handle.allocate_report_sequence();
   let started_at = Utc::now();
   let report =
-    db::start_report(&state.db, room.id, sequence, started_at).await?;
+    db::start_report(&state.db, &room.code, sequence, started_at).await?;
   let report_id = report_id_for(report.id);
 
-  let stream = state.ensure_room_stream(room.id).await;
+  let stream = state.ensure_room_stream(&room.code).await;
   stream.send(WsEvent::ReportStarted {
     report_id: report_id.clone(),
     sequence,
@@ -928,7 +910,8 @@ async fn run_leader_report(
 
   let hook = ReportHook::new(report_id.clone(), stream.clone());
 
-  let outcome = stream_leader_report(&room.high, &system, user, hook).await;
+  let (_low, high) = current_provider_configs(state).await;
+  let outcome = stream_leader_report(&high, &system, user, hook).await;
   let completed_at = Utc::now();
 
   match outcome {
@@ -1025,9 +1008,19 @@ where
 
 // -- Helpers ---------------------------------------------------------------
 
-async fn load_room_snapshot(state: &AppState, room_id: Uuid) -> Option<Room> {
+async fn load_room_snapshot(state: &AppState, room_code: &str) -> Option<Room> {
   let rooms = state.rooms.read().await;
-  rooms.get(&room_id).cloned()
+  rooms.get(room_code).cloned()
+}
+
+/// Snapshots the process-wide low/high provider configs at the point of
+/// call. Cheap (clones the structs); used at the start of every LLM
+/// interaction so config changes land cleanly between turns.
+pub(crate) async fn current_provider_configs(
+  state: &AppState,
+) -> (ProviderConfig, ProviderConfig) {
+  let settings = state.app_settings.read().await;
+  (settings.low.clone(), settings.high.clone())
 }
 
 fn build_chat_system_prompt(room: &Room, persona: DebatePersona) -> String {
@@ -1050,22 +1043,13 @@ fn build_chat_user_prompt(room: &Room, persona: DebatePersona) -> String {
   )
 }
 
-fn build_room_preamble(room: &Room) -> String {
-  let mut out = format!(
-    "Room name: {}\nTopic: {}\nGoal: {}",
-    room.name, room.topic, room.goal
-  );
+pub(crate) fn build_room_preamble(room: &Room) -> String {
+  let mut out = format!("Topic: {}\nGoal: {}", room.topic, room.goal);
   if let Some(instruction) = room.instruction.as_deref()
     && !instruction.trim().is_empty()
   {
     out.push_str("\nInstruction: ");
     out.push_str(instruction);
-  }
-  if let Some(background) = room.background.as_deref()
-    && !background.trim().is_empty()
-  {
-    out.push_str("\nBackground: ");
-    out.push_str(background);
   }
   out
 }

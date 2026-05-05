@@ -1,5 +1,6 @@
 import { BACKEND_BASE_URL } from "@/app/config";
 import type {
+  AppSettings,
   CreateMessageRequest,
   CreateRoomRequest,
   Draft,
@@ -11,7 +12,9 @@ import type {
   RoomsListResponse,
   RoomStatus,
   RoomView,
+  SettingsEnvelope,
   TurnKind,
+  UpdateAppSettingsRequest,
   UpdateRoomRequest,
   WsEvent,
 } from "@/app/types";
@@ -21,27 +24,31 @@ type Listener = () => void;
 
 /**
  * Application-wide state shape exposed to web components. The store keeps
- * one `RoomView` per known room, the id of the currently selected room
- * (drives the detail pane), and connection status for the live WebSocket.
+ * one `RoomView` per known room (keyed by `code`), the code of the
+ * currently selected room, and connection status for the live WebSocket.
  */
 export interface DashboardState {
   rooms: Room[];
-  currentRoomId: string | null;
+  currentRoomCode: string | null;
   views: Record<string, RoomView>;
+  settings: AppSettings | null;
   wsConnected: boolean;
   reconnectAttempt: number;
   errorMessage: string | null;
   isCreatingRoom: boolean;
+  isSavingSettings: boolean;
 }
 
 const INITIAL_STATE: DashboardState = {
   rooms: [],
-  currentRoomId: null,
+  currentRoomCode: null,
   views: {},
+  settings: null,
   wsConnected: false,
   reconnectAttempt: 0,
   errorMessage: null,
   isCreatingRoom: false,
+  isSavingSettings: false,
 };
 
 /**
@@ -71,6 +78,7 @@ export class DashboardStore {
       },
     });
     void this.loadRooms();
+    void this.loadSettings();
   }
 
   subscribe(listener: Listener): () => void {
@@ -100,52 +108,95 @@ export class DashboardStore {
       }
       const payload = (await response.json()) as RoomsListResponse;
       this.#patch({ rooms: payload.rooms });
-      // Auto-select the first room on first load.
-      if (this.#state.currentRoomId === null && payload.rooms.length > 0) {
-        this.selectRoom(payload.rooms[0].id);
-      }
     } catch {
       this.#patch({ errorMessage: "Network error while loading rooms." });
     }
   }
 
-  selectRoom(roomId: string): void {
-    if (this.#state.currentRoomId === roomId) {
+  async loadSettings(): Promise<void> {
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/v1/settings`);
+      if (!response.ok) {
+        this.#patch({ errorMessage: "Failed to load settings." });
+        return;
+      }
+      const payload = (await response.json()) as SettingsEnvelope;
+      this.#patch({ settings: payload.settings });
+    } catch {
+      this.#patch({ errorMessage: "Network error while loading settings." });
+    }
+  }
+
+  async saveSettings(
+    request: UpdateAppSettingsRequest,
+  ): Promise<boolean> {
+    this.#patch({ isSavingSettings: true, errorMessage: null });
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/v1/settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        this.#patch({
+          isSavingSettings: false,
+          errorMessage: `Save settings failed: ${text}`,
+        });
+        return false;
+      }
+      const payload = (await response.json()) as SettingsEnvelope;
+      this.#patch({
+        settings: payload.settings,
+        isSavingSettings: false,
+      });
+      return true;
+    } catch {
+      this.#patch({
+        isSavingSettings: false,
+        errorMessage: "Network error while saving settings.",
+      });
+      return false;
+    }
+  }
+
+  selectRoom(roomCode: string): void {
+    if (this.#state.currentRoomCode === roomCode) {
       return;
     }
     this.#patch({
-      currentRoomId: roomId,
+      currentRoomCode: roomCode,
       wsConnected: false,
       reconnectAttempt: 0,
       errorMessage: null,
     });
-    this.#client.connect(roomId);
+    this.#client.connect(roomCode);
   }
 
   /**
    * Drops the active WS subscription and clears the current selection.
-   * Called by the router when navigating away from `/room/:slug` so we
+   * Called by the router when navigating away from `/room/:code` so we
    * don't keep streaming events for an off-screen room.
    */
   clearSelection(): void {
-    if (this.#state.currentRoomId === null) {
+    if (this.#state.currentRoomCode === null) {
       return;
     }
     this.#client.disconnect();
     this.#patch({
-      currentRoomId: null,
+      currentRoomCode: null,
       wsConnected: false,
       reconnectAttempt: 0,
     });
   }
 
   /**
-   * Returns the loaded room matching `slug`, or null if none has loaded
-   * yet. The router uses this to translate `/room/:slug` URLs into a
-   * `selectRoom(id)` call once the rooms list has populated.
+   * Returns the loaded room matching `code`, or null if none has loaded
+   * yet. The router uses this to translate `/room/:code` URLs into a
+   * `selectRoom(code)` call once the rooms list has populated.
    */
-  findRoomBySlug(slug: string): Room | null {
-    return this.#state.rooms.find((room) => room.slug === slug) ?? null;
+  findRoomByCode(code: string): Room | null {
+    return this.#state.rooms.find((room) => room.code === code) ?? null;
   }
 
   async createRoom(request: CreateRoomRequest): Promise<Room | null> {
@@ -167,7 +218,7 @@ export class DashboardStore {
       const payload = (await response.json()) as { room: Room };
       this.#patch({ isCreatingRoom: false });
       await this.loadRooms();
-      this.selectRoom(payload.room.id);
+      this.selectRoom(payload.room.code);
       return payload.room;
     } catch {
       this.#patch({
@@ -179,15 +230,18 @@ export class DashboardStore {
   }
 
   async updateRoom(
-    roomId: string,
+    roomCode: string,
     request: UpdateRoomRequest,
   ): Promise<boolean> {
     try {
-      const response = await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      });
+      const response = await fetch(
+        `${BACKEND_BASE_URL}/v1/rooms/${roomCode}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
       if (!response.ok) {
         const text = await response.text();
         this.#patch({ errorMessage: `Update failed: ${text}` });
@@ -208,7 +262,10 @@ export class DashboardStore {
    * local state here; the active subscription will deliver the event and
    * `#applyEvent` will append it to the view.
    */
-  async sendUserMessage(roomId: string, content: string): Promise<void> {
+  async sendUserMessage(
+    roomCode: string,
+    content: string,
+  ): Promise<void> {
     const trimmed = content.trim();
     if (trimmed === "") {
       return;
@@ -216,7 +273,7 @@ export class DashboardStore {
     const request: CreateMessageRequest = { content: trimmed };
     try {
       const response = await fetch(
-        `${BACKEND_BASE_URL}/v1/rooms/${roomId}/messages`,
+        `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/messages`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -232,26 +289,26 @@ export class DashboardStore {
     }
   }
 
-  async pauseRoom(roomId: string): Promise<void> {
-    await this.#postStatus(roomId, "pause");
+  async pauseRoom(roomCode: string): Promise<void> {
+    await this.#postStatus(roomCode, "pause");
   }
 
-  async resumeRoom(roomId: string): Promise<void> {
-    await this.#postStatus(roomId, "resume");
+  async resumeRoom(roomCode: string): Promise<void> {
+    await this.#postStatus(roomCode, "resume");
   }
 
-  async deleteRoom(roomId: string): Promise<void> {
+  async deleteRoom(roomCode: string): Promise<void> {
     try {
-      await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomId}`, {
+      await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomCode}`, {
         method: "DELETE",
       });
-      const remaining = this.#state.rooms.filter((r) => r.id !== roomId);
-      const nextSelected = remaining[0]?.id ?? null;
+      const remaining = this.#state.rooms.filter((r) => r.code !== roomCode);
+      const nextSelected = remaining[0]?.code ?? null;
       const views = { ...this.#state.views };
-      delete views[roomId];
+      delete views[roomCode];
       this.#patch({
         rooms: remaining,
-        currentRoomId: nextSelected,
+        currentRoomCode: nextSelected,
         views,
       });
       if (nextSelected !== null) {
@@ -264,10 +321,13 @@ export class DashboardStore {
     }
   }
 
-  async #postStatus(roomId: string, action: "pause" | "resume"): Promise<void> {
+  async #postStatus(
+    roomCode: string,
+    action: "pause" | "resume",
+  ): Promise<void> {
     try {
       const response = await fetch(
-        `${BACKEND_BASE_URL}/v1/rooms/${roomId}/${action}`,
+        `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/${action}`,
         { method: "POST" },
       );
       if (!response.ok) {
@@ -418,28 +478,28 @@ export class DashboardStore {
       inlineNotes: [],
     };
     this.#patch({
-      views: { ...this.#state.views, [room.id]: view },
+      views: { ...this.#state.views, [room.code]: view },
     });
     this.#mergeRoom(room);
   }
 
   #mergeRoom(updated: Room): void {
-    const rooms = this.#state.rooms.some((r) => r.id === updated.id)
-      ? this.#state.rooms.map((r) => (r.id === updated.id ? updated : r))
+    const rooms = this.#state.rooms.some((r) => r.code === updated.code)
+      ? this.#state.rooms.map((r) => (r.code === updated.code ? updated : r))
       : [updated, ...this.#state.rooms];
-    const view = this.#state.views[updated.id];
+    const view = this.#state.views[updated.code];
     const views = view !== undefined
-      ? { ...this.#state.views, [updated.id]: { ...view, room: updated } }
+      ? { ...this.#state.views, [updated.code]: { ...view, room: updated } }
       : this.#state.views;
     this.#patch({ rooms, views });
   }
 
   #patchCurrentRoom(transform: (room: Room) => Room): void {
-    const id = this.#state.currentRoomId;
-    if (id === null) {
+    const code = this.#state.currentRoomCode;
+    if (code === null) {
       return;
     }
-    const room = this.#state.rooms.find((r) => r.id === id);
+    const room = this.#state.rooms.find((r) => r.code === code);
     if (room === undefined) {
       return;
     }
@@ -447,16 +507,16 @@ export class DashboardStore {
   }
 
   #mutateView(transform: (view: RoomView) => RoomView): void {
-    const id = this.#state.currentRoomId;
-    if (id === null) {
+    const code = this.#state.currentRoomCode;
+    if (code === null) {
       return;
     }
-    const view = this.#state.views[id];
+    const view = this.#state.views[code];
     if (view === undefined) {
       return;
     }
     const next = transform(view);
-    this.#patch({ views: { ...this.#state.views, [id]: next } });
+    this.#patch({ views: { ...this.#state.views, [code]: next } });
   }
 
   #patch(patch: Partial<DashboardState>): void {

@@ -1,13 +1,10 @@
 import type { DashboardStore } from "@/app/state";
-import type {
-  ApiType,
-  ProviderConfig,
-  Room,
-  UpdateRoomRequest,
-} from "@/app/types";
+import type { Room, UpdateRoomRequest } from "@/app/types";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
+
+import "./cron-picker.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -19,36 +16,24 @@ interface SettingsForm {
   topic: string;
   goal: string;
   instruction: string;
-  background: string;
   chatIntervalSeconds: number;
   steeringIntervalSeconds: number;
-  reportIntervalSeconds: number;
+  reportScheduleCron: string;
+  reportScheduleLabel: string;
   pythonTimeoutSeconds: number;
   autoPauseWhenConverged: boolean;
   resumeScheduleCron: string;
   resumeScheduleLabel: string;
-  low: ProviderConfig;
-  high: ProviderConfig;
 }
 
 interface DialogElement extends HTMLElement {
   open: boolean;
 }
 
-interface ResumeScheduleOption {
-  label: string;
+interface CronChangeDetail {
   cron: string;
+  label: string;
 }
-
-const RESUME_SCHEDULE_OPTIONS: ResumeScheduleOption[] = [
-  { label: "Every 15 minutes", cron: "*/15 * * * *" },
-  { label: "Every 30 minutes", cron: "*/30 * * * *" },
-  { label: "Every hour", cron: "0 * * * *" },
-  { label: "Every 3 hours", cron: "0 */3 * * *" },
-  { label: "Every 6 hours", cron: "0 */6 * * *" },
-  { label: "Daily at 09:00 UTC", cron: "0 9 * * *" },
-  { label: "Daily at 18:00 UTC", cron: "0 18 * * *" },
-];
 
 function readInputValue(target: EventTarget | null): string {
   if (!(target instanceof HTMLElement)) {
@@ -127,41 +112,19 @@ export class RoomSettingsDialog extends LitElement {
 
     .number-row {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 0.6rem;
     }
 
-    .number-row > :nth-child(odd):last-child {
-      grid-column: 1 / -1;
-    }
-
-    .provider-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.6rem;
+    @media (max-width: 720px) {
+      .number-row {
+        grid-template-columns: 1fr;
+      }
     }
 
     .schedule-grid {
       display: grid;
       gap: 0.6rem;
-    }
-
-    fieldset.tier {
-      border: 0;
-      padding: 0;
-      margin: 0;
-      display: grid;
-      gap: 0.4rem;
-    }
-
-    fieldset.tier legend {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.3rem;
-      font-size: 0.78rem;
-      font-weight: 600;
-      padding: 0;
-      margin-bottom: 0.2rem;
     }
 
     .footer-row {
@@ -215,7 +178,7 @@ export class RoomSettingsDialog extends LitElement {
           "Topic",
           form.topic,
           (v) => this.#patchForm({ topic: v }),
-          "Short subject the debaters argue about. Shown to every persona at the top of every turn.",
+          "Short subject the debaters argue about. Shown to every persona at the top of every turn and used as the room's display label.",
         )} ${this.#renderTextField(
           "goal",
           "Goal",
@@ -227,13 +190,7 @@ export class RoomSettingsDialog extends LitElement {
           "Instruction",
           form.instruction,
           (v) => this.#patchForm({ instruction: v }),
-          "Optional. Rules personas must follow (e.g. tone, scope). Appended to every persona prompt.",
-        )} ${this.#renderTextArea(
-          "background",
-          "Background",
-          form.background,
-          (v) => this.#patchForm({ background: v }),
-          "Optional. Context personas should treat as already-known facts. Useful for proprietary data the model cannot search.",
+          "Optional. Rules personas must follow plus any background context to treat as already-known facts. Appended to every persona prompt.",
         )}
         <div class="number-row">
           ${this.#renderNumberField(
@@ -251,13 +208,6 @@ export class RoomSettingsDialog extends LitElement {
             "How often the leader steps in to nudge the debate, in seconds. Higher = more autonomy for personas.",
             "sec",
           )} ${this.#renderNumberField(
-            "report-interval",
-            "Report interval",
-            form.reportIntervalSeconds,
-            (v) => this.#patchForm({ reportIntervalSeconds: v }),
-            "How often the leader writes a long-form report summarizing the room, in seconds.",
-            "sec",
-          )} ${this.#renderNumberField(
             "python-timeout",
             "Python timeout",
             form.pythonTimeoutSeconds,
@@ -273,20 +223,35 @@ export class RoomSettingsDialog extends LitElement {
             form.autoPauseWhenConverged,
             (value) => this.#patchForm({ autoPauseWhenConverged: value }),
             "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
-          )} ${this.#renderScheduleSelect(form)}
-        </div>
-        <div class="provider-grid">
-          ${this.#renderProvider(
-            "low",
-            "Low tier",
-            form.low,
-            (next) => this.#patchForm({ low: next }),
-          )} ${this.#renderProvider(
-            "high",
-            "High tier",
-            form.high,
-            (next) => this.#patchForm({ high: next }),
           )}
+          <div class="form-field">
+            <span class="form-label">Wake-check schedule</span>
+            <te-cron-picker
+              name="wake-check"
+              helperText="Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate."
+              .cron="${form.resumeScheduleCron}"
+              .label="${form.resumeScheduleLabel}"
+              @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
+                this.#patchForm({
+                  resumeScheduleCron: e.detail.cron,
+                  resumeScheduleLabel: e.detail.label,
+                })}"
+            ></te-cron-picker>
+          </div>
+          <div class="form-field">
+            <span class="form-label">Report schedule</span>
+            <te-cron-picker
+              name="report"
+              helperText="Times are interpreted in UTC. The leader writes a long-form report on each firing of this schedule."
+              .cron="${form.reportScheduleCron}"
+              .label="${form.reportScheduleLabel}"
+              @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
+                this.#patchForm({
+                  reportScheduleCron: e.detail.cron,
+                  reportScheduleLabel: e.detail.label,
+                })}"
+            ></te-cron-picker>
+          </div>
         </div>
       </div>
     `;
@@ -304,28 +269,6 @@ export class RoomSettingsDialog extends LitElement {
         ${this.#renderLabel(key, label, tooltip)}
         <wa-input
           size="small"
-          .value="${value}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-input>
-      </label>
-    `;
-  }
-
-  #renderPasswordField(
-    key: string,
-    label: string,
-    value: string,
-    onChange: (value: string) => void,
-    tooltip?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-input
-          type="password"
-          size="small"
-          password-toggle
           .value="${value}"
           @input="${(e: InputEvent): void =>
             onChange(readInputValue(e.target))}"
@@ -433,129 +376,6 @@ export class RoomSettingsDialog extends LitElement {
     `;
   }
 
-  #renderScheduleSelect(form: SettingsForm) {
-    const known = RESUME_SCHEDULE_OPTIONS.some((item) =>
-      item.cron === form.resumeScheduleCron
-    );
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(
-          "wake-check",
-          "Wake-check schedule",
-          "Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate.",
-        )}
-        <wa-select
-          size="small"
-          .value="${form.resumeScheduleCron}"
-          @change="${(e: Event): void => {
-            const selected = readInputValue(e.target);
-            const option = RESUME_SCHEDULE_OPTIONS.find((item) =>
-              item.cron === selected
-            );
-            if (option === undefined) {
-              return;
-            }
-            this.#patchForm({
-              resumeScheduleCron: option.cron,
-              resumeScheduleLabel: option.label,
-            });
-          }}"
-        >
-          ${!known
-            ? html`
-              <wa-option value="${form.resumeScheduleCron}">
-                ${form.resumeScheduleLabel === ""
-                  ? `Custom (${form.resumeScheduleCron})`
-                  : form.resumeScheduleLabel}
-              </wa-option>
-            `
-            : nothing} ${RESUME_SCHEDULE_OPTIONS.map((option) =>
-              html`
-                <wa-option value="${option.cron}">${option.label}</wa-option>
-              `
-            )}
-        </wa-select>
-      </label>
-    `;
-  }
-
-  #renderProvider(
-    keyPrefix: string,
-    label: string,
-    config: ProviderConfig,
-    onChange: (config: ProviderConfig) => void,
-  ) {
-    const apiType: ApiType = config.apiType ?? "ollama";
-    const tierTooltip = label === "Low tier"
-      ? "Cheaper / faster model used for every debater turn."
-      : "Higher-quality model used for steering nudges, halt/proceed gates, and reports.";
-    const legendAnchor = `tip-${keyPrefix}-tier`;
-    return html`
-      <fieldset class="tier">
-        <legend>
-          <span>${label}</span>
-          <wa-icon
-            id="${legendAnchor}"
-            class="help-icon"
-            name="circle-question"
-            tabindex="0"
-          ></wa-icon>
-        </legend>
-        <wa-tooltip for="${legendAnchor}" placement="top">
-          ${tierTooltip}
-        </wa-tooltip>
-        <label class="form-field">
-          ${this.#renderLabel(
-            `${keyPrefix}-api-type`,
-            "API type",
-            "Pick OpenRouter for any OpenAI-compatible endpoint (cloud or proxied) or Ollama for the native /api/chat protocol.",
-          )}
-          <wa-select
-            size="small"
-            .value="${apiType}"
-            @change="${(e: Event): void => {
-              const value = readInputValue(e.target);
-              if (value === "ollama" || value === "openRouter") {
-                const patch: Partial<ProviderConfig> = { apiType: value };
-                if (value === "openRouter") {
-                  patch.baseUrl = "https://openrouter.ai/api/v1";
-                }
-                onChange({ ...config, ...patch });
-              }
-            }}"
-          >
-            <wa-option value="ollama">Ollama</wa-option>
-            <wa-option value="openRouter">OpenRouter</wa-option>
-          </wa-select>
-        </label>
-        ${apiType === "ollama"
-          ? this.#renderTextField(
-            `${keyPrefix}-base-url`,
-            "Base URL",
-            config.baseUrl,
-            (value) => onChange({ ...config, baseUrl: value }),
-            "Server root, e.g. http://localhost:11434. Do not include /v1.",
-          )
-          : nothing} ${this.#renderTextField(
-            `${keyPrefix}-model`,
-            "Model",
-            config.model,
-            (model) => onChange({ ...config, model }),
-            "Exact model identifier accepted by the provider, e.g. qwen3:14b or anthropic/claude-sonnet-4-6.",
-          )} ${apiType === "openRouter"
-          ? this.#renderPasswordField(
-            `${keyPrefix}-api-key`,
-            "API key",
-            config.apiKey ?? "",
-            (value) =>
-              onChange({ ...config, apiKey: value === "" ? null : value }),
-            "Required for OpenRouter. Leave it as-is (***) to keep the stored key, or type a new value to replace.",
-          )
-          : nothing}
-      </fieldset>
-    `;
-  }
-
   #patchForm(patch: Partial<SettingsForm>): void {
     if (this.form === null) {
       return;
@@ -577,18 +397,16 @@ export class RoomSettingsDialog extends LitElement {
       topic: this.form.topic,
       goal: this.form.goal,
       instruction: this.form.instruction === "" ? null : this.form.instruction,
-      background: this.form.background === "" ? null : this.form.background,
       chatIntervalSeconds: this.form.chatIntervalSeconds,
       steeringIntervalSeconds: this.form.steeringIntervalSeconds,
-      reportIntervalSeconds: this.form.reportIntervalSeconds,
+      reportScheduleCron: this.form.reportScheduleCron,
+      reportScheduleLabel: this.form.reportScheduleLabel,
       pythonTimeoutSeconds: this.form.pythonTimeoutSeconds,
       autoPauseWhenConverged: this.form.autoPauseWhenConverged,
       resumeScheduleCron: this.form.resumeScheduleCron,
       resumeScheduleLabel: this.form.resumeScheduleLabel,
-      low: this.form.low,
-      high: this.form.high,
     };
-    const ok = await this.store.updateRoom(this.room.id, request);
+    const ok = await this.store.updateRoom(this.room.code, request);
     if (ok) {
       const dialog = this.#dialogRef.value;
       if (dialog !== undefined) {
@@ -603,15 +421,13 @@ function formFromRoom(room: Room): SettingsForm {
     topic: room.topic,
     goal: room.goal,
     instruction: room.instruction ?? "",
-    background: room.background ?? "",
     chatIntervalSeconds: room.chatIntervalSeconds,
     steeringIntervalSeconds: room.steeringIntervalSeconds,
-    reportIntervalSeconds: room.reportIntervalSeconds,
+    reportScheduleCron: room.reportScheduleCron,
+    reportScheduleLabel: room.reportScheduleLabel,
     pythonTimeoutSeconds: room.pythonTimeoutSeconds,
     autoPauseWhenConverged: room.autoPauseWhenConverged,
     resumeScheduleCron: room.resumeScheduleCron,
     resumeScheduleLabel: room.resumeScheduleLabel,
-    low: { ...room.low },
-    high: { ...room.high },
   };
 }

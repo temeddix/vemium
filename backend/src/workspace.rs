@@ -52,15 +52,16 @@ impl DebateRoot {
     }
   }
 
-  /// Returns the workspace handle for `slug`, ensuring the directory exists
+  /// Returns the workspace handle for `code`, ensuring the directory exists
   /// on disk.
-  pub async fn workspace_for(&self, slug: &str) -> Result<RoomWorkspace> {
-    if !is_valid_slug(slug) {
+  pub async fn workspace_for(&self, code: &str) -> Result<RoomWorkspace> {
+    if !is_valid_code(code) {
       bail!(
-        "workspace slug rejected (must be lowercase, alnum, '-', '_'): {slug}"
+        "workspace code rejected (must be lowercase letters and '-' only): \
+         {code}"
       );
     }
-    let path = self.root.join(slug);
+    let path = self.root.join(code);
     fs::create_dir_all(&path).await.with_context(|| {
       format!("failed to create room workspace at {}", path.display())
     })?;
@@ -284,13 +285,11 @@ fn truncate_to_chars(text: &str, max_bytes: usize) -> String {
   truncated
 }
 
-fn is_valid_slug(slug: &str) -> bool {
-  if slug.is_empty() || slug.len() > 96 {
+fn is_valid_code(code: &str) -> bool {
+  if code.is_empty() || code.len() > 64 {
     return false;
   }
-  slug.chars().all(|c| {
-    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
-  })
+  code.chars().all(|c| c.is_ascii_lowercase() || c == '-')
 }
 
 fn looks_like_subject_folder(name: &str) -> bool {

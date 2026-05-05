@@ -55,7 +55,7 @@ interface BubbleEntry {
 type BubbleKind = "agent_chat" | "leader_note" | "user_chat";
 
 /**
- * Top-level page for `/room/:slug`. Owns the chat-stream subscription
+ * Top-level page for `/room/:code`. Owns the chat-stream subscription
  * lifecycle (delegated to the store) and renders the bubble feed plus
  * the human composer. Header actions open Settings / Reports modals
  * rather than inline tabs so the chat itself stays the focal point.
@@ -67,7 +67,7 @@ export class RoomChatPage extends LitElement {
   accessor store!: DashboardStore;
 
   @property({ type: String })
-  accessor slug = "";
+  accessor code = "";
 
   @state()
   private accessor dashboardState: DashboardState | null = null;
@@ -88,8 +88,8 @@ export class RoomChatPage extends LitElement {
 
   #unsubscribe: (() => void) | null = null;
 
-  /** Tracks the last selected slug so `selectRoom` only fires on changes. */
-  #lastSelectedSlug: string | null = null;
+  /** Tracks the last selected code so `selectRoom` only fires on changes. */
+  #lastSelectedCode: string | null = null;
 
   /**
    * Tracks whether the user is currently anchored to the bottom of the
@@ -149,7 +149,7 @@ export class RoomChatPage extends LitElement {
       min-width: 0;
     }
 
-    .room-name {
+    .room-topic {
       font-size: 1rem;
       font-weight: 600;
       overflow: hidden;
@@ -157,12 +157,10 @@ export class RoomChatPage extends LitElement {
       white-space: nowrap;
     }
 
-    .room-topic {
-      font-size: 0.82rem;
+    .room-code {
+      font-size: 0.78rem;
       color: var(--wa-color-text-quiet);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      font-family: var(--wa-font-family-code, ui-monospace, monospace);
     }
 
     .badges {
@@ -308,6 +306,7 @@ export class RoomChatPage extends LitElement {
     }
     const { room } = view;
     const entries = this.#bubbleEntries(view);
+    const topicLabel = room.topic.trim() === "" ? room.code : room.topic;
     return html`
       <div class="container">
         <header class="header">
@@ -315,12 +314,8 @@ export class RoomChatPage extends LitElement {
             <wa-icon name="chevron-left"></wa-icon>
           </button>
           <div class="title">
-            <div class="room-name">${room.name}</div>
-            ${room.topic !== ""
-              ? html`
-                <div class="room-topic">${room.topic}</div>
-              `
-              : nothing}
+            <div class="room-topic">${topicLabel}</div>
+            <div class="room-code">${room.code}</div>
           </div>
           <div class="badges">
             <wa-badge size="small" appearance="outlined">
@@ -349,7 +344,7 @@ export class RoomChatPage extends LitElement {
             </wa-dropdown-item>
             <wa-dropdown-item
               variant="danger"
-              @click="${(): Promise<void> => this.#confirmDelete(room.id)}"
+              @click="${(): Promise<void> => this.#confirmDelete(room.code)}"
             >
               Delete
             </wa-dropdown-item>
@@ -400,11 +395,10 @@ export class RoomChatPage extends LitElement {
         </div>
       `;
     }
-    // Rooms loaded but slug doesn't match any of them.
     return html`
       <div class="container">
         <p class="empty">
-          No room with slug "${this.slug}".
+          No room with code "${this.code}".
           <wa-button size="small" @click="${this.#onBack}">
             Back to rooms
           </wa-button>
@@ -417,7 +411,7 @@ export class RoomChatPage extends LitElement {
     if (room.status === "paused") {
       return html`
         <wa-dropdown-item
-          @click="${(): Promise<void> => this.store.resumeRoom(room.id)}"
+          @click="${(): Promise<void> => this.store.resumeRoom(room.code)}"
         >
           Resume
         </wa-dropdown-item>
@@ -425,7 +419,7 @@ export class RoomChatPage extends LitElement {
     }
     return html`
       <wa-dropdown-item
-        @click="${(): Promise<void> => this.store.pauseRoom(room.id)}"
+        @click="${(): Promise<void> => this.store.pauseRoom(room.code)}"
       >
         Pause
       </wa-dropdown-item>
@@ -610,7 +604,7 @@ export class RoomChatPage extends LitElement {
     }
     this.sending = true;
     try {
-      await this.store.sendUserMessage(view.room.id, event.detail.content);
+      await this.store.sendUserMessage(view.room.code, event.detail.content);
       // Pin to bottom whenever the user themselves sends.
       this.#pinnedToBottom = true;
     } finally {
@@ -618,12 +612,12 @@ export class RoomChatPage extends LitElement {
     }
   }
 
-  async #confirmDelete(roomId: string): Promise<void> {
+  async #confirmDelete(code: string): Promise<void> {
     const ok = globalThis.confirm("Delete this room? This cannot be undone.");
     if (!ok) {
       return;
     }
-    await this.store.deleteRoom(roomId);
+    await this.store.deleteRoom(code);
     this.#onBack();
   }
 
@@ -641,17 +635,17 @@ export class RoomChatPage extends LitElement {
     if (this.store === undefined) {
       return;
     }
-    if (this.#lastSelectedSlug === this.slug) {
+    if (this.#lastSelectedCode === this.code) {
       return;
     }
-    const room = this.store.findRoomBySlug(this.slug);
+    const room = this.store.findRoomByCode(this.code);
     if (room === null) {
       // Rooms list may not have loaded yet; we'll try again on the next
       // store update via `updated()`.
       return;
     }
-    this.#lastSelectedSlug = this.slug;
-    this.store.selectRoom(room.id);
+    this.#lastSelectedCode = this.code;
+    this.store.selectRoom(room.code);
   }
 
   #scrollToBottom(): void {
@@ -663,11 +657,11 @@ export class RoomChatPage extends LitElement {
     if (state === null) {
       return null;
     }
-    const room = this.store?.findRoomBySlug(this.slug);
+    const room = this.store?.findRoomByCode(this.code);
     if (!room) {
       return null;
     }
-    return state.views[room.id] ?? null;
+    return state.views[room.code] ?? null;
   }
 
   #bindStore(): void {

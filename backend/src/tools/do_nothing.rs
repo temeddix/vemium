@@ -13,7 +13,6 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
-use uuid::Uuid;
 
 const NAME: &str = "do_nothing";
 const INLINE_NOTE_TEXT: &str = "Decided to do nothing.";
@@ -23,17 +22,17 @@ const INLINE_NOTE_TEXT: &str = "Decided to do nothing.";
 #[derive(Clone)]
 pub struct DoNothingTool {
   state: AppState,
-  room_id: Uuid,
+  room_code: String,
   /// Author label used for the inline note. Personas pass their own name;
   /// the gates pass `Leader (halt)` / `Leader (proceed)`.
   author: String,
 }
 
 impl DoNothingTool {
-  pub fn new(state: AppState, room_id: Uuid, author: String) -> Self {
+  pub fn new(state: AppState, room_code: String, author: String) -> Self {
     Self {
       state,
-      room_id,
+      room_code,
       author,
     }
   }
@@ -93,7 +92,7 @@ impl Tool for DoNothingTool {
       return Err(DoNothingError::EmptyReason);
     }
 
-    let stream = self.state.ensure_room_stream(self.room_id).await;
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
     stream.send(WsEvent::InlineNote {
       author: self.author.clone(),
       text: INLINE_NOTE_TEXT.to_string(),

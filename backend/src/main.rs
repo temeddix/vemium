@@ -43,7 +43,8 @@ async fn main() -> Result<()> {
   ensure_data_root(&config).await;
 
   let db = db::init_pool(&config.database_url).await?;
-  let state = AppState::new(db, config.data_root.clone());
+  let app_settings = db::load_app_settings(&db).await?;
+  let state = AppState::new(db, config.data_root.clone(), app_settings);
 
   if let Err(error) = runtime::restore_rooms(state.clone()).await {
     tracing::warn!(%error, "failed to restore rooms on startup");

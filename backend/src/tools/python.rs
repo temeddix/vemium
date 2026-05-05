@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt::Write as _;
 use thiserror::Error;
-use uuid::Uuid;
 
 const NAME: &str = "run_python";
 const INLINE_NOTE_SUCCESS: &str = "Python script run success";
@@ -38,7 +37,7 @@ pub struct RunPythonTool {
   workspace: RoomWorkspace,
   runner: PythonRunner,
   state: AppState,
-  room_id: Uuid,
+  room_code: String,
   /// Author label used for the inline note. Personas pass their own name.
   author: String,
 }
@@ -48,14 +47,14 @@ impl RunPythonTool {
     workspace: RoomWorkspace,
     runner: PythonRunner,
     state: AppState,
-    room_id: Uuid,
+    room_code: String,
     author: String,
   ) -> Self {
     Self {
       workspace,
       runner,
       state,
-      room_id,
+      room_code,
       author,
     }
   }
@@ -173,7 +172,7 @@ impl RunPythonTool {
     } else {
       INLINE_NOTE_FAIL
     };
-    let stream = self.state.ensure_room_stream(self.room_id).await;
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
     stream.send(WsEvent::InlineNote {
       author: self.author.clone(),
       text: text.to_string(),

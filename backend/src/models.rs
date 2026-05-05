@@ -3,21 +3,24 @@
 //! The world consists of:
 //!
 //! - [`Room`]: the canonical record of one debate subject. Each room has its
-//!   own settings (including provider configuration) and runs an endless
-//!   pause/resume-able orchestration.
+//!   own per-room knobs (topic, instruction, schedule cadences) but does
+//!   *not* own provider configuration — that is process-global and lives in
+//!   [`AppSettings`].
 //! - [`RoomEvent`]: one finalized message in the room's chat log — a
 //!   debater turn or a leader note. Each row owns the message text plus
 //!   the model's reasoning trace and the inline list of tool calls
 //!   executed during that turn.
 //! - [`RoomReport`]: a periodic high-model summary of the room. Reports are
 //!   first-class so the UI can list them independently of the chat log.
-//! - [`ProviderConfig`]: per-tier (low / high) LLM provider configuration
-//!   stored on the room. API keys live alongside the room in SQLite; never
-//!   emit them through the public API without going through [`Room::view`].
+//! - [`AppSettings`]: process-wide low/high tier provider configuration,
+//!   set once via the home-screen Settings page and shared by every room.
+//!
+//! Each room is identified by a Google-Meet style readable code (e.g.
+//! `abc-defg-hij`). The code is the room's database primary key, the URL
+//! segment, and the workspace directory name; there is no separate UUID.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Lifecycle state of a [`Room`].
 ///
@@ -74,8 +77,8 @@ pub enum ApiType {
   OpenRouter,
 }
 
-/// Per-tier provider configuration for a room. One [`ProviderConfig`] is
-/// stored for each of the low and high tiers.
+/// Provider configuration for one tier (low or high). One of these is stored
+/// for the low tier and one for the high tier as part of [`AppSettings`].
 ///
 /// Validation happens in `crate::routes::validate_provider_config`; client
 /// construction lives in `crate::llm`.
@@ -92,7 +95,7 @@ pub struct ProviderConfig {
   #[serde(default)]
   pub api_key: Option<String>,
   /// Which provider family to use. Defaults to [`ApiType::Ollama`] so older
-  /// rooms persisted before this field existed continue to load.
+  /// settings persisted before this field existed continue to load.
   #[serde(default)]
   pub api_type: ApiType,
 }
@@ -123,96 +126,127 @@ fn redact_secret(secret: &str) -> String {
 /// [`ProviderConfig::redacted`].
 pub const REDACTED_API_KEY_SENTINEL: &str = "***";
 
+/// Process-wide application settings. There is a single row in the
+/// `app_settings` table; both tiers are mandatory once a user has saved at
+/// least once. Reads are performed under a `RwLock` in
+/// [`crate::app_state::AppState`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+  pub low: ProviderConfig,
+  pub high: ProviderConfig,
+  pub updated_at: DateTime<Utc>,
+}
+
+impl AppSettings {
+  /// Public-API view with API keys redacted.
+  pub fn view(&self) -> AppSettingsView {
+    AppSettingsView {
+      low: self.low.redacted(),
+      high: self.high.redacted(),
+      updated_at: self.updated_at,
+    }
+  }
+}
+
+/// Public API representation of [`AppSettings`] with secrets redacted.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsView {
+  pub low: ProviderConfig,
+  pub high: ProviderConfig,
+  pub updated_at: DateTime<Utc>,
+}
+
+/// Input for `PUT /v1/settings`. Either tier may be omitted to leave the
+/// stored value unchanged.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAppSettingsRequest {
+  pub low: Option<ProviderConfig>,
+  pub high: Option<ProviderConfig>,
+}
+
 /// Canonical record of a debate subject.
 ///
-/// All fields are set at creation time; settings can be updated via PATCH and
-/// take effect at the next orchestrator tick. The orchestrator reads its
-/// per-loop snapshot from this struct, so changes are eventually consistent.
+/// Provider configuration is process-global ([`AppSettings`]) — the room
+/// only carries its own debate knobs. The orchestrator reads its per-loop
+/// snapshot from this struct, so changes are eventually consistent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Room {
-  pub id: Uuid,
-  pub name: String,
-  /// Filesystem-safe stable identifier. Used as the directory name under
-  /// `/data/debate/<slug>/`. Uniquely indexed in the database.
-  pub slug: String,
+  /// Readable identifier in `xxx-xxxx-xxx` lowercase letter format. Used as
+  /// the database primary key, the URL segment, and the workspace directory
+  /// name.
+  pub code: String,
   pub topic: String,
   pub goal: String,
   pub instruction: Option<String>,
-  pub background: Option<String>,
   pub status: RoomStatus,
   /// Sleep between consecutive debater turns, in seconds.
   pub chat_interval_seconds: u64,
   /// Cadence (in seconds) at which the leader emits a steering `leader_note`
   /// nudging the debate forward.
   pub steering_interval_seconds: u64,
-  /// Cadence (in seconds) at which the leader emits a long-form report.
-  pub report_interval_seconds: u64,
+  /// Cron expression that drives the long-form report cadence.
+  pub report_schedule_cron: String,
+  /// Human-readable label for `report_schedule_cron`, shown in leader notes.
+  pub report_schedule_label: String,
   /// Wall-clock cap (seconds) for a single Python script execution.
   pub python_timeout_seconds: u64,
   /// If true, the runtime can pause the room when all personas converge
   /// with no further contributions and the leader approves the halt.
   pub auto_pause_when_converged: bool,
   /// Cron expression used for scheduled wake checks while auto-paused.
-  /// Supported patterns are intentionally small and generated by the UI.
   pub resume_schedule_cron: String,
   /// Human-readable label for `resume_schedule_cron`, shown in leader notes.
   pub resume_schedule_label: String,
-  pub low: ProviderConfig,
-  pub high: ProviderConfig,
   pub created_at: DateTime<Utc>,
   pub updated_at: DateTime<Utc>,
 }
 
 impl Room {
-  /// Returns a public-API view of the room with provider API keys redacted.
+  /// Returns the public-API view of the room. Identical shape today but
+  /// kept as a separate type so future fields can diverge (e.g. derived
+  /// status flags) without breaking the wire format.
   pub fn view(&self) -> RoomView {
     RoomView {
-      id: self.id,
-      name: self.name.clone(),
-      slug: self.slug.clone(),
+      code: self.code.clone(),
       topic: self.topic.clone(),
       goal: self.goal.clone(),
       instruction: self.instruction.clone(),
-      background: self.background.clone(),
       status: self.status,
       chat_interval_seconds: self.chat_interval_seconds,
       steering_interval_seconds: self.steering_interval_seconds,
-      report_interval_seconds: self.report_interval_seconds,
+      report_schedule_cron: self.report_schedule_cron.clone(),
+      report_schedule_label: self.report_schedule_label.clone(),
       python_timeout_seconds: self.python_timeout_seconds,
       auto_pause_when_converged: self.auto_pause_when_converged,
       resume_schedule_cron: self.resume_schedule_cron.clone(),
       resume_schedule_label: self.resume_schedule_label.clone(),
-      low: self.low.redacted(),
-      high: self.high.redacted(),
       created_at: self.created_at,
       updated_at: self.updated_at,
     }
   }
 }
 
-/// Public API representation of a [`Room`] with secrets redacted. Identical
-/// shape to `Room` minus the API keys; the wire format is camelCase JSON.
+/// Public API representation of a [`Room`]. The wire format is camelCase JSON.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomView {
-  pub id: Uuid,
-  pub name: String,
-  pub slug: String,
+  pub code: String,
   pub topic: String,
   pub goal: String,
   pub instruction: Option<String>,
-  pub background: Option<String>,
   pub status: RoomStatus,
   pub chat_interval_seconds: u64,
   pub steering_interval_seconds: u64,
-  pub report_interval_seconds: u64,
+  pub report_schedule_cron: String,
+  pub report_schedule_label: String,
   pub python_timeout_seconds: u64,
   pub auto_pause_when_converged: bool,
   pub resume_schedule_cron: String,
   pub resume_schedule_label: String,
-  pub low: ProviderConfig,
-  pub high: ProviderConfig,
   pub created_at: DateTime<Utc>,
   pub updated_at: DateTime<Utc>,
 }
@@ -258,7 +292,7 @@ impl RoomEventKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomEvent {
-  pub room_id: Uuid,
+  pub room_code: String,
   pub sequence: u64,
   pub kind: RoomEventKind,
   pub agent: Option<String>,
@@ -311,7 +345,7 @@ impl ReportStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RoomReport {
   pub id: i64,
-  pub room_id: Uuid,
+  pub room_code: String,
   pub sequence: u64,
   pub content: String,
   pub started_at: DateTime<Utc>,
@@ -335,29 +369,25 @@ pub struct ToolCallRecord {
 
 // -- Request DTOs ----------------------------------------------------------
 
-/// Input for `POST /v1/rooms`. All fields are required except the optional
-/// instruction/background strings; defaults for the per-room knobs come from
-/// `crate::config::room_defaults`.
+/// Input for `POST /v1/rooms`. Topic and goal are required; the optional
+/// fields fall back to `crate::config::room_defaults`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRoomRequest {
-  pub name: String,
   pub topic: String,
   pub goal: String,
   pub instruction: Option<String>,
-  pub background: Option<String>,
   pub chat_interval_seconds: Option<u64>,
   pub steering_interval_seconds: Option<u64>,
-  pub report_interval_seconds: Option<u64>,
+  pub report_schedule_cron: Option<String>,
+  pub report_schedule_label: Option<String>,
   pub python_timeout_seconds: Option<u64>,
   pub auto_pause_when_converged: Option<bool>,
   pub resume_schedule_cron: Option<String>,
   pub resume_schedule_label: Option<String>,
-  pub low: ProviderConfig,
-  pub high: ProviderConfig,
 }
 
-/// Input for `POST /v1/rooms/:id/messages`. Carries one human-authored
+/// Input for `POST /v1/rooms/:code/messages`. Carries one human-authored
 /// message to inject into the room's transcript so the AI personas can
 /// react to it on the next turn.
 #[derive(Debug, Clone, Deserialize)]
@@ -366,26 +396,20 @@ pub struct CreateMessageRequest {
   pub content: String,
 }
 
-/// Input for `PATCH /v1/rooms/:id`. Every field is optional; absent fields
+/// Input for `PATCH /v1/rooms/:code`. Every field is optional; absent fields
 /// leave the room's current value unchanged.
-///
-/// Provider configuration is replaced wholesale — there is no partial provider
-/// patching, since a half-updated provider would be surprising.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRoomRequest {
-  pub name: Option<String>,
   pub topic: Option<String>,
   pub goal: Option<String>,
   pub instruction: Option<Option<String>>,
-  pub background: Option<Option<String>>,
   pub chat_interval_seconds: Option<u64>,
   pub steering_interval_seconds: Option<u64>,
-  pub report_interval_seconds: Option<u64>,
+  pub report_schedule_cron: Option<String>,
+  pub report_schedule_label: Option<String>,
   pub python_timeout_seconds: Option<u64>,
   pub auto_pause_when_converged: Option<bool>,
   pub resume_schedule_cron: Option<String>,
   pub resume_schedule_label: Option<String>,
-  pub low: Option<ProviderConfig>,
-  pub high: Option<ProviderConfig>,
 }

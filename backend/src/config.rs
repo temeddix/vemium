@@ -19,8 +19,10 @@ pub mod room_defaults {
   pub const CHAT_INTERVAL_SECONDS: u64 = 5;
   /// Leader emits a steering `leader_note` once an hour.
   pub const STEERING_INTERVAL_SECONDS: u64 = 3_600;
-  /// Leader writes a long-form report once a day.
-  pub const REPORT_INTERVAL_SECONDS: u64 = 86_400;
+  /// Default report cron (UTC): once a day at 09:00.
+  pub const REPORT_SCHEDULE_CRON: &str = "0 9 * * *";
+  /// User-facing label for the default report schedule.
+  pub const REPORT_SCHEDULE_LABEL: &str = "Every day at 09:00 UTC";
   /// Single Python script run capped at 10 minutes.
   pub const PYTHON_TIMEOUT_SECONDS: u64 = 600;
   /// Whether convergence-based auto-pause is enabled by default.

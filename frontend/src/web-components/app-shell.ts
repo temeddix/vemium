@@ -4,6 +4,7 @@ import { customElement } from "lit/decorators.js";
 import "./dashboard-provider.ts";
 import "./room-chat-page.ts";
 import "./room-list-page.ts";
+import "./settings-page.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -34,10 +35,17 @@ export class AppShell extends LitElement {
         `,
     },
     {
-      path: "/room/:slug",
+      path: "/settings",
+      render: () =>
+        html`
+          <te-settings-page></te-settings-page>
+        `,
+    },
+    {
+      path: "/room/:code",
       render: (params) =>
         html`
-          <te-room-chat-page slug="${params["slug"] ?? ""}"></te-room-chat-page>
+          <te-room-chat-page code="${params["code"] ?? ""}"></te-room-chat-page>
         `,
     },
   ]);

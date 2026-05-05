@@ -14,7 +14,6 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
-use uuid::Uuid;
 
 const NAME: &str = "halt_room";
 pub const LEADER_HALT_AGENT: &str = "Leader (halt)";
@@ -22,17 +21,21 @@ pub const LEADER_HALT_AGENT: &str = "Leader (halt)";
 #[derive(Clone)]
 pub struct HaltRoomTool {
   state: AppState,
-  room_id: Uuid,
+  room_code: String,
   /// Cached schedule label so the default note stays meaningful when the
   /// model returns an empty `note`.
   schedule_label: String,
 }
 
 impl HaltRoomTool {
-  pub fn new(state: AppState, room_id: Uuid, schedule_label: String) -> Self {
+  pub fn new(
+    state: AppState,
+    room_code: String,
+    schedule_label: String,
+  ) -> Self {
     Self {
       state,
-      room_id,
+      room_code,
       schedule_label,
     }
   }
@@ -100,14 +103,14 @@ impl Tool for HaltRoomTool {
 
     let handle = {
       let handles = self.state.room_handles.read().await;
-      handles.get(&self.room_id).cloned()
+      handles.get(&self.room_code).cloned()
     };
     let Some(handle) = handle else {
       return Err(HaltRoomError::HandleMissing);
     };
 
     let event = RoomEvent {
-      room_id: self.room_id,
+      room_code: self.room_code.clone(),
       sequence: handle.allocate_event_sequence(),
       kind: RoomEventKind::LeaderNote,
       agent: Some(LEADER_HALT_AGENT.to_string()),
@@ -118,7 +121,7 @@ impl Tool for HaltRoomTool {
     };
     db::insert_event(&self.state.db, &event).await.report();
 
-    let stream = self.state.ensure_room_stream(self.room_id).await;
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
     stream.send(WsEvent::MessageAdded {
       turn_id: new_turn_id(),
       message: event,
@@ -127,14 +130,14 @@ impl Tool for HaltRoomTool {
     let updated_at = Utc::now();
     {
       let mut rooms = self.state.rooms.write().await;
-      if let Some(room) = rooms.get_mut(&self.room_id) {
+      if let Some(room) = rooms.get_mut(&self.room_code) {
         room.status = RoomStatus::Paused;
         room.updated_at = updated_at;
       }
     }
     db::update_room_status(
       &self.state.db,
-      self.room_id,
+      &self.room_code,
       RoomStatus::Paused,
       updated_at,
     )

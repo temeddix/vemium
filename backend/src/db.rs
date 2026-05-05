@@ -11,8 +11,8 @@
 //! [`max_report_sequence`] seed those counters.
 
 use crate::models::{
-  ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind, RoomReport,
-  RoomStatus,
+  AppSettings, ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind,
+  RoomReport, RoomStatus,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -21,7 +21,6 @@ use sqlx::sqlite::{
   SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions,
 };
 use sqlx::{SqlitePool, sqlite::SqliteRow};
-use uuid::Uuid;
 
 // -- Pool ------------------------------------------------------------------
 
@@ -52,40 +51,31 @@ pub async fn init_pool(database_url: &str) -> Result<SqlitePool> {
 
 // -- Rooms -----------------------------------------------------------------
 
-/// Inserts a new room. Fails if a room with the same `slug` already exists.
+/// Inserts a new room. Fails if a room with the same `code` already exists.
 pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
-  let low_json = serde_json::to_string(&room.low)
-    .context("failed to encode low provider config")?;
-  let high_json = serde_json::to_string(&room.high)
-    .context("failed to encode high provider config")?;
-
   sqlx::query(
     "INSERT INTO rooms (
-        id, name, slug, topic, goal, instruction, background, status,
+        code, topic, goal, instruction, status,
         chat_interval_seconds, steering_interval_seconds,
-        report_interval_seconds, python_timeout_seconds,
-        auto_pause_when_converged,
+        report_schedule_cron, report_schedule_label,
+        python_timeout_seconds, auto_pause_when_converged,
         resume_schedule_cron, resume_schedule_label,
-        low_provider_config, high_provider_config, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
-  .bind(room.id.to_string())
-  .bind(&room.name)
-  .bind(&room.slug)
+  .bind(&room.code)
   .bind(&room.topic)
   .bind(&room.goal)
   .bind(room.instruction.as_deref())
-  .bind(room.background.as_deref())
   .bind(room.status.as_str())
   .bind(room.chat_interval_seconds as i64)
   .bind(room.steering_interval_seconds as i64)
-  .bind(room.report_interval_seconds as i64)
+  .bind(&room.report_schedule_cron)
+  .bind(&room.report_schedule_label)
   .bind(room.python_timeout_seconds as i64)
   .bind(room.auto_pause_when_converged)
   .bind(&room.resume_schedule_cron)
   .bind(&room.resume_schedule_label)
-  .bind(&low_json)
-  .bind(&high_json)
   .bind(room.created_at.to_rfc3339())
   .bind(room.updated_at.to_rfc3339())
   .execute(pool)
@@ -96,42 +86,32 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
 }
 
 /// Replaces every mutable field of an existing room. The orchestrator does
-/// not call this directly — only the `PATCH /v1/rooms/:id` handler does.
+/// not call this directly — only the `PATCH /v1/rooms/:code` handler does.
 pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
-  let low_json = serde_json::to_string(&room.low)
-    .context("failed to encode low provider config")?;
-  let high_json = serde_json::to_string(&room.high)
-    .context("failed to encode high provider config")?;
-
   sqlx::query(
     "UPDATE rooms SET
-        name = ?, slug = ?, topic = ?, goal = ?, instruction = ?,
-        background = ?, status = ?, chat_interval_seconds = ?,
-        steering_interval_seconds = ?, report_interval_seconds = ?,
-        python_timeout_seconds = ?,
-        auto_pause_when_converged = ?, resume_schedule_cron = ?,
-        resume_schedule_label = ?, low_provider_config = ?,
-        high_provider_config = ?, updated_at = ?
-     WHERE id = ?",
+        topic = ?, goal = ?, instruction = ?, status = ?,
+        chat_interval_seconds = ?, steering_interval_seconds = ?,
+        report_schedule_cron = ?, report_schedule_label = ?,
+        python_timeout_seconds = ?, auto_pause_when_converged = ?,
+        resume_schedule_cron = ?, resume_schedule_label = ?,
+        updated_at = ?
+     WHERE code = ?",
   )
-  .bind(&room.name)
-  .bind(&room.slug)
   .bind(&room.topic)
   .bind(&room.goal)
   .bind(room.instruction.as_deref())
-  .bind(room.background.as_deref())
   .bind(room.status.as_str())
   .bind(room.chat_interval_seconds as i64)
   .bind(room.steering_interval_seconds as i64)
-  .bind(room.report_interval_seconds as i64)
+  .bind(&room.report_schedule_cron)
+  .bind(&room.report_schedule_label)
   .bind(room.python_timeout_seconds as i64)
   .bind(room.auto_pause_when_converged)
   .bind(&room.resume_schedule_cron)
   .bind(&room.resume_schedule_label)
-  .bind(&low_json)
-  .bind(&high_json)
   .bind(room.updated_at.to_rfc3339())
-  .bind(room.id.to_string())
+  .bind(&room.code)
   .execute(pool)
   .await
   .context("failed to update room")?;
@@ -143,14 +123,14 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
 /// when pausing/resuming/failing a room.
 pub async fn update_room_status(
   pool: &SqlitePool,
-  room_id: Uuid,
+  room_code: &str,
   status: RoomStatus,
   updated_at: DateTime<Utc>,
 ) -> Result<()> {
-  sqlx::query("UPDATE rooms SET status = ?, updated_at = ? WHERE id = ?")
+  sqlx::query("UPDATE rooms SET status = ?, updated_at = ? WHERE code = ?")
     .bind(status.as_str())
     .bind(updated_at.to_rfc3339())
-    .bind(room_id.to_string())
+    .bind(room_code)
     .execute(pool)
     .await
     .context("failed to update room status")?;
@@ -158,9 +138,9 @@ pub async fn update_room_status(
 }
 
 /// Deletes a room and all of its events/reports (FK cascade).
-pub async fn delete_room(pool: &SqlitePool, room_id: Uuid) -> Result<()> {
-  sqlx::query("DELETE FROM rooms WHERE id = ?")
-    .bind(room_id.to_string())
+pub async fn delete_room(pool: &SqlitePool, room_code: &str) -> Result<()> {
+  sqlx::query("DELETE FROM rooms WHERE code = ?")
+    .bind(room_code)
     .execute(pool)
     .await
     .context("failed to delete room")?;
@@ -176,50 +156,21 @@ pub async fn load_all_rooms(pool: &SqlitePool) -> Result<Vec<Room>> {
   rows.into_iter().map(parse_room_row).collect()
 }
 
-/// Returns true if the slug is already taken by some *other* room. Used by
-/// the create/update handlers to surface a friendly conflict error.
-pub async fn slug_taken(
-  pool: &SqlitePool,
-  slug: &str,
-  exclude: Option<Uuid>,
-) -> Result<bool> {
-  let row = match exclude {
-    Some(id) => sqlx::query(
-      "SELECT 1 AS taken FROM rooms WHERE slug = ? AND id != ? LIMIT 1",
-    )
-    .bind(slug)
-    .bind(id.to_string())
+/// Returns true if the given code is already taken. Used by room creation
+/// to retry generation in the (vanishingly rare) case of a collision.
+pub async fn code_taken(pool: &SqlitePool, code: &str) -> Result<bool> {
+  let row = sqlx::query("SELECT 1 AS taken FROM rooms WHERE code = ? LIMIT 1")
+    .bind(code)
     .fetch_optional(pool)
     .await
-    .context("failed to check slug uniqueness")?,
-    None => sqlx::query("SELECT 1 AS taken FROM rooms WHERE slug = ? LIMIT 1")
-      .bind(slug)
-      .fetch_optional(pool)
-      .await
-      .context("failed to check slug uniqueness")?,
-  };
-
+    .context("failed to check code uniqueness")?;
   Ok(row.is_some())
 }
 
 fn parse_room_row(row: SqliteRow) -> Result<Room> {
-  let id_str: String = row.try_get("id").context("rooms.id missing")?;
-  let id: Uuid = id_str.parse().context("rooms.id not a uuid")?;
-
   let status_str: String =
     row.try_get("status").context("rooms.status missing")?;
   let status = RoomStatus::parse(&status_str)?;
-
-  let low_json: String = row
-    .try_get("low_provider_config")
-    .context("rooms.low missing")?;
-  let high_json: String = row
-    .try_get("high_provider_config")
-    .context("rooms.high missing")?;
-  let low: ProviderConfig = serde_json::from_str(&low_json)
-    .context("rooms.low_provider_config: invalid JSON")?;
-  let high: ProviderConfig = serde_json::from_str(&high_json)
-    .context("rooms.high_provider_config: invalid JSON")?;
 
   let chat_interval: i64 = row
     .try_get("chat_interval_seconds")
@@ -227,47 +178,97 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
   let steering_interval: i64 = row
     .try_get("steering_interval_seconds")
     .context("rooms.steering_interval_seconds missing")?;
-  let report_interval: i64 = row
-    .try_get("report_interval_seconds")
-    .context("rooms.report_interval_seconds missing")?;
   let python_timeout: i64 = row
     .try_get("python_timeout_seconds")
     .context("rooms.python_timeout_seconds missing")?;
   let auto_pause_when_converged: bool = row
     .try_get("auto_pause_when_converged")
     .context("rooms.auto_pause_when_converged missing")?;
-  let resume_schedule_cron: String = row
-    .try_get("resume_schedule_cron")
-    .context("rooms.resume_schedule_cron missing")?;
-  let resume_schedule_label: String = row
-    .try_get("resume_schedule_label")
-    .context("rooms.resume_schedule_label missing")?;
 
   Ok(Room {
-    id,
-    name: row.try_get("name").context("rooms.name missing")?,
-    slug: row.try_get("slug").context("rooms.slug missing")?,
+    code: row.try_get("code").context("rooms.code missing")?,
     topic: row.try_get("topic").context("rooms.topic missing")?,
     goal: row.try_get("goal").context("rooms.goal missing")?,
     instruction: row
       .try_get("instruction")
       .context("rooms.instruction missing")?,
-    background: row
-      .try_get("background")
-      .context("rooms.background missing")?,
     status,
     chat_interval_seconds: chat_interval as u64,
     steering_interval_seconds: steering_interval as u64,
-    report_interval_seconds: report_interval as u64,
+    report_schedule_cron: row
+      .try_get("report_schedule_cron")
+      .context("rooms.report_schedule_cron missing")?,
+    report_schedule_label: row
+      .try_get("report_schedule_label")
+      .context("rooms.report_schedule_label missing")?,
     python_timeout_seconds: python_timeout as u64,
     auto_pause_when_converged,
-    resume_schedule_cron,
-    resume_schedule_label,
-    low,
-    high,
+    resume_schedule_cron: row
+      .try_get("resume_schedule_cron")
+      .context("rooms.resume_schedule_cron missing")?,
+    resume_schedule_label: row
+      .try_get("resume_schedule_label")
+      .context("rooms.resume_schedule_label missing")?,
     created_at: parse_timestamp(&row, "created_at")?,
     updated_at: parse_timestamp(&row, "updated_at")?,
   })
+}
+
+// -- App settings ----------------------------------------------------------
+
+/// Loads the singleton `app_settings` row. The migration always seeds row 1,
+/// so this either returns the user's saved settings or the empty
+/// placeholder.
+pub async fn load_app_settings(pool: &SqlitePool) -> Result<AppSettings> {
+  let row = sqlx::query(
+    "SELECT low_provider_config, high_provider_config, updated_at
+     FROM app_settings WHERE id = 1",
+  )
+  .fetch_one(pool)
+  .await
+  .context("failed to load app settings")?;
+
+  let low_json: String = row
+    .try_get("low_provider_config")
+    .context("app_settings.low_provider_config missing")?;
+  let high_json: String = row
+    .try_get("high_provider_config")
+    .context("app_settings.high_provider_config missing")?;
+  let low: ProviderConfig = serde_json::from_str(&low_json)
+    .context("app_settings.low_provider_config: invalid JSON")?;
+  let high: ProviderConfig = serde_json::from_str(&high_json)
+    .context("app_settings.high_provider_config: invalid JSON")?;
+
+  Ok(AppSettings {
+    low,
+    high,
+    updated_at: parse_timestamp(&row, "updated_at")?,
+  })
+}
+
+/// Persists the singleton `app_settings` row. Caller has already validated
+/// both provider configs and resolved any redacted-key sentinels.
+pub async fn update_app_settings(
+  pool: &SqlitePool,
+  settings: &AppSettings,
+) -> Result<()> {
+  let low_json = serde_json::to_string(&settings.low)
+    .context("failed to encode low provider config")?;
+  let high_json = serde_json::to_string(&settings.high)
+    .context("failed to encode high provider config")?;
+
+  sqlx::query(
+    "UPDATE app_settings
+     SET low_provider_config = ?, high_provider_config = ?, updated_at = ?
+     WHERE id = 1",
+  )
+  .bind(&low_json)
+  .bind(&high_json)
+  .bind(settings.updated_at.to_rfc3339())
+  .execute(pool)
+  .await
+  .context("failed to update app settings")?;
+  Ok(())
 }
 
 // -- Events ----------------------------------------------------------------
@@ -280,10 +281,10 @@ pub async fn insert_event(pool: &SqlitePool, event: &RoomEvent) -> Result<()> {
     .context("failed to serialize tool_calls")?;
   sqlx::query(
     "INSERT INTO room_events
-        (room_id, sequence, kind, agent, content, reasoning, tool_calls, timestamp)
+        (room_code, sequence, kind, agent, content, reasoning, tool_calls, timestamp)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   )
-  .bind(event.room_id.to_string())
+  .bind(&event.room_code)
   .bind(event.sequence as i64)
   .bind(event.kind.as_str())
   .bind(event.agent.as_deref())
@@ -299,15 +300,15 @@ pub async fn insert_event(pool: &SqlitePool, event: &RoomEvent) -> Result<()> {
 
 pub async fn load_room_events(
   pool: &SqlitePool,
-  room_id: Uuid,
+  room_code: &str,
 ) -> Result<Vec<RoomEvent>> {
   let rows = sqlx::query(
-    "SELECT room_id, sequence, kind, agent, content, reasoning, tool_calls, timestamp
+    "SELECT room_code, sequence, kind, agent, content, reasoning, tool_calls, timestamp
      FROM room_events
-     WHERE room_id = ?
+     WHERE room_code = ?
      ORDER BY sequence ASC",
   )
-  .bind(room_id.to_string())
+  .bind(room_code)
   .fetch_all(pool)
   .await
   .context("failed to load room events")?;
@@ -320,13 +321,13 @@ pub async fn load_room_events(
 /// startup.
 pub async fn max_event_sequence(
   pool: &SqlitePool,
-  room_id: Uuid,
+  room_code: &str,
 ) -> Result<u64> {
   let row = sqlx::query(
     "SELECT COALESCE(MAX(sequence), 0) AS max_seq
-     FROM room_events WHERE room_id = ?",
+     FROM room_events WHERE room_code = ?",
   )
-  .bind(room_id.to_string())
+  .bind(room_code)
   .fetch_one(pool)
   .await
   .context("failed to read max event sequence")?;
@@ -336,12 +337,6 @@ pub async fn max_event_sequence(
 }
 
 fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
-  let room_id_str: String = row
-    .try_get("room_id")
-    .context("room_events.room_id missing")?;
-  let room_id: Uuid = room_id_str
-    .parse()
-    .context("room_events.room_id not a uuid")?;
   let sequence: i64 = row
     .try_get("sequence")
     .context("room_events.sequence missing")?;
@@ -354,7 +349,9 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     .context("room_events.tool_calls invalid JSON")?;
 
   Ok(RoomEvent {
-    room_id,
+    room_code: row
+      .try_get("room_code")
+      .context("room_events.room_code missing")?,
     sequence: sequence as u64,
     kind: RoomEventKind::parse(&kind_str)?,
     agent: row.try_get("agent").context("room_events.agent missing")?,
@@ -376,16 +373,16 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
 /// final content.
 pub async fn start_report(
   pool: &SqlitePool,
-  room_id: Uuid,
+  room_code: &str,
   sequence: u64,
   started_at: DateTime<Utc>,
 ) -> Result<RoomReport> {
   let result = sqlx::query(
     "INSERT INTO room_reports
-        (room_id, sequence, content, started_at, completed_at, status)
+        (room_code, sequence, content, started_at, completed_at, status)
      VALUES (?, ?, ?, ?, NULL, ?)",
   )
-  .bind(room_id.to_string())
+  .bind(room_code)
   .bind(sequence as i64)
   .bind("")
   .bind(started_at.to_rfc3339())
@@ -396,7 +393,7 @@ pub async fn start_report(
 
   Ok(RoomReport {
     id: result.last_insert_rowid(),
-    room_id,
+    room_code: room_code.to_string(),
     sequence,
     content: String::new(),
     started_at,
@@ -432,13 +429,13 @@ pub async fn finish_report(
 
 pub async fn load_room_reports(
   pool: &SqlitePool,
-  room_id: Uuid,
+  room_code: &str,
 ) -> Result<Vec<RoomReport>> {
   let rows = sqlx::query(
-    "SELECT id, room_id, sequence, content, started_at, completed_at, status
-     FROM room_reports WHERE room_id = ? ORDER BY sequence ASC",
+    "SELECT id, room_code, sequence, content, started_at, completed_at, status
+     FROM room_reports WHERE room_code = ? ORDER BY sequence ASC",
   )
-  .bind(room_id.to_string())
+  .bind(room_code)
   .fetch_all(pool)
   .await
   .context("failed to load room reports")?;
@@ -448,14 +445,14 @@ pub async fn load_room_reports(
 
 pub async fn load_room_report(
   pool: &SqlitePool,
-  room_id: Uuid,
+  room_code: &str,
   sequence: u64,
 ) -> Result<Option<RoomReport>> {
   let row = sqlx::query(
-    "SELECT id, room_id, sequence, content, started_at, completed_at, status
-     FROM room_reports WHERE room_id = ? AND sequence = ?",
+    "SELECT id, room_code, sequence, content, started_at, completed_at, status
+     FROM room_reports WHERE room_code = ? AND sequence = ?",
   )
-  .bind(room_id.to_string())
+  .bind(room_code)
   .bind(sequence as i64)
   .fetch_optional(pool)
   .await
@@ -466,13 +463,13 @@ pub async fn load_room_report(
 
 pub async fn max_report_sequence(
   pool: &SqlitePool,
-  room_id: Uuid,
+  room_code: &str,
 ) -> Result<u64> {
   let row = sqlx::query(
     "SELECT COALESCE(MAX(sequence), 0) AS max_seq
-     FROM room_reports WHERE room_id = ?",
+     FROM room_reports WHERE room_code = ?",
   )
-  .bind(room_id.to_string())
+  .bind(room_code)
   .fetch_one(pool)
   .await
   .context("failed to read max report sequence")?;
@@ -482,12 +479,6 @@ pub async fn max_report_sequence(
 }
 
 fn parse_report_row(row: SqliteRow) -> Result<RoomReport> {
-  let room_id_str: String = row
-    .try_get("room_id")
-    .context("room_reports.room_id missing")?;
-  let room_id: Uuid = room_id_str
-    .parse()
-    .context("room_reports.room_id not a uuid")?;
   let sequence: i64 = row
     .try_get("sequence")
     .context("room_reports.sequence missing")?;
@@ -506,7 +497,9 @@ fn parse_report_row(row: SqliteRow) -> Result<RoomReport> {
 
   Ok(RoomReport {
     id: row.try_get("id").context("room_reports.id missing")?,
-    room_id,
+    room_code: row
+      .try_get("room_code")
+      .context("room_reports.room_code missing")?,
     sequence: sequence as u64,
     content: row
       .try_get("content")

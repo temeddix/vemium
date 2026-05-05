@@ -13,7 +13,6 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
-use uuid::Uuid;
 
 const NAME: &str = "proceed_room";
 pub const LEADER_PROCEED_AGENT: &str = "Leader (proceed)";
@@ -21,12 +20,12 @@ pub const LEADER_PROCEED_AGENT: &str = "Leader (proceed)";
 #[derive(Clone)]
 pub struct ProceedRoomTool {
   state: AppState,
-  room_id: Uuid,
+  room_code: String,
 }
 
 impl ProceedRoomTool {
-  pub fn new(state: AppState, room_id: Uuid) -> Self {
-    Self { state, room_id }
+  pub fn new(state: AppState, room_code: String) -> Self {
+    Self { state, room_code }
   }
 }
 
@@ -87,14 +86,14 @@ impl Tool for ProceedRoomTool {
 
     let handle = {
       let handles = self.state.room_handles.read().await;
-      handles.get(&self.room_id).cloned()
+      handles.get(&self.room_code).cloned()
     };
     let Some(handle) = handle else {
       return Err(ProceedRoomError::HandleMissing);
     };
 
     let event = RoomEvent {
-      room_id: self.room_id,
+      room_code: self.room_code.clone(),
       sequence: handle.allocate_event_sequence(),
       kind: RoomEventKind::LeaderNote,
       agent: Some(LEADER_PROCEED_AGENT.to_string()),
@@ -105,7 +104,7 @@ impl Tool for ProceedRoomTool {
     };
     db::insert_event(&self.state.db, &event).await.report();
 
-    let stream = self.state.ensure_room_stream(self.room_id).await;
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
     stream.send(WsEvent::MessageAdded {
       turn_id: new_turn_id(),
       message: event,
@@ -114,14 +113,14 @@ impl Tool for ProceedRoomTool {
     let updated_at = Utc::now();
     {
       let mut rooms = self.state.rooms.write().await;
-      if let Some(room) = rooms.get_mut(&self.room_id) {
+      if let Some(room) = rooms.get_mut(&self.room_code) {
         room.status = RoomStatus::Active;
         room.updated_at = updated_at;
       }
     }
     db::update_room_status(
       &self.state.db,
-      self.room_id,
+      &self.room_code,
       RoomStatus::Active,
       updated_at,
     )

@@ -1,12 +1,9 @@
 import type { DashboardState, DashboardStore } from "@/app/state";
-import type {
-  ApiType,
-  CreateRoomRequest,
-  ProviderConfig,
-  Room,
-} from "@/app/types";
+import type { CreateRoomRequest, Room } from "@/app/types";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+
+import "./cron-picker.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -15,52 +12,31 @@ declare global {
 }
 
 interface CreateRoomForm {
-  name: string;
   topic: string;
   goal: string;
   instruction: string;
-  background: string;
   autoPauseWhenConverged: boolean;
   resumeScheduleCron: string;
   resumeScheduleLabel: string;
-  low: ProviderConfig;
-  high: ProviderConfig;
+  reportScheduleCron: string;
+  reportScheduleLabel: string;
 }
-
-interface ResumeScheduleOption {
-  label: string;
-  cron: string;
-}
-
-const RESUME_SCHEDULE_OPTIONS: ResumeScheduleOption[] = [
-  { label: "Every 15 minutes", cron: "*/15 * * * *" },
-  { label: "Every 30 minutes", cron: "*/30 * * * *" },
-  { label: "Every hour", cron: "0 * * * *" },
-  { label: "Every 3 hours", cron: "0 */3 * * *" },
-  { label: "Every 6 hours", cron: "0 */6 * * *" },
-  { label: "Daily at 09:00 UTC", cron: "0 9 * * *" },
-  { label: "Daily at 18:00 UTC", cron: "0 18 * * *" },
-];
-
-const EMPTY_PROVIDER: ProviderConfig = {
-  model: "",
-  baseUrl: "",
-  apiKey: null,
-  apiType: "ollama",
-};
 
 const EMPTY_FORM: CreateRoomForm = {
-  name: "",
   topic: "",
   goal: "",
   instruction: "",
-  background: "",
   autoPauseWhenConverged: false,
   resumeScheduleCron: "0 * * * *",
   resumeScheduleLabel: "Every hour",
-  low: { ...EMPTY_PROVIDER },
-  high: { ...EMPTY_PROVIDER },
+  reportScheduleCron: "0 9 * * *",
+  reportScheduleLabel: "Every day at 09:00 UTC",
 };
+
+interface CronChangeDetail {
+  cron: string;
+  label: string;
+}
 
 function readInputValue(target: EventTarget | null): string {
   if (!(target instanceof HTMLElement)) {
@@ -79,7 +55,7 @@ function readInputValue(target: EventTarget | null): string {
  * from a prior aborted creation don't bleed in.
  *
  * Emits `te-room-created` with the new room (parent uses it to navigate
- * to `/room/:slug`) and `te-close` when the user dismisses.
+ * to `/room/:code`) and `te-close` when the user dismisses.
  */
 @customElement("te-create-room-dialog")
 export class CreateRoomDialog extends LitElement {
@@ -125,12 +101,6 @@ export class CreateRoomDialog extends LitElement {
       font-size: 0.85rem;
     }
 
-    .input-affix {
-      color: var(--wa-color-text-quiet);
-      font-size: 0.78rem;
-      padding: 0 0.3rem;
-    }
-
     wa-input,
     wa-textarea,
     wa-select {
@@ -140,33 +110,9 @@ export class CreateRoomDialog extends LitElement {
       box-sizing: border-box;
     }
 
-    .provider-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.6rem;
-    }
-
     .schedule-grid {
       display: grid;
       gap: 0.6rem;
-    }
-
-    fieldset.tier {
-      border: 0;
-      padding: 0;
-      margin: 0;
-      display: grid;
-      gap: 0.4rem;
-    }
-
-    fieldset.tier legend {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.3rem;
-      font-size: 0.78rem;
-      font-weight: 600;
-      padding: 0;
-      margin-bottom: 0.2rem;
     }
 
     .footer-row {
@@ -224,17 +170,11 @@ export class CreateRoomDialog extends LitElement {
           : nothing}
         <div class="form-grid">
           ${this.#renderTextField(
-            "name",
-            "Name",
-            form.name,
-            (v) => this.#patchForm({ name: v }),
-            "Display name shown in the rooms list. Also seeds the URL slug.",
-          )} ${this.#renderTextField(
             "topic",
             "Topic",
             form.topic,
             (v) => this.#patchForm({ topic: v }),
-            "Short subject the debaters argue about. Shown to every persona at the top of every turn.",
+            "Short subject the debaters argue about. Shown to every persona at the top of every turn and used as the room's display label.",
           )} ${this.#renderTextField(
             "goal",
             "Goal",
@@ -246,13 +186,7 @@ export class CreateRoomDialog extends LitElement {
             "Instruction",
             form.instruction,
             (v) => this.#patchForm({ instruction: v }),
-            "Optional. Rules personas must follow (e.g. tone, scope). Appended to every persona prompt.",
-          )} ${this.#renderTextArea(
-            "background",
-            "Background",
-            form.background,
-            (v) => this.#patchForm({ background: v }),
-            "Optional. Context personas should treat as already-known facts. Useful for proprietary data the model cannot search.",
+            "Optional. Rules personas must follow plus any background context to treat as already-known facts. Appended to every persona prompt.",
           )}
           <div class="schedule-grid">
             ${this.#renderBooleanSelect(
@@ -261,20 +195,35 @@ export class CreateRoomDialog extends LitElement {
               form.autoPauseWhenConverged,
               (value) => this.#patchForm({ autoPauseWhenConverged: value }),
               "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
-            )} ${this.#renderScheduleSelect(form)}
-          </div>
-          <div class="provider-grid">
-            ${this.#renderProvider(
-              "low",
-              "Low tier",
-              form.low,
-              (next) => this.#patchForm({ low: next }),
-            )} ${this.#renderProvider(
-              "high",
-              "High tier",
-              form.high,
-              (next) => this.#patchForm({ high: next }),
             )}
+            <div class="form-field">
+              <span class="form-label">Wake-check schedule</span>
+              <te-cron-picker
+                name="wake-check"
+                helperText="Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate."
+                .cron="${form.resumeScheduleCron}"
+                .label="${form.resumeScheduleLabel}"
+                @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
+                  this.#patchForm({
+                    resumeScheduleCron: e.detail.cron,
+                    resumeScheduleLabel: e.detail.label,
+                  })}"
+              ></te-cron-picker>
+            </div>
+            <div class="form-field">
+              <span class="form-label">Report schedule</span>
+              <te-cron-picker
+                name="report"
+                helperText="Times are interpreted in UTC. The leader writes a long-form report on each firing of this schedule."
+                .cron="${form.reportScheduleCron}"
+                .label="${form.reportScheduleLabel}"
+                @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
+                  this.#patchForm({
+                    reportScheduleCron: e.detail.cron,
+                    reportScheduleLabel: e.detail.label,
+                  })}"
+              ></te-cron-picker>
+            </div>
           </div>
         </div>
         <div slot="footer" class="footer-row">
@@ -309,28 +258,6 @@ export class CreateRoomDialog extends LitElement {
         ${this.#renderLabel(key, label, tooltip)}
         <wa-input
           size="small"
-          .value="${value}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-input>
-      </label>
-    `;
-  }
-
-  #renderPasswordField(
-    key: string,
-    label: string,
-    value: string,
-    onChange: (value: string) => void,
-    tooltip?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-input
-          type="password"
-          size="small"
-          password-toggle
           .value="${value}"
           @input="${(e: InputEvent): void =>
             onChange(readInputValue(e.target))}"
@@ -381,83 +308,6 @@ export class CreateRoomDialog extends LitElement {
     `;
   }
 
-  #renderProvider(
-    keyPrefix: string,
-    label: string,
-    config: ProviderConfig,
-    onChange: (config: ProviderConfig) => void,
-  ) {
-    const apiType: ApiType = config.apiType ?? "ollama";
-    const tierTooltip = label === "Low tier"
-      ? "Cheaper / faster model used for every debater turn."
-      : "Higher-quality model used for steering nudges, halt/proceed gates, and reports.";
-    const legendAnchor = `tip-${keyPrefix}-tier`;
-    return html`
-      <fieldset class="tier">
-        <legend>
-          <span>${label}</span>
-          <wa-icon
-            id="${legendAnchor}"
-            class="help-icon"
-            name="circle-question"
-            tabindex="0"
-          ></wa-icon>
-        </legend>
-        <wa-tooltip for="${legendAnchor}" placement="top">
-          ${tierTooltip}
-        </wa-tooltip>
-        <label class="form-field">
-          ${this.#renderLabel(
-            `${keyPrefix}-api-type`,
-            "API type",
-            "Pick OpenRouter for any OpenAI-compatible endpoint (cloud or proxied) or Ollama for the native /api/chat protocol.",
-          )}
-          <wa-select
-            size="small"
-            .value="${apiType}"
-            @change="${(e: Event): void => {
-              const value = readInputValue(e.target);
-              if (value === "ollama" || value === "openRouter") {
-                const patch: Partial<ProviderConfig> = { apiType: value };
-                if (value === "openRouter") {
-                  patch.baseUrl = "https://openrouter.ai/api/v1";
-                }
-                onChange({ ...config, ...patch });
-              }
-            }}"
-          >
-            <wa-option value="ollama">Ollama</wa-option>
-            <wa-option value="openRouter">OpenRouter</wa-option>
-          </wa-select>
-        </label>
-        ${apiType === "ollama"
-          ? this.#renderTextField(
-            `${keyPrefix}-base-url`,
-            "Base URL",
-            config.baseUrl,
-            (value) => onChange({ ...config, baseUrl: value }),
-            "Server root, e.g. http://localhost:11434. Do not include /v1.",
-          )
-          : nothing} ${this.#renderTextField(
-            `${keyPrefix}-model`,
-            "Model",
-            config.model,
-            (model) => onChange({ ...config, model }),
-            "Exact model identifier accepted by the provider, e.g. qwen3:14b or anthropic/claude-sonnet-4-6.",
-          )} ${apiType === "openRouter"
-          ? this.#renderPasswordField(
-            `${keyPrefix}-api-key`,
-            "API key",
-            config.apiKey ?? "",
-            (value) =>
-              onChange({ ...config, apiKey: value === "" ? null : value }),
-            "Required for OpenRouter; leave blank for self-hosted endpoints (Ollama / llama.cpp / vLLM). Stored plaintext locally and redacted in API responses.",
-          )
-          : nothing}
-      </fieldset>
-    `;
-  }
-
   #renderBooleanSelect(
     key: string,
     label: string,
@@ -483,61 +333,22 @@ export class CreateRoomDialog extends LitElement {
     `;
   }
 
-  #renderScheduleSelect(form: CreateRoomForm) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(
-          "wake-check",
-          "Wake-check schedule",
-          "Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate.",
-        )}
-        <wa-select
-          size="small"
-          .value="${form.resumeScheduleCron}"
-          @change="${(e: Event): void => {
-            const selected = readInputValue(e.target);
-            const option = RESUME_SCHEDULE_OPTIONS.find((item) =>
-              item.cron === selected
-            );
-            if (option === undefined) {
-              return;
-            }
-            this.#patchForm({
-              resumeScheduleCron: option.cron,
-              resumeScheduleLabel: option.label,
-            });
-          }}"
-        >
-          ${RESUME_SCHEDULE_OPTIONS.map((option) =>
-            html`
-              <wa-option value="${option.cron}">${option.label}</wa-option>
-            `
-          )}
-        </wa-select>
-      </label>
-    `;
-  }
-
   #patchForm(patch: Partial<CreateRoomForm>): void {
     this.formState = { ...this.formState, ...patch };
   }
 
   async #submit(): Promise<void> {
     const request: CreateRoomRequest = {
-      name: this.formState.name,
       topic: this.formState.topic,
       goal: this.formState.goal,
       instruction: this.formState.instruction === ""
         ? null
         : this.formState.instruction,
-      background: this.formState.background === ""
-        ? null
-        : this.formState.background,
       autoPauseWhenConverged: this.formState.autoPauseWhenConverged,
       resumeScheduleCron: this.formState.resumeScheduleCron,
       resumeScheduleLabel: this.formState.resumeScheduleLabel,
-      low: this.formState.low,
-      high: this.formState.high,
+      reportScheduleCron: this.formState.reportScheduleCron,
+      reportScheduleLabel: this.formState.reportScheduleLabel,
     };
     const created: Room | null = await this.store.createRoom(request);
     if (created !== null) {

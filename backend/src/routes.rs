@@ -4,21 +4,24 @@
 //! [`crate::db`] / [`crate::runtime`], and shape JSON responses. All
 //! orchestration logic lives in [`crate::runtime`].
 //!
-//! The API surface is room-centric:
+//! The API surface is room-centric. Every room is identified by its
+//! readable `code`:
 //!
 //! ```text
 //! GET    /v1/health
+//! GET    /v1/settings
+//! PUT    /v1/settings
 //! GET    /v1/rooms
 //! POST   /v1/rooms
-//! GET    /v1/rooms/:id
-//! PATCH  /v1/rooms/:id
-//! DELETE /v1/rooms/:id
-//! POST   /v1/rooms/:id/pause
-//! POST   /v1/rooms/:id/resume
-//! POST   /v1/rooms/:id/messages
-//! GET    /v1/rooms/:id/reports
-//! GET    /v1/rooms/:id/reports/:seq
-//! GET    /v1/rooms/:id/stream    (WebSocket)
+//! GET    /v1/rooms/:code
+//! PATCH  /v1/rooms/:code
+//! DELETE /v1/rooms/:code
+//! POST   /v1/rooms/:code/pause
+//! POST   /v1/rooms/:code/resume
+//! POST   /v1/rooms/:code/messages
+//! GET    /v1/rooms/:code/reports
+//! GET    /v1/rooms/:code/reports/:seq
+//! GET    /v1/rooms/:code/stream    (WebSocket)
 //! ```
 
 use crate::app_state::AppState;
@@ -26,9 +29,9 @@ use crate::config::room_defaults;
 use crate::db;
 use crate::error::ReportError;
 use crate::models::{
-  CreateMessageRequest, CreateRoomRequest, ProviderConfig,
+  AppSettings, CreateMessageRequest, CreateRoomRequest, ProviderConfig,
   REDACTED_API_KEY_SENTINEL, Room, RoomEvent, RoomEventKind, RoomStatus,
-  UpdateRoomRequest,
+  UpdateAppSettingsRequest, UpdateRoomRequest,
 };
 use crate::runtime;
 use crate::streaming::{RoomReceiver, WsEvent, new_turn_id};
@@ -40,27 +43,33 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use cron::Schedule;
+use rand::Rng;
 use serde_json::json;
-use slug::slugify;
+use std::str::FromStr;
 use tower_http::services::{ServeDir, ServeFile};
-use uuid::Uuid;
 
-const SLUG_MAX_ATTEMPTS: u8 = 64;
+/// Maximum number of code generation attempts before giving up. Collisions
+/// with 26^10 ≈ 1.4e14 possibilities are vanishingly rare even with thousands
+/// of rooms; this cap exists to bound the loop, not to handle real
+/// contention.
+const CODE_MAX_ATTEMPTS: u8 = 32;
 
 pub fn create_router(state: AppState) -> Router {
   Router::new()
     .route("/v1/health", get(health_check))
+    .route("/v1/settings", get(get_settings).put(update_settings))
     .route("/v1/rooms", get(list_rooms).post(create_room))
     .route(
-      "/v1/rooms/:room_id",
+      "/v1/rooms/:code",
       get(get_room).patch(update_room).delete(delete_room),
     )
-    .route("/v1/rooms/:room_id/pause", post(pause_room))
-    .route("/v1/rooms/:room_id/resume", post(resume_room))
-    .route("/v1/rooms/:room_id/messages", post(post_user_message))
-    .route("/v1/rooms/:room_id/reports", get(list_reports))
-    .route("/v1/rooms/:room_id/reports/:sequence", get(get_report))
-    .route("/v1/rooms/:room_id/stream", get(stream_room_events))
+    .route("/v1/rooms/:code/pause", post(pause_room))
+    .route("/v1/rooms/:code/resume", post(resume_room))
+    .route("/v1/rooms/:code/messages", post(post_user_message))
+    .route("/v1/rooms/:code/reports", get(list_reports))
+    .route("/v1/rooms/:code/reports/:sequence", get(get_report))
+    .route("/v1/rooms/:code/stream", get(stream_room_events))
     .fallback_service(
       ServeDir::new("dist")
         .not_found_service(ServeFile::new("dist/index.html")),
@@ -74,6 +83,54 @@ async fn health_check() -> impl IntoResponse {
   (StatusCode::OK, Json(json!({"status": "ok"})))
 }
 
+async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
+  let settings = state.app_settings.read().await;
+  (StatusCode::OK, Json(json!({"settings": settings.view()}))).into_response()
+}
+
+async fn update_settings(
+  State(state): State<AppState>,
+  Json(payload): Json<UpdateAppSettingsRequest>,
+) -> impl IntoResponse {
+  if let Some(value) = payload.low.as_ref()
+    && let Err(error) = validate_provider_config(value)
+  {
+    return bad_request("low", &error);
+  }
+  if let Some(value) = payload.high.as_ref()
+    && let Err(error) = validate_provider_config(value)
+  {
+    return bad_request("high", &error);
+  }
+
+  let mut updated: AppSettings = state.app_settings.read().await.clone();
+  if let Some(mut value) = payload.low {
+    preserve_existing_api_key_if_redacted(&mut value, &updated.low);
+    updated.low = value;
+  }
+  if let Some(mut value) = payload.high {
+    preserve_existing_api_key_if_redacted(&mut value, &updated.high);
+    updated.high = value;
+  }
+  updated.updated_at = Utc::now();
+
+  if let Err(error) = db::update_app_settings(&state.db, &updated).await {
+    tracing::warn!(%error, "failed to persist app settings");
+    return internal("failed to persist settings");
+  }
+  *state.app_settings.write().await = updated.clone();
+
+  // Re-tick every active room so any in-flight wait wakes up and the next
+  // LLM call uses the new credentials.
+  let handles = state.room_handles.read().await;
+  for handle in handles.values() {
+    handle.notify_config_changed();
+  }
+  drop(handles);
+
+  (StatusCode::OK, Json(json!({"settings": updated.view()}))).into_response()
+}
+
 async fn list_rooms(State(state): State<AppState>) -> impl IntoResponse {
   let rooms = state.rooms.read().await;
   let mut views: Vec<_> = rooms.values().map(Room::view).collect();
@@ -85,44 +142,41 @@ async fn create_room(
   State(state): State<AppState>,
   Json(payload): Json<CreateRoomRequest>,
 ) -> impl IntoResponse {
-  if let Err(error) = validate_provider_config(&payload.low) {
-    return bad_request("low", &error);
-  }
-  if let Err(error) = validate_provider_config(&payload.high) {
-    return bad_request("high", &error);
-  }
   if let Some(cron) = payload.resume_schedule_cron.as_deref()
-    && let Err(error) = validate_supported_resume_cron(cron)
+    && let Err(error) = validate_cron(cron)
   {
     return bad_request("resumeScheduleCron", &error);
   }
-
-  let name = payload.name.trim();
-  if name.is_empty() {
-    return bad_request("name", "must not be empty");
+  if let Some(cron) = payload.report_schedule_cron.as_deref()
+    && let Err(error) = validate_cron(cron)
+  {
+    return bad_request("reportScheduleCron", &error);
   }
 
-  let slug = match unique_slug(&state, name, None).await {
+  let topic = payload.topic.trim();
+  if topic.is_empty() {
+    return bad_request("topic", "must not be empty");
+  }
+  let goal = payload.goal.trim();
+  if goal.is_empty() {
+    return bad_request("goal", "must not be empty");
+  }
+
+  let code = match unique_code(&state).await {
     Ok(value) => value,
     Err(error) => {
-      tracing::warn!(%error, "failed to allocate slug");
-      return internal("could not allocate slug");
+      tracing::warn!(%error, "failed to allocate room code");
+      return internal("could not allocate room code");
     }
   };
 
   let now = Utc::now();
   let room = Room {
-    id: Uuid::new_v4(),
-    name: name.to_string(),
-    slug,
-    topic: payload.topic.trim().to_string(),
-    goal: payload.goal.trim().to_string(),
+    code,
+    topic: topic.to_string(),
+    goal: goal.to_string(),
     instruction: payload
       .instruction
-      .map(|s| s.trim().to_string())
-      .filter(|s| !s.is_empty()),
-    background: payload
-      .background
       .map(|s| s.trim().to_string())
       .filter(|s| !s.is_empty()),
     status: RoomStatus::Active,
@@ -132,9 +186,16 @@ async fn create_room(
     steering_interval_seconds: payload
       .steering_interval_seconds
       .unwrap_or(room_defaults::STEERING_INTERVAL_SECONDS),
-    report_interval_seconds: payload
-      .report_interval_seconds
-      .unwrap_or(room_defaults::REPORT_INTERVAL_SECONDS),
+    report_schedule_cron: payload
+      .report_schedule_cron
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+      .unwrap_or_else(|| room_defaults::REPORT_SCHEDULE_CRON.to_string()),
+    report_schedule_label: payload
+      .report_schedule_label
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+      .unwrap_or_else(|| room_defaults::REPORT_SCHEDULE_LABEL.to_string()),
     python_timeout_seconds: payload
       .python_timeout_seconds
       .unwrap_or(room_defaults::PYTHON_TIMEOUT_SECONDS),
@@ -151,8 +212,6 @@ async fn create_room(
       .map(|s| s.trim().to_string())
       .filter(|s| !s.is_empty())
       .unwrap_or_else(|| room_defaults::RESUME_SCHEDULE_LABEL.to_string()),
-    low: payload.low,
-    high: payload.high,
     created_at: now,
     updated_at: now,
   };
@@ -172,11 +231,11 @@ async fn create_room(
 }
 
 async fn get_room(
-  Path(room_id): Path<Uuid>,
+  Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
   let rooms = state.rooms.read().await;
-  match rooms.get(&room_id) {
+  match rooms.get(&code) {
     Some(room) => {
       (StatusCode::OK, Json(json!({"room": room.view()}))).into_response()
     }
@@ -185,63 +244,45 @@ async fn get_room(
 }
 
 async fn update_room(
-  Path(room_id): Path<Uuid>,
+  Path(code): Path<String>,
   State(state): State<AppState>,
   Json(payload): Json<UpdateRoomRequest>,
 ) -> impl IntoResponse {
   let mut updated = {
     let rooms = state.rooms.read().await;
-    match rooms.get(&room_id) {
+    match rooms.get(&code) {
       Some(room) => room.clone(),
       None => return not_found("room"),
     }
   };
 
-  if let Some(value) = payload.low.as_ref()
-    && let Err(error) = validate_provider_config(value)
-  {
-    return bad_request("low", &error);
-  }
-  if let Some(value) = payload.high.as_ref()
-    && let Err(error) = validate_provider_config(value)
-  {
-    return bad_request("high", &error);
-  }
   if let Some(value) = payload.resume_schedule_cron.as_deref()
-    && let Err(error) = validate_supported_resume_cron(value)
+    && let Err(error) = validate_cron(value)
   {
     return bad_request("resumeScheduleCron", &error);
   }
+  if let Some(value) = payload.report_schedule_cron.as_deref()
+    && let Err(error) = validate_cron(value)
+  {
+    return bad_request("reportScheduleCron", &error);
+  }
 
-  if let Some(value) = payload.name {
+  if let Some(value) = payload.topic {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-      return bad_request("name", "must not be empty");
+      return bad_request("topic", "must not be empty");
     }
-    if trimmed != updated.name {
-      updated.name = trimmed.to_string();
-      match unique_slug(&state, trimmed, Some(room_id)).await {
-        Ok(slug) => updated.slug = slug,
-        Err(error) => {
-          tracing::warn!(%error, "failed to allocate slug");
-          return internal("could not allocate slug");
-        }
-      }
-    }
-  }
-  if let Some(value) = payload.topic {
-    updated.topic = value.trim().to_string();
+    updated.topic = trimmed.to_string();
   }
   if let Some(value) = payload.goal {
-    updated.goal = value.trim().to_string();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+      return bad_request("goal", "must not be empty");
+    }
+    updated.goal = trimmed.to_string();
   }
   if let Some(value) = payload.instruction {
     updated.instruction = value
-      .map(|s| s.trim().to_string())
-      .filter(|s| !s.is_empty());
-  }
-  if let Some(value) = payload.background {
-    updated.background = value
       .map(|s| s.trim().to_string())
       .filter(|s| !s.is_empty());
   }
@@ -251,8 +292,17 @@ async fn update_room(
   if let Some(value) = payload.steering_interval_seconds {
     updated.steering_interval_seconds = value;
   }
-  if let Some(value) = payload.report_interval_seconds {
-    updated.report_interval_seconds = value;
+  if let Some(value) = payload.report_schedule_cron {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+      updated.report_schedule_cron = trimmed.to_string();
+    }
+  }
+  if let Some(value) = payload.report_schedule_label {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+      updated.report_schedule_label = trimmed.to_string();
+    }
   }
   if let Some(value) = payload.python_timeout_seconds {
     updated.python_timeout_seconds = value;
@@ -272,14 +322,6 @@ async fn update_room(
       updated.resume_schedule_label = trimmed.to_string();
     }
   }
-  if let Some(mut value) = payload.low {
-    preserve_existing_api_key_if_redacted(&mut value, &updated.low);
-    updated.low = value;
-  }
-  if let Some(mut value) = payload.high {
-    preserve_existing_api_key_if_redacted(&mut value, &updated.high);
-    updated.high = value;
-  }
   updated.updated_at = Utc::now();
 
   if let Err(error) = db::update_room(&state.db, &updated).await {
@@ -289,9 +331,9 @@ async fn update_room(
 
   {
     let mut rooms = state.rooms.write().await;
-    rooms.insert(room_id, updated.clone());
+    rooms.insert(updated.code.clone(), updated.clone());
   }
-  if let Some(handle) = state.room_handles.read().await.get(&room_id) {
+  if let Some(handle) = state.room_handles.read().await.get(&updated.code) {
     handle.notify_config_changed();
   }
 
@@ -299,54 +341,54 @@ async fn update_room(
 }
 
 async fn delete_room(
-  Path(room_id): Path<Uuid>,
+  Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
   let handle = {
     let handles = state.room_handles.read().await;
-    handles.get(&room_id).cloned()
+    handles.get(&code).cloned()
   };
   if let Some(handle) = handle {
     handle.request_stop();
   }
-  if let Err(error) = db::delete_room(&state.db, room_id).await {
+  if let Err(error) = db::delete_room(&state.db, &code).await {
     tracing::warn!(%error, "failed to delete room from db");
     return internal("failed to delete room");
   }
-  state.forget_room(room_id).await;
+  state.forget_room(&code).await;
   (StatusCode::NO_CONTENT, Json(json!({}))).into_response()
 }
 
 async fn pause_room(
-  Path(room_id): Path<Uuid>,
+  Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  set_room_status(state, room_id, RoomStatus::Paused).await
+  set_room_status(state, &code, RoomStatus::Paused).await
 }
 
 async fn resume_room(
-  Path(room_id): Path<Uuid>,
+  Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  set_room_status(state, room_id, RoomStatus::Active).await
+  set_room_status(state, &code, RoomStatus::Active).await
 }
 
 async fn set_room_status(
   state: AppState,
-  room_id: Uuid,
+  room_code: &str,
   status: RoomStatus,
 ) -> axum::response::Response {
   let updated_at = Utc::now();
   {
     let mut rooms = state.rooms.write().await;
-    let Some(room) = rooms.get_mut(&room_id) else {
+    let Some(room) = rooms.get_mut(room_code) else {
       return not_found("room");
     };
     room.status = status;
     room.updated_at = updated_at;
   }
   if let Err(error) =
-    db::update_room_status(&state.db, room_id, status, updated_at).await
+    db::update_room_status(&state.db, room_code, status, updated_at).await
   {
     tracing::warn!(%error, "failed to persist status change");
     return internal("failed to update status");
@@ -354,7 +396,7 @@ async fn set_room_status(
 
   let handle = {
     let handles = state.room_handles.read().await;
-    handles.get(&room_id).cloned()
+    handles.get(room_code).cloned()
   };
   if let Some(handle) = handle {
     match status {
@@ -364,7 +406,7 @@ async fn set_room_status(
     }
   }
 
-  let stream = state.ensure_room_stream(room_id).await;
+  let stream = state.ensure_room_stream(room_code).await;
   stream.send(WsEvent::RoomStatus { status });
 
   (StatusCode::OK, Json(json!({"status": status.as_str()}))).into_response()
@@ -378,7 +420,7 @@ const USER_AGENT_NAME: &str = "user";
 /// room's lifecycle state — the orchestrator will see it on its next turn
 /// when the room resumes (or immediately, if active).
 async fn post_user_message(
-  Path(room_id): Path<Uuid>,
+  Path(code): Path<String>,
   State(state): State<AppState>,
   Json(payload): Json<CreateMessageRequest>,
 ) -> impl IntoResponse {
@@ -387,20 +429,20 @@ async fn post_user_message(
     return bad_request("content", "must not be empty");
   }
 
-  if !state.rooms.read().await.contains_key(&room_id) {
+  if !state.rooms.read().await.contains_key(&code) {
     return not_found("room");
   }
 
   let handle = {
     let handles = state.room_handles.read().await;
-    match handles.get(&room_id).cloned() {
+    match handles.get(&code).cloned() {
       Some(handle) => handle,
       None => return not_found("room"),
     }
   };
 
   let event = RoomEvent {
-    room_id,
+    room_code: code.clone(),
     sequence: handle.allocate_event_sequence(),
     kind: RoomEventKind::UserChat,
     agent: Some(USER_AGENT_NAME.to_string()),
@@ -415,7 +457,7 @@ async fn post_user_message(
     return internal("failed to persist message");
   }
 
-  let stream = state.ensure_room_stream(room_id).await;
+  let stream = state.ensure_room_stream(&code).await;
   stream.send(WsEvent::MessageAdded {
     turn_id: new_turn_id(),
     message: event.clone(),
@@ -425,10 +467,10 @@ async fn post_user_message(
 }
 
 async fn list_reports(
-  Path(room_id): Path<Uuid>,
+  Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  match db::load_room_reports(&state.db, room_id).await {
+  match db::load_room_reports(&state.db, &code).await {
     Ok(reports) => {
       (StatusCode::OK, Json(json!({"reports": reports}))).into_response()
     }
@@ -440,10 +482,10 @@ async fn list_reports(
 }
 
 async fn get_report(
-  Path((room_id, sequence)): Path<(Uuid, u64)>,
+  Path((code, sequence)): Path<(String, u64)>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  match db::load_room_report(&state.db, room_id, sequence).await {
+  match db::load_room_report(&state.db, &code, sequence).await {
     Ok(Some(report)) => {
       (StatusCode::OK, Json(json!({"report": report}))).into_response()
     }
@@ -458,28 +500,28 @@ async fn get_report(
 // -- WebSocket -------------------------------------------------------------
 
 async fn stream_room_events(
-  Path(room_id): Path<Uuid>,
+  Path(code): Path<String>,
   State(state): State<AppState>,
   ws: WebSocketUpgrade,
 ) -> axum::response::Response {
-  if state.rooms.read().await.get(&room_id).is_none() {
+  if state.rooms.read().await.get(&code).is_none() {
     return not_found("room");
   }
-  let stream = state.ensure_room_stream(room_id).await;
+  let stream = state.ensure_room_stream(&code).await;
   let receiver = stream.subscribe();
-  ws.on_upgrade(move |socket| handle_socket(socket, state, room_id, receiver))
+  ws.on_upgrade(move |socket| handle_socket(socket, state, code, receiver))
 }
 
 /// Builds the snapshot frame sent right after a successful upgrade so the
 /// client starts from the persisted state. Returns `None` if the room was
 /// deleted between connection acceptance and snapshot construction.
-async fn build_snapshot(state: &AppState, room_id: Uuid) -> Option<WsEvent> {
-  let room_view = state.rooms.read().await.get(&room_id).map(Room::view)?;
-  let messages = db::load_room_events(&state.db, room_id)
+async fn build_snapshot(state: &AppState, room_code: &str) -> Option<WsEvent> {
+  let room_view = state.rooms.read().await.get(room_code).map(Room::view)?;
+  let messages = db::load_room_events(&state.db, room_code)
     .await
     .report()
     .unwrap_or_default();
-  let reports = db::load_room_reports(&state.db, room_id)
+  let reports = db::load_room_reports(&state.db, room_code)
     .await
     .report()
     .unwrap_or_default();
@@ -493,10 +535,10 @@ async fn build_snapshot(state: &AppState, room_id: Uuid) -> Option<WsEvent> {
 async fn handle_socket(
   mut socket: WebSocket,
   state: AppState,
-  room_id: Uuid,
+  room_code: String,
   mut receiver: RoomReceiver,
 ) {
-  let Some(initial) = build_snapshot(&state, room_id).await else {
+  let Some(initial) = build_snapshot(&state, &room_code).await else {
     return;
   };
   if !send_event(&mut socket, &initial).await {
@@ -564,7 +606,7 @@ fn preserve_existing_api_key_if_redacted(
   }
 }
 
-fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
+pub fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
   if config.model.trim().is_empty() {
     return Err("model is required".to_string());
   }
@@ -584,55 +626,59 @@ fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
   Ok(())
 }
 
-fn validate_supported_resume_cron(cron: &str) -> Result<(), String> {
-  let trimmed = cron.trim();
+/// Validates a 5-field cron expression by parsing it with the `cron` crate.
+/// The crate accepts either 5- or 6-field forms; we constrain to 5 fields
+/// (no seconds) to match the frontend picker.
+fn validate_cron(expression: &str) -> Result<(), String> {
+  let trimmed = expression.trim();
   if trimmed.is_empty() {
     return Err("must not be empty".to_string());
   }
-  if matches!(trimmed, "*/15 * * * *" | "*/30 * * * *" | "0 * * * *") {
-    return Ok(());
+  if trimmed.split_whitespace().count() != 5 {
+    return Err("expected 5 fields: minute hour day month weekday".to_string());
   }
-  if matches!(trimmed, "0 */3 * * *" | "0 */6 * * *") {
-    return Ok(());
-  }
-  // Also accept strict daily schedule `M H * * *`.
-  let parts: Vec<&str> = trimmed.split_whitespace().collect();
-  if parts.len() != 5 {
-    return Err("unsupported cron expression".to_string());
-  }
-  let minute = parts[0].parse::<u32>().ok();
-  let hour = parts[1].parse::<u32>().ok();
-  if let (Some(m), Some(h)) = (minute, hour)
-    && m < 60
-    && h < 24
-    && parts[2] == "*"
-    && parts[3] == "*"
-    && parts[4] == "*"
-  {
-    return Ok(());
-  }
-  Err("unsupported cron expression".to_string())
+  // The `cron` crate expects a 7-field schedule (sec min hour dom mon dow
+  // year). Prefix a `0 ` for seconds and append `*` for year to map a
+  // 5-field cron into the schedule the parser can accept.
+  let extended = format!("0 {trimmed} *");
+  Schedule::from_str(&extended).map_err(|e| e.to_string())?;
+  Ok(())
 }
 
-async fn unique_slug(
-  state: &AppState,
-  name: &str,
-  exclude: Option<Uuid>,
-) -> Result<String> {
-  let base = slugify(name);
-  if base.is_empty() {
-    return Ok(format!("room-{}", Uuid::new_v4().simple()));
-  }
-  if !db::slug_taken(&state.db, &base, exclude).await? {
-    return Ok(base);
-  }
-  for attempt in 1..SLUG_MAX_ATTEMPTS {
-    let candidate = format!("{base}-{attempt}");
-    if !db::slug_taken(&state.db, &candidate, exclude).await? {
+async fn unique_code(state: &AppState) -> Result<String> {
+  for _ in 0..CODE_MAX_ATTEMPTS {
+    let candidate = generate_room_code();
+    if !db::code_taken(&state.db, &candidate).await? {
       return Ok(candidate);
     }
   }
-  Ok(format!("{base}-{}", Uuid::new_v4().simple()))
+  Err(anyhow::anyhow!(
+    "exhausted {} room code attempts",
+    CODE_MAX_ATTEMPTS
+  ))
+}
+
+/// Generates a Google-Meet style 10-letter room code: `xxx-xxxx-xxx`.
+fn generate_room_code() -> String {
+  let mut rng = rand::thread_rng();
+  let mut s = String::with_capacity(12);
+  for _ in 0..3 {
+    s.push(random_letter(&mut rng));
+  }
+  s.push('-');
+  for _ in 0..4 {
+    s.push(random_letter(&mut rng));
+  }
+  s.push('-');
+  for _ in 0..3 {
+    s.push(random_letter(&mut rng));
+  }
+  s
+}
+
+fn random_letter(rng: &mut rand::rngs::ThreadRng) -> char {
+  let n: u8 = rng.gen_range(0..26);
+  (b'a' + n) as char
 }
 
 fn bad_request(field: &str, message: &str) -> axum::response::Response {

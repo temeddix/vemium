@@ -6,21 +6,17 @@
 //!
 //! - `db`: connection pool to SQLite (durable storage).
 //! - `data_root`: filesystem root for room workspaces.
-//! - `rooms`: every loaded [`Room`] keyed by id.
+//! - `app_settings`: process-wide tier provider configuration. Saved via
+//!   the home-screen Settings page; read by the orchestrator on every LLM
+//!   call so a key rotation takes effect at the next turn.
+//! - `rooms`: every loaded [`Room`] keyed by its readable code.
 //! - `room_streams`: a [`RoomStream`] per room, used to fan out [`WsEvent`]s
 //!   to any number of WebSocket subscribers via per-subscriber priority
 //!   lanes (lifecycle vs. token).
 //! - `room_handles`: a [`RoomHandle`] per room that owns the orchestrator's
 //!   pause/stop signals.
-//!
-//! Access patterns:
-//!
-//! - The orchestrator reads/writes `rooms[id]` and `room_handles[id]`.
-//! - HTTP handlers read `rooms`, push events through `room_streams`, and
-//!   toggle the handle's pause flag.
-//! - WebSocket handlers subscribe to a [`RoomStream`] for live events.
 
-use crate::models::Room;
+use crate::models::{AppSettings, Room};
 use crate::streaming::RoomStream;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -28,7 +24,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Notify, RwLock};
-use uuid::Uuid;
 
 /// Per-room control plane shared between the orchestrator and the HTTP API.
 ///
@@ -137,16 +132,22 @@ impl RoomHandle {
 pub struct AppState {
   pub db: SqlitePool,
   pub data_root: Arc<PathBuf>,
-  pub rooms: Arc<RwLock<HashMap<Uuid, Room>>>,
-  pub room_streams: Arc<RwLock<HashMap<Uuid, Arc<RoomStream>>>>,
-  pub room_handles: Arc<RwLock<HashMap<Uuid, RoomHandle>>>,
+  pub app_settings: Arc<RwLock<AppSettings>>,
+  pub rooms: Arc<RwLock<HashMap<String, Room>>>,
+  pub room_streams: Arc<RwLock<HashMap<String, Arc<RoomStream>>>>,
+  pub room_handles: Arc<RwLock<HashMap<String, RoomHandle>>>,
 }
 
 impl AppState {
-  pub fn new(db: SqlitePool, data_root: PathBuf) -> Self {
+  pub fn new(
+    db: SqlitePool,
+    data_root: PathBuf,
+    app_settings: AppSettings,
+  ) -> Self {
     Self {
       db,
       data_root: Arc::new(data_root),
+      app_settings: Arc::new(RwLock::new(app_settings)),
       rooms: Arc::new(RwLock::new(HashMap::new())),
       room_streams: Arc::new(RwLock::new(HashMap::new())),
       room_handles: Arc::new(RwLock::new(HashMap::new())),
@@ -156,33 +157,33 @@ impl AppState {
   /// Returns the room's [`RoomStream`], creating it on first access.
   /// Subscribers persist across orchestrator restarts because the stream
   /// lives in [`AppState`] rather than in the orchestrator task.
-  pub async fn ensure_room_stream(&self, room_id: Uuid) -> Arc<RoomStream> {
+  pub async fn ensure_room_stream(&self, room_code: &str) -> Arc<RoomStream> {
     {
       let streams = self.room_streams.read().await;
-      if let Some(stream) = streams.get(&room_id) {
+      if let Some(stream) = streams.get(room_code) {
         return stream.clone();
       }
     }
     let mut streams = self.room_streams.write().await;
     streams
-      .entry(room_id)
+      .entry(room_code.to_string())
       .or_insert_with(|| Arc::new(RoomStream::new()))
       .clone()
   }
 
   /// Tear down all in-memory bookkeeping for a room. Used after delete.
-  pub async fn forget_room(&self, room_id: Uuid) {
+  pub async fn forget_room(&self, room_code: &str) {
     {
       let mut rooms = self.rooms.write().await;
-      rooms.remove(&room_id);
+      rooms.remove(room_code);
     }
     {
       let mut streams = self.room_streams.write().await;
-      streams.remove(&room_id);
+      streams.remove(room_code);
     }
     {
       let mut handles = self.room_handles.write().await;
-      handles.remove(&room_id);
+      handles.remove(room_code);
     }
   }
 }

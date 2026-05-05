@@ -46,7 +46,6 @@ use crate::tools::workspace::{
   WriteFileTool,
 };
 use crate::workspace::RoomWorkspace;
-use uuid::Uuid;
 
 /// Tool-call iteration safety net. The LLM may keep requesting tools forever
 /// in a degenerate case; this caps a single turn at a finite number of tool
@@ -84,7 +83,7 @@ pub struct DebateTurnInputs {
   /// App state passed through so per-turn tools that emit `InlineNote` can
   /// reach the room's WebSocket stream.
   pub state: AppState,
-  pub room_id: Uuid,
+  pub room_code: String,
   /// Author label embedded into inline notes (the persona's name).
   pub author: String,
 }
@@ -408,7 +407,7 @@ where
       inputs.workspace.clone(),
       inputs.runner,
       inputs.state,
-      inputs.room_id,
+      inputs.room_code,
       inputs.author,
     ))
     .tool(ListSubjectFoldersTool::new(inputs.workspace.clone()))
