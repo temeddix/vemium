@@ -14,6 +14,7 @@ mod db;
 mod error;
 mod llm;
 mod models;
+mod provider_models;
 mod python_runner;
 mod routes;
 mod runtime;

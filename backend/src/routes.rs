@@ -11,6 +11,7 @@
 //! GET    /v1/health
 //! GET    /v1/settings
 //! PUT    /v1/settings
+//! POST   /v1/providers/:tier/models
 //! GET    /v1/rooms
 //! POST   /v1/rooms
 //! GET    /v1/rooms/:code
@@ -34,6 +35,7 @@ use crate::models::{
   ProviderConfig, REDACTED_API_KEY_SENTINEL, Room, RoomEvent, RoomEventKind,
   RoomStatus, UpdateAppSettingsRequest, UpdateRoomRequest,
 };
+use crate::provider_models;
 use crate::runtime;
 use crate::streaming::{RoomReceiver, WsEvent, new_turn_id};
 use anyhow::Result;
@@ -60,6 +62,7 @@ pub fn create_router(state: AppState) -> Router {
   Router::new()
     .route("/v1/health", get(health_check))
     .route("/v1/settings", get(get_settings).put(update_settings))
+    .route("/v1/providers/:tier/models", post(list_provider_models))
     .route("/v1/rooms", get(list_rooms).post(create_room))
     .route(
       "/v1/rooms/:code",
@@ -131,6 +134,57 @@ async fn update_settings(
   drop(handles);
 
   (StatusCode::OK, Json(json!({"settings": updated.view()}))).into_response()
+}
+
+/// Probes the provider configured by `payload` and returns the model
+/// identifiers it advertises. The settings page calls this with the form's
+/// in-progress values so the user can pick from the list before saving;
+/// `tier` selects which stored API key the redaction sentinel `***` falls
+/// back to when the form hasn't retyped it.
+async fn list_provider_models(
+  Path(tier): Path<String>,
+  State(state): State<AppState>,
+  Json(mut payload): Json<ProviderConfig>,
+) -> impl IntoResponse {
+  let existing = {
+    let settings = state.app_settings.read().await;
+    match tier.as_str() {
+      "low" => settings.low.clone(),
+      "high" => settings.high.clone(),
+      _ => return bad_request("tier", "must be 'low' or 'high'"),
+    }
+  };
+  preserve_existing_api_key_if_redacted(&mut payload, &existing);
+
+  if payload.base_url.trim().is_empty() {
+    return bad_request("baseUrl", "must not be empty");
+  }
+  if matches!(payload.api_type, crate::models::ApiType::OpenRouter)
+    && payload
+      .api_key
+      .as_deref()
+      .map(str::trim)
+      .filter(|k| !k.is_empty())
+      .is_none()
+  {
+    return bad_request("apiKey", "is required for OpenRouter");
+  }
+
+  match provider_models::fetch_provider_models(&payload).await {
+    Ok(models) => {
+      let entries: Vec<_> =
+        models.into_iter().map(|id| json!({ "id": id })).collect();
+      (StatusCode::OK, Json(json!({ "models": entries }))).into_response()
+    }
+    Err(error) => {
+      tracing::info!(%error, "failed to list provider models");
+      (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({"error": error.to_string()})),
+      )
+        .into_response()
+    }
+  }
 }
 
 async fn list_rooms(State(state): State<AppState>) -> impl IntoResponse {
