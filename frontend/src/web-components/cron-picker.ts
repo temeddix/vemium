@@ -1,4 +1,4 @@
-import { css, html, LitElement, nothing } from "lit";
+import { css, html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 declare global {
@@ -44,10 +44,6 @@ export class CronPicker extends LitElement {
   @property({ type: String })
   accessor label = "Every hour";
 
-  /** Tooltip / helper text rendered above the picker. */
-  @property({ type: String })
-  accessor helperText = "";
-
   /** Component-id-style key used to scope the raw-input element id. */
   @property({ type: String })
   accessor name = "cron";
@@ -59,11 +55,6 @@ export class CronPicker extends LitElement {
     .wrapper {
       display: grid;
       gap: 0.4rem;
-    }
-
-    .helper {
-      font-size: 0.78rem;
-      color: var(--wa-color-text-quiet);
     }
 
     .chips {
@@ -119,11 +110,6 @@ export class CronPicker extends LitElement {
     const description = describeCron(currentValue);
     return html`
       <div class="wrapper">
-        ${this.helperText !== ""
-          ? html`
-            <span class="helper">${this.helperText}</span>
-          `
-          : nothing}
         <div class="chips">
           ${PRESETS.map((preset) => this.#renderChip(preset))}
         </div>

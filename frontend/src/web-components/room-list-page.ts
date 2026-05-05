@@ -5,7 +5,9 @@ import { formatTimestamp, roomStatusToText } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
+import "./clone-room-dialog.ts";
 import "./create-room-dialog.ts";
 
 declare global {
@@ -31,8 +33,11 @@ export class RoomListPage extends LitElement {
   @state()
   private accessor dashboardState: DashboardState | null = null;
 
-  @state()
-  private accessor showCreateDialog = false;
+  #createDialogRef: Ref<HTMLElementTagNameMap["te-create-room-dialog"]> =
+    createRef();
+
+  #cloneDialogRef: Ref<HTMLElementTagNameMap["te-clone-room-dialog"]> =
+    createRef();
 
   #unsubscribe: (() => void) | null = null;
 
@@ -91,19 +96,32 @@ export class RoomListPage extends LitElement {
     }
 
     .room-card {
+      position: relative;
       display: grid;
       gap: 0.4rem;
       padding: 0.85rem 1rem;
       border-radius: 0.6rem;
       background: var(--wa-color-surface-raised);
       border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+    }
+
+    .room-card:hover {
+      border-color: var(--wa-color-brand-border-normal);
+    }
+
+    .room-card-link {
+      display: grid;
+      gap: 0.4rem;
       text-decoration: none;
       color: inherit;
       cursor: pointer;
     }
 
-    .room-card:hover {
-      border-color: var(--wa-color-brand-border-normal);
+    .room-card-menu {
+      position: absolute;
+      top: 0.3rem;
+      right: 0.3rem;
+      display: inline-flex;
     }
 
     .room-topic {
@@ -120,6 +138,13 @@ export class RoomListPage extends LitElement {
       font-size: 0.72rem;
       color: var(--wa-color-text-quiet);
       font-family: var(--wa-font-family-code, ui-monospace, monospace);
+    }
+
+    .room-topic-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      padding-right: 1.6rem;
     }
 
     .room-meta {
@@ -192,11 +217,15 @@ export class RoomListPage extends LitElement {
           `
           : this.#renderRoomGrid(rooms)}
         <te-create-room-dialog
+          ${ref(this.#createDialogRef)}
           .store="${this.store}"
-          ?open="${this.showCreateDialog}"
-          @te-close="${this.#closeCreate}"
           @te-room-created="${this.#onRoomCreated}"
         ></te-create-room-dialog>
+        <te-clone-room-dialog
+          ${ref(this.#cloneDialogRef)}
+          .store="${this.store}"
+          @te-cloned="${this.#onRoomCloned}"
+        ></te-clone-room-dialog>
       </div>
     `;
   }
@@ -206,15 +235,17 @@ export class RoomListPage extends LitElement {
       <ul class="room-grid">
         ${rooms.map((room) =>
           html`
-            <li>
+            <li class="room-card">
               <a
-                class="room-card"
+                class="room-card-link"
                 href="/room/${room.code}"
                 @click="${(e: MouseEvent): void => this.#onRoomClick(e, room)}"
               >
                 ${room.topic !== ""
                   ? html`
-                    <span class="room-topic">${room.topic}</span>
+                    <span class="room-topic-row">
+                      <span class="room-topic">${room.topic}</span>
+                    </span>
                   `
                   : nothing}
                 <span class="room-code">${room.code}</span>
@@ -225,6 +256,23 @@ export class RoomListPage extends LitElement {
                   ${this.#renderStatusBadge(room.status)}
                 </span>
               </a>
+              <span class="room-card-menu">
+                <wa-dropdown placement="bottom-end">
+                  <wa-button
+                    slot="trigger"
+                    size="small"
+                    appearance="plain"
+                    title="Room actions"
+                  >
+                    <wa-icon name="ellipsis-vertical"></wa-icon>
+                  </wa-button>
+                  <wa-dropdown-item
+                    @click="${(): void => this.#openClone(room)}"
+                  >
+                    Clone
+                  </wa-dropdown-item>
+                </wa-dropdown>
+              </span>
             </li>
           `
         )}
@@ -255,7 +303,7 @@ export class RoomListPage extends LitElement {
   }
 
   #openCreate = (): void => {
-    this.showCreateDialog = true;
+    this.#createDialogRef.value?.show();
   };
 
   #openSettings = (): void => {
@@ -263,12 +311,15 @@ export class RoomListPage extends LitElement {
     globalThis.dispatchEvent(new PopStateEvent("popstate"));
   };
 
-  #closeCreate(): void {
-    this.showCreateDialog = false;
+  #onRoomCreated(event: CustomEvent<{ room: Room }>): void {
+    this.#navigateToRoom(event.detail.room.code);
   }
 
-  #onRoomCreated(event: CustomEvent<{ room: Room }>): void {
-    this.showCreateDialog = false;
+  #openClone(room: Room): void {
+    this.#cloneDialogRef.value?.show(room);
+  }
+
+  #onRoomCloned(event: CustomEvent<{ room: Room }>): void {
     this.#navigateToRoom(event.detail.room.code);
   }
 

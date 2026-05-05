@@ -2,6 +2,7 @@ import type { DashboardState, DashboardStore } from "@/app/state";
 import type { CreateRoomRequest, Room } from "@/app/types";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
 import "./cron-picker.ts";
 
@@ -33,6 +34,10 @@ const EMPTY_FORM: CreateRoomForm = {
   reportScheduleLabel: "Every day at 09:00 UTC",
 };
 
+interface DialogElement extends HTMLElement {
+  open: boolean;
+}
+
 interface CronChangeDetail {
   cron: string;
   label: string;
@@ -50,26 +55,24 @@ function readInputValue(target: EventTarget | null): string {
 }
 
 /**
- * Modal that captures a brand-new [`Room`]. Resets the form to its empty
- * state every time `open` flips from false to true so leftover values
- * from a prior aborted creation don't bleed in.
- *
- * Emits `te-room-created` with the new room (parent uses it to navigate
- * to `/room/:code`) and `te-close` when the user dismisses.
+ * Modal that captures a brand-new [`Room`]. Owns its own open state and
+ * draft form; the parent calls `show()` to open the dialog, which reseeds
+ * the form to its empty defaults so leftover values from a prior aborted
+ * creation don't bleed in. Emits `te-room-created` with the new room on
+ * success so the parent can navigate to `/room/:code`.
  */
 @customElement("te-create-room-dialog")
 export class CreateRoomDialog extends LitElement {
   @property({ attribute: false })
   accessor store!: DashboardStore;
 
-  @property({ type: Boolean })
-  accessor open = false;
-
   @state()
   private accessor formState: CreateRoomForm = { ...EMPTY_FORM };
 
   @state()
   private accessor dashboardState: DashboardState | null = null;
+
+  #dialogRef: Ref<DialogElement> = createRef();
 
   #unsubscribe: (() => void) | null = null;
 
@@ -142,9 +145,6 @@ export class CreateRoomDialog extends LitElement {
       this.#unsubscribe = null;
       this.#bindStore();
     }
-    if (changed.has("open") && this.open && !changed.get("open")) {
-      this.formState = { ...EMPTY_FORM };
-    }
   }
 
   override disconnectedCallback(): void {
@@ -153,16 +153,21 @@ export class CreateRoomDialog extends LitElement {
     super.disconnectedCallback();
   }
 
+  /** Resets the draft form and opens the dialog. */
+  show(): void {
+    this.formState = { ...EMPTY_FORM };
+    const dialog = this.#dialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = true;
+    }
+  }
+
   override render() {
     const busy = this.dashboardState?.isCreatingRoom ?? false;
     const error = this.dashboardState?.errorMessage ?? null;
     const form = this.formState;
     return html`
-      <wa-dialog
-        label="New room"
-        ?open="${this.open}"
-        @wa-hide="${this.#onHide}"
-      >
+      <wa-dialog ${ref(this.#dialogRef)} label="New room">
         ${error
           ? html`
             <div class="error-banner">${error}</div>
@@ -197,10 +202,13 @@ export class CreateRoomDialog extends LitElement {
               "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
             )}
             <div class="form-field">
-              <span class="form-label">Wake-check schedule</span>
+              ${this.#renderLabel(
+                "wake-check",
+                "Wake-check schedule",
+                "Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate.",
+              )}
               <te-cron-picker
                 name="wake-check"
-                helperText="Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate."
                 .cron="${form.resumeScheduleCron}"
                 .label="${form.resumeScheduleLabel}"
                 @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
@@ -211,10 +219,13 @@ export class CreateRoomDialog extends LitElement {
               ></te-cron-picker>
             </div>
             <div class="form-field">
-              <span class="form-label">Report schedule</span>
+              ${this.#renderLabel(
+                "report",
+                "Report schedule",
+                "Times are interpreted in UTC. The leader writes a long-form report on each firing of this schedule.",
+              )}
               <te-cron-picker
                 name="report"
-                helperText="Times are interpreted in UTC. The leader writes a long-form report on each firing of this schedule."
                 .cron="${form.reportScheduleCron}"
                 .label="${form.reportScheduleLabel}"
                 @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
@@ -230,7 +241,7 @@ export class CreateRoomDialog extends LitElement {
           <wa-button
             size="small"
             ?disabled="${busy}"
-            @click="${this.#requestClose}"
+            @click="${this.#onCancel}"
           >
             Cancel
           </wa-button>
@@ -352,6 +363,10 @@ export class CreateRoomDialog extends LitElement {
     };
     const created: Room | null = await this.store.createRoom(request);
     if (created !== null) {
+      const dialog = this.#dialogRef.value;
+      if (dialog !== undefined) {
+        dialog.open = false;
+      }
       this.dispatchEvent(
         new CustomEvent("te-room-created", {
           detail: { room: created },
@@ -362,15 +377,10 @@ export class CreateRoomDialog extends LitElement {
     }
   }
 
-  #requestClose(): void {
-    this.dispatchEvent(
-      new CustomEvent("te-close", { bubbles: true, composed: true }),
-    );
-  }
-
-  #onHide(): void {
-    if (this.open) {
-      this.#requestClose();
+  #onCancel(): void {
+    const dialog = this.#dialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = false;
     }
   }
 

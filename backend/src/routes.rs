@@ -16,6 +16,7 @@
 //! GET    /v1/rooms/:code
 //! PATCH  /v1/rooms/:code
 //! DELETE /v1/rooms/:code
+//! POST   /v1/rooms/:code/clone
 //! POST   /v1/rooms/:code/pause
 //! POST   /v1/rooms/:code/resume
 //! POST   /v1/rooms/:code/messages
@@ -29,9 +30,9 @@ use crate::config::room_defaults;
 use crate::db;
 use crate::error::ReportError;
 use crate::models::{
-  AppSettings, CreateMessageRequest, CreateRoomRequest, ProviderConfig,
-  REDACTED_API_KEY_SENTINEL, Room, RoomEvent, RoomEventKind, RoomStatus,
-  UpdateAppSettingsRequest, UpdateRoomRequest,
+  AppSettings, CloneRoomRequest, CreateMessageRequest, CreateRoomRequest,
+  ProviderConfig, REDACTED_API_KEY_SENTINEL, Room, RoomEvent, RoomEventKind,
+  RoomStatus, UpdateAppSettingsRequest, UpdateRoomRequest,
 };
 use crate::runtime;
 use crate::streaming::{RoomReceiver, WsEvent, new_turn_id};
@@ -64,6 +65,7 @@ pub fn create_router(state: AppState) -> Router {
       "/v1/rooms/:code",
       get(get_room).patch(update_room).delete(delete_room),
     )
+    .route("/v1/rooms/:code/clone", post(clone_room))
     .route("/v1/rooms/:code/pause", post(pause_room))
     .route("/v1/rooms/:code/resume", post(resume_room))
     .route("/v1/rooms/:code/messages", post(post_user_message))
@@ -338,6 +340,77 @@ async fn update_room(
   }
 
   (StatusCode::OK, Json(json!({"room": updated.view()}))).into_response()
+}
+
+/// Creates a new room that copies every per-room setting from `code`. The
+/// clone always starts active with fresh timestamps and a freshly-allocated
+/// code. When `include_history` is true the source room's chat events are
+/// duplicated into the clone before the runtime spawns; reports and
+/// workspace artifacts are never carried over.
+async fn clone_room(
+  Path(code): Path<String>,
+  State(state): State<AppState>,
+  Json(payload): Json<CloneRoomRequest>,
+) -> impl IntoResponse {
+  let source = {
+    let rooms = state.rooms.read().await;
+    match rooms.get(&code) {
+      Some(room) => room.clone(),
+      None => return not_found("room"),
+    }
+  };
+
+  let new_code = match unique_code(&state).await {
+    Ok(value) => value,
+    Err(error) => {
+      tracing::warn!(%error, "failed to allocate room code");
+      return internal("could not allocate room code");
+    }
+  };
+
+  let now = Utc::now();
+  let new_room = Room {
+    code: new_code,
+    topic: source.topic.clone(),
+    goal: source.goal.clone(),
+    instruction: source.instruction.clone(),
+    status: RoomStatus::Active,
+    chat_interval_seconds: source.chat_interval_seconds,
+    steering_interval_seconds: source.steering_interval_seconds,
+    report_schedule_cron: source.report_schedule_cron.clone(),
+    report_schedule_label: source.report_schedule_label.clone(),
+    python_timeout_seconds: source.python_timeout_seconds,
+    auto_pause_when_converged: source.auto_pause_when_converged,
+    resume_schedule_cron: source.resume_schedule_cron.clone(),
+    resume_schedule_label: source.resume_schedule_label.clone(),
+    created_at: now,
+    updated_at: now,
+  };
+
+  if let Err(error) = db::insert_room(&state.db, &new_room).await {
+    tracing::warn!(%error, "failed to insert cloned room");
+    return internal("failed to persist room");
+  }
+
+  if payload.include_history
+    && let Err(error) =
+      db::clone_room_events(&state.db, &source.code, &new_room.code).await
+  {
+    tracing::warn!(%error, "failed to copy events into cloned room");
+    if let Err(cleanup) = db::delete_room(&state.db, &new_room.code).await {
+      tracing::warn!(%cleanup, "failed to roll back partial clone");
+    }
+    return internal("failed to copy chat history");
+  }
+
+  if let Err(error) = runtime::spawn_room(state.clone(), new_room.clone()).await
+  {
+    tracing::warn!(%error, "failed to spawn cloned room runtime");
+    return internal("room created but failed to start runtime");
+  }
+
+  let view = new_room.view();
+  (StatusCode::CREATED, Json(json!({"room": view}))).into_response()
 }
 
 async fn delete_room(

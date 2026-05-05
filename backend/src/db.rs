@@ -316,6 +316,34 @@ pub async fn load_room_events(
   rows.into_iter().map(parse_event_row).collect()
 }
 
+/// Copies every event from `source` into `target`, preserving sequence
+/// numbers, kinds, content, reasoning, tool calls, and timestamps. Used by
+/// the room-clone endpoint when the user opts to carry chat history into
+/// the new room. Run inside a transaction so a partial copy never leaves
+/// the clone with a half-populated transcript.
+pub async fn clone_room_events(
+  pool: &SqlitePool,
+  source_code: &str,
+  target_code: &str,
+) -> Result<()> {
+  let mut tx = pool.begin().await.context("failed to begin clone tx")?;
+  sqlx::query(
+    "INSERT INTO room_events
+        (room_code, sequence, kind, agent, content, reasoning, tool_calls, timestamp)
+     SELECT ?, sequence, kind, agent, content, reasoning, tool_calls, timestamp
+     FROM room_events
+     WHERE room_code = ?
+     ORDER BY sequence ASC",
+  )
+  .bind(target_code)
+  .bind(source_code)
+  .execute(&mut *tx)
+  .await
+  .context("failed to copy room events")?;
+  tx.commit().await.context("failed to commit clone tx")?;
+  Ok(())
+}
+
 /// Returns the highest `sequence` for the given room, or 0 if the room has
 /// no events yet. Used to seed the orchestrator's per-room counter on
 /// startup.

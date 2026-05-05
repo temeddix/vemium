@@ -1,6 +1,7 @@
 import "./app-shell.ts";
 import "./chat-composer.ts";
 import "./chat-message.ts";
+import "./clone-room-dialog.ts";
 import "./create-room-dialog.ts";
 import "./cron-picker.ts";
 import "./dashboard-provider.ts";

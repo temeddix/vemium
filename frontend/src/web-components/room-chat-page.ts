@@ -376,7 +376,6 @@ export class RoomChatPage extends LitElement {
       <wa-dialog
         ${ref(this.#noteDialogRef)}
         label="${this.noteDialog === null ? "" : this.noteDialog.text}"
-        @wa-hide="${this.#onNoteDialogHide}"
       >
         ${this.noteDialog === null ? nothing : html`
           <div class="detail-dialog-author">${this.noteDialog.author}</div>
@@ -540,10 +539,6 @@ export class RoomChatPage extends LitElement {
     if (dialog !== undefined) {
       dialog.open = true;
     }
-  }
-
-  #onNoteDialogHide(): void {
-    this.noteDialog = null;
   }
 
   #bubbleEntries(view: RoomView): BubbleEntry[] {

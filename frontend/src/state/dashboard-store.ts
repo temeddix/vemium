@@ -1,6 +1,7 @@
 import { BACKEND_BASE_URL } from "@/app/config";
 import type {
   AppSettings,
+  CloneRoomRequest,
   CreateMessageRequest,
   CreateRoomRequest,
   Draft,
@@ -225,6 +226,40 @@ export class DashboardStore {
         isCreatingRoom: false,
         errorMessage: "Network error while creating room.",
       });
+      return null;
+    }
+  }
+
+  /**
+   * Asks the backend to duplicate `roomCode` into a fresh room. The reply
+   * carries the new room's metadata; we reload the room list so the clone
+   * appears in the home grid before navigation. Returns the cloned room on
+   * success, or null when the request fails.
+   */
+  async cloneRoom(
+    roomCode: string,
+    request: CloneRoomRequest,
+  ): Promise<Room | null> {
+    this.#patch({ errorMessage: null });
+    try {
+      const response = await fetch(
+        `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/clone`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        this.#patch({ errorMessage: `Clone failed: ${text}` });
+        return null;
+      }
+      const payload = (await response.json()) as { room: Room };
+      await this.loadRooms();
+      return payload.room;
+    } catch {
+      this.#patch({ errorMessage: "Network error while cloning room." });
       return null;
     }
   }

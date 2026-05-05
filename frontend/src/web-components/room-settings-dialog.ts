@@ -225,10 +225,13 @@ export class RoomSettingsDialog extends LitElement {
             "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
           )}
           <div class="form-field">
-            <span class="form-label">Wake-check schedule</span>
+            ${this.#renderLabel(
+              "wake-check",
+              "Wake-check schedule",
+              "Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate.",
+            )}
             <te-cron-picker
               name="wake-check"
-              helperText="Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate."
               .cron="${form.resumeScheduleCron}"
               .label="${form.resumeScheduleLabel}"
               @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
@@ -239,10 +242,13 @@ export class RoomSettingsDialog extends LitElement {
             ></te-cron-picker>
           </div>
           <div class="form-field">
-            <span class="form-label">Report schedule</span>
+            ${this.#renderLabel(
+              "report",
+              "Report schedule",
+              "Times are interpreted in UTC. The leader writes a long-form report on each firing of this schedule.",
+            )}
             <te-cron-picker
               name="report"
-              helperText="Times are interpreted in UTC. The leader writes a long-form report on each firing of this schedule."
               .cron="${form.reportScheduleCron}"
               .label="${form.reportScheduleLabel}"
               @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
