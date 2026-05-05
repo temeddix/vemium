@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use futures::StreamExt;
 use rig::agent::{AgentBuilder, MultiTurnStreamItem};
@@ -209,7 +209,7 @@ impl OllamaChatClient {
   fn new(config: &ProviderConfig) -> Result<Self> {
     let base = config.base_url.trim();
     if base.is_empty() {
-      return Err(anyhow!("Ollama provider requires base_url"));
+      bail!("Ollama provider requires base_url");
     }
     // Native Ollama API lives at the server root; users may have copied a
     // `/v1` URL from the OpenAI-compat config, so strip it for them.
@@ -402,7 +402,7 @@ where
 
   let reasoning_stream = inputs.hook.stream().clone();
   let Some(reasoning_turn_id) = inputs.hook.turn_id().cloned() else {
-    return Err(anyhow!("debate turn hook is missing its draft turn id"));
+    bail!("debate turn hook is missing its draft turn id");
   };
   let reasoning_recorder = inputs.hook.recorder();
 
@@ -454,7 +454,7 @@ where
     .build();
   let reasoning_stream = inputs.hook.stream().clone();
   let Some(reasoning_turn_id) = inputs.hook.turn_id().cloned() else {
-    return Err(anyhow!("steering turn hook is missing its draft turn id"));
+    bail!("steering turn hook is missing its draft turn id");
   };
   let reasoning_recorder = inputs.hook.recorder();
   let mut stream = agent

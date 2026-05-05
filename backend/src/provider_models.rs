@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use crate::models::{ApiType, ProviderConfig};
@@ -52,7 +52,7 @@ pub async fn fetch_provider_models(
 ) -> Result<Vec<String>> {
   let base = config.base_url.trim();
   if base.is_empty() {
-    return Err(anyhow!("base_url is required"));
+    bail!("base_url is required");
   }
   let client = reqwest::Client::builder()
     .timeout(REQUEST_TIMEOUT)
@@ -93,10 +93,7 @@ async fn fetch_ollama_models(
   let status = response.status();
   if !status.is_success() {
     let body = response.text().await.unwrap_or_default();
-    return Err(anyhow!(
-      "Ollama tags endpoint returned {status}: {}",
-      body.trim()
-    ));
+    bail!("Ollama tags endpoint returned {status}: {}", body.trim());
   }
   let payload: OllamaTagsResponse = response
     .json()
@@ -132,10 +129,7 @@ async fn fetch_openai_compatible_models(
   let status = response.status();
   if !status.is_success() {
     let body = response.text().await.unwrap_or_default();
-    return Err(anyhow!(
-      "Models endpoint returned {status}: {}",
-      body.trim()
-    ));
+    bail!("Models endpoint returned {status}: {}", body.trim());
   }
   let payload: OpenAiModelsResponse = response
     .json()

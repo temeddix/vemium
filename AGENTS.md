@@ -116,7 +116,8 @@ Run Rust checks before completion:
   file APIs).
 - If blocking work is unavoidable, isolate it with
   `tokio::task::spawn_blocking`.
-- Use `anyhow` for application-level error handling.
+- Use `anyhow` for application-level error handling. Use `bail!` and `anyhow!`
+  macros.
 - Use `tracing` for logs. Do not use `println!`/`eprintln!`.
 - Keep REST handlers thin; move business logic into services/modules.
 - Keep transport models (request/response DTOs) explicit and stable.
