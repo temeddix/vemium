@@ -11,8 +11,10 @@
 export type RoomState = "active" | "deactivated";
 /**
  * Leader-controlled debate gate. Flipped by the leader's `pause_room` /
- * `resume_room` tools and by the auto-pause-on-converge path. Only
- * meaningful when [`RoomState`] is `active`.
+ * `resume_room` tools, called from the periodic steering tick, the
+ * wake-on-cron resume gate, or an on-demand `request_leader_decision`
+ * call triggered by a debater. Only meaningful when [`RoomState`] is
+ * `active`.
  */
 export type DebateState = "running" | "paused";
 export type ReportStatus = "streaming" | "done" | "failed";
@@ -86,7 +88,6 @@ export interface Room {
   reportScheduleCron: string;
   reportScheduleLabel: string;
   pythonTimeoutSeconds: number;
-  autoPauseWhenConverged: boolean;
   resumeScheduleCron: string;
   resumeScheduleLabel: string;
   createdAt: string;
@@ -287,7 +288,6 @@ export interface CreateRoomRequest {
   reportScheduleCron?: string;
   reportScheduleLabel?: string;
   pythonTimeoutSeconds?: number;
-  autoPauseWhenConverged?: boolean;
   resumeScheduleCron?: string;
   resumeScheduleLabel?: string;
 }

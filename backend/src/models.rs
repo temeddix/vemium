@@ -58,10 +58,11 @@ impl RoomState {
 
 /// Leader-controlled debate gate for a [`Room`].
 ///
-/// Flipped by `pause_room` / `resume_room` (the leader's pause/resume
-/// gates) and by the auto-pause-on-converge path. Only meaningful when
-/// [`RoomState`] is `Active`; while the room is `Deactivated` this state
-/// is ignored.
+/// Flipped by `pause_room` / `resume_room`. The leader calls these from
+/// the periodic steering tick, from the wake-on-cron resume gate, or
+/// from inside an on-demand `request_leader_decision` call triggered by
+/// a debater. Only meaningful when [`RoomState`] is `Active`; while the
+/// room is `Deactivated` this state is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DebateState {
@@ -227,10 +228,7 @@ pub struct Room {
   pub report_schedule_label: String,
   /// Wall-clock cap (seconds) for a single Python script execution.
   pub python_timeout_seconds: u64,
-  /// If true, the runtime can pause the room when all personas converge
-  /// with no further contributions and the leader approves the halt.
-  pub auto_pause_when_converged: bool,
-  /// Cron expression used for scheduled wake checks while auto-paused.
+  /// Cron expression used for scheduled wake checks while paused.
   pub resume_schedule_cron: String,
   /// Human-readable label for `resume_schedule_cron`, shown in leader notes.
   pub resume_schedule_label: String,
@@ -255,7 +253,6 @@ impl Room {
       report_schedule_cron: self.report_schedule_cron.clone(),
       report_schedule_label: self.report_schedule_label.clone(),
       python_timeout_seconds: self.python_timeout_seconds,
-      auto_pause_when_converged: self.auto_pause_when_converged,
       resume_schedule_cron: self.resume_schedule_cron.clone(),
       resume_schedule_label: self.resume_schedule_label.clone(),
       created_at: self.created_at,
@@ -279,7 +276,6 @@ pub struct RoomView {
   pub report_schedule_cron: String,
   pub report_schedule_label: String,
   pub python_timeout_seconds: u64,
-  pub auto_pause_when_converged: bool,
   pub resume_schedule_cron: String,
   pub resume_schedule_label: String,
   pub created_at: DateTime<Utc>,
@@ -427,7 +423,6 @@ pub struct CreateRoomRequest {
   pub report_schedule_cron: Option<String>,
   pub report_schedule_label: Option<String>,
   pub python_timeout_seconds: Option<u64>,
-  pub auto_pause_when_converged: Option<bool>,
   pub resume_schedule_cron: Option<String>,
   pub resume_schedule_label: Option<String>,
 }
@@ -467,7 +462,6 @@ pub struct UpdateRoomRequest {
   pub report_schedule_cron: Option<String>,
   pub report_schedule_label: Option<String>,
   pub python_timeout_seconds: Option<u64>,
-  pub auto_pause_when_converged: Option<bool>,
   pub resume_schedule_cron: Option<String>,
   pub resume_schedule_label: Option<String>,
 }

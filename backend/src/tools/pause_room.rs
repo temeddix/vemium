@@ -1,7 +1,9 @@
-//! `pause_room` tool: leader gate decision to pause the debate when it has
-//! converged. Persists a `leader_note` bubble carrying the reasoning and
-//! flips the room's [`DebateState`] to `Paused` so the resume scheduler
-//! picks it up at the next cron tick.
+//! `pause_room` tool: leader decision to pause the debate. Called from
+//! the periodic steering tick or from inside an on-demand
+//! `request_leader_decision` call when the leader judges the debate has
+//! run its course. Persists a `leader_note` bubble carrying the
+//! reasoning and flips the room's [`DebateState`] to `Paused` so the
+//! resume scheduler picks it up at the next cron tick.
 //!
 //! Note: this is the leader-controlled gate. The user-controlled
 //! activate/deactivate path is independent and lives on the routes layer.
@@ -79,10 +81,10 @@ impl Tool for PauseRoomTool {
     ToolDefinition {
       name: NAME.to_string(),
       description: "Pause the debate until the next scheduled wake check. \
-                    Call this when every persona has clearly run out of \
-                    contributions and waiting is safe. Your `note` is \
-                    persisted as a public leader bubble so the user sees \
-                    why."
+                    Call this when the discussion has plainly run its \
+                    course or further turns would be wasteful. Your `note` \
+                    is persisted as a public leader bubble so the user \
+                    sees why."
         .to_string(),
       parameters: json!({
         "type": "object",
@@ -102,8 +104,7 @@ impl Tool for PauseRoomTool {
     let trimmed = args.note.trim();
     let note = if trimmed.is_empty() {
       format!(
-        "All personas reported no further contribution. I approve pausing now. \
-         I will re-check on schedule: {}.",
+        "Pausing the debate now. I will re-check on schedule: {}.",
         self.schedule_label
       )
     } else {
@@ -157,7 +158,7 @@ impl Tool for PauseRoomTool {
     .await
     .map_err(|e| PauseRoomError::Persist(e.to_string()))?;
 
-    handle.request_auto_pause();
+    handle.request_pause_debate();
     stream.send(WsEvent::DebateState {
       state: DebateState::Paused,
     });

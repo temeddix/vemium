@@ -221,8 +221,10 @@ pub enum WsEvent {
   /// endpoints — the leader cannot move this gate.
   RoomState { state: RoomState },
 
-  /// Leader-controlled debate gate flipped (running <-> paused). Emitted by
-  /// `pause_room` / `resume_room` and by the auto-pause-on-converge path.
+  /// Leader-controlled debate gate flipped (running <-> paused). Emitted
+  /// by `pause_room` / `resume_room`, called from the periodic steering
+  /// tick, the wake-on-cron resume gate, or an on-demand
+  /// `request_leader_decision` call triggered by a debater.
   DebateState { state: DebateState },
 
   /// A new turn has started. Subsequent `Draft*` frames with the same

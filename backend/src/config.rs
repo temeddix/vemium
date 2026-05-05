@@ -25,8 +25,6 @@ pub mod room_defaults {
   pub const REPORT_SCHEDULE_LABEL: &str = "Every day at 09:00 UTC";
   /// Single Python script run capped at 10 minutes.
   pub const PYTHON_TIMEOUT_SECONDS: u64 = 600;
-  /// Whether convergence-based auto-pause is enabled by default.
-  pub const AUTO_PAUSE_WHEN_CONVERGED: bool = false;
   /// Default wake-check cron (UTC): at minute 0 of every hour.
   pub const RESUME_SCHEDULE_CRON: &str = "0 * * * *";
   /// User-facing label for the default wake schedule.

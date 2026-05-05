@@ -58,10 +58,10 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
         code, topic, goal, instruction, room_state, debate_state,
         chat_interval_seconds, steering_interval_seconds,
         report_schedule_cron, report_schedule_label,
-        python_timeout_seconds, auto_pause_when_converged,
+        python_timeout_seconds,
         resume_schedule_cron, resume_schedule_label,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(&room.code)
   .bind(&room.topic)
@@ -74,7 +74,6 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(&room.report_schedule_cron)
   .bind(&room.report_schedule_label)
   .bind(room.python_timeout_seconds as i64)
-  .bind(room.auto_pause_when_converged)
   .bind(&room.resume_schedule_cron)
   .bind(&room.resume_schedule_label)
   .bind(room.created_at.to_rfc3339())
@@ -95,7 +94,7 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
         room_state = ?, debate_state = ?,
         chat_interval_seconds = ?, steering_interval_seconds = ?,
         report_schedule_cron = ?, report_schedule_label = ?,
-        python_timeout_seconds = ?, auto_pause_when_converged = ?,
+        python_timeout_seconds = ?,
         resume_schedule_cron = ?, resume_schedule_label = ?,
         updated_at = ?
      WHERE code = ?",
@@ -110,7 +109,6 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(&room.report_schedule_cron)
   .bind(&room.report_schedule_label)
   .bind(room.python_timeout_seconds as i64)
-  .bind(room.auto_pause_when_converged)
   .bind(&room.resume_schedule_cron)
   .bind(&room.resume_schedule_label)
   .bind(room.updated_at.to_rfc3339())
@@ -142,8 +140,7 @@ pub async fn update_room_state(
 }
 
 /// Updates the leader-controlled [`DebateState`] gate (`running` /
-/// `paused`) and `updated_at`. Used by `pause_room` / `resume_room` and
-/// the auto-pause-on-converge path.
+/// `paused`) and `updated_at`. Used by `pause_room` / `resume_room`.
 pub async fn update_debate_state(
   pool: &SqlitePool,
   room_code: &str,
@@ -211,9 +208,6 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
   let python_timeout: i64 = row
     .try_get("python_timeout_seconds")
     .context("rooms.python_timeout_seconds missing")?;
-  let auto_pause_when_converged: bool = row
-    .try_get("auto_pause_when_converged")
-    .context("rooms.auto_pause_when_converged missing")?;
 
   Ok(Room {
     code: row.try_get("code").context("rooms.code missing")?,
@@ -233,7 +227,6 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
       .try_get("report_schedule_label")
       .context("rooms.report_schedule_label missing")?,
     python_timeout_seconds: python_timeout as u64,
-    auto_pause_when_converged,
     resume_schedule_cron: row
       .try_get("resume_schedule_cron")
       .context("rooms.resume_schedule_cron missing")?,

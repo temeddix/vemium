@@ -21,7 +21,6 @@ interface SettingsForm {
   reportScheduleCron: string;
   reportScheduleLabel: string;
   pythonTimeoutSeconds: number;
-  autoPauseWhenConverged: boolean;
   resumeScheduleCron: string;
   resumeScheduleLabel: string;
 }
@@ -217,18 +216,11 @@ export class RoomSettingsDialog extends LitElement {
           )}
         </div>
         <div class="schedule-grid">
-          ${this.#renderBooleanSelect(
-            "auto-pause",
-            "Auto-pause after convergence",
-            form.autoPauseWhenConverged,
-            (value) => this.#patchForm({ autoPauseWhenConverged: value }),
-            "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
-          )}
           <div class="form-field">
             ${this.#renderLabel(
               "wake-check",
               "Wake-check schedule",
-              "Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate.",
+              "Times are interpreted in UTC. While the room is paused, the leader checks at this cadence whether to resume the debate.",
             )}
             <te-cron-picker
               name="wake-check"
@@ -336,31 +328,6 @@ export class RoomSettingsDialog extends LitElement {
     `;
   }
 
-  #renderBooleanSelect(
-    key: string,
-    label: string,
-    value: boolean,
-    onChange: (value: boolean) => void,
-    tooltip?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-select
-          size="small"
-          .value="${value ? "enabled" : "disabled"}"
-          @change="${(e: Event): void => {
-            const selected = readInputValue(e.target);
-            onChange(selected === "enabled");
-          }}"
-        >
-          <wa-option value="enabled">Enabled</wa-option>
-          <wa-option value="disabled">Disabled</wa-option>
-        </wa-select>
-      </label>
-    `;
-  }
-
   #renderLabel(key: string, label: string, tooltip?: string) {
     if (tooltip === undefined || tooltip === "") {
       return html`
@@ -408,7 +375,6 @@ export class RoomSettingsDialog extends LitElement {
       reportScheduleCron: this.form.reportScheduleCron,
       reportScheduleLabel: this.form.reportScheduleLabel,
       pythonTimeoutSeconds: this.form.pythonTimeoutSeconds,
-      autoPauseWhenConverged: this.form.autoPauseWhenConverged,
       resumeScheduleCron: this.form.resumeScheduleCron,
       resumeScheduleLabel: this.form.resumeScheduleLabel,
     };
@@ -432,7 +398,6 @@ function formFromRoom(room: Room): SettingsForm {
     reportScheduleCron: room.reportScheduleCron,
     reportScheduleLabel: room.reportScheduleLabel,
     pythonTimeoutSeconds: room.pythonTimeoutSeconds,
-    autoPauseWhenConverged: room.autoPauseWhenConverged,
     resumeScheduleCron: room.resumeScheduleCron,
     resumeScheduleLabel: room.resumeScheduleLabel,
   };

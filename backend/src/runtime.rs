@@ -27,8 +27,8 @@ use crate::app_state::{AppState, RoomHandle};
 use crate::db;
 use crate::error::ReportError;
 use crate::llm::{
-  DebateTurnInputs, NoToolTurnInputs, PauseGateInputs, ResumeGateInputs,
-  SteeringTurnInputs, build_chat_client,
+  DebateTurnInputs, NoToolTurnInputs, ResumeGateInputs, SteeringTurnInputs,
+  build_chat_client,
 };
 use crate::models::{
   DebateState, ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind,
@@ -42,7 +42,7 @@ use crate::tools::do_nothing::{self, DoNothingTool};
 use crate::tools::format_tool_inline_note;
 use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
-use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
+use crate::tools::pause_room::{self, LEADER_AGENT, PauseRoomTool};
 use crate::tools::resume_room::ResumeRoomTool;
 use crate::workspace::{DebateRoot, RoomWorkspace};
 use anyhow::{Context, Result};
@@ -51,7 +51,6 @@ use cron::Schedule;
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,17 +103,12 @@ const KICKOFF_INLINE_NOTE: &str = "Opened with plan";
 const LEADER_KICKOFF_PROMPT: &str = include_str!("prompts/leader_kickoff.md");
 const LEADER_STEERING_PROMPT: &str = include_str!("prompts/leader_steering.md");
 const LEADER_REPORT_PROMPT: &str = include_str!("prompts/leader_report.md");
-const LEADER_PAUSE_GATE_PROMPT: &str =
-  include_str!("prompts/leader_pause_gate.md");
 const LEADER_RESUME_GATE_PROMPT: &str =
   include_str!("prompts/leader_resume_gate.md");
-const LEADER_PAUSE_GATE_USER_PROMPT: &str =
-  include_str!("prompts/leader_pause_gate_user.md");
 const LEADER_RESUME_GATE_USER_PROMPT: &str =
   include_str!("prompts/leader_resume_gate_user.md");
 
 const DEFAULT_WAKE_LABEL: &str = "Every hour";
-
 /// On boot, brings every persisted room back online. Rooms in either
 /// [`RoomState::Deactivated`] or [`DebateState::Paused`] keep that state -
 /// the orchestrator starts but does not advance turns until the matching
@@ -188,10 +182,6 @@ async fn run_debate_loop(
   workspace: RoomWorkspace,
 ) {
   let mut persona_index: usize = 0;
-  let mut no_further_by_persona: HashMap<&'static str, bool> = DEBATE_PERSONAS
-    .iter()
-    .map(|persona| (persona.name, false))
-    .collect();
 
   loop {
     if handle.is_stopped() {
@@ -239,33 +229,11 @@ async fn run_debate_loop(
     let persona = DEBATE_PERSONAS[persona_index % DEBATE_PERSONAS.len()];
     persona_index = persona_index.wrapping_add(1);
 
-    let result =
+    if let Err(error) =
       run_chat_turn(&state, &handle, &snapshot, persona, workspace.clone())
-        .await;
-
-    match result {
-      Ok(outcome) => {
-        no_further_by_persona.insert(persona.name, outcome.no_further_input);
-
-        if !snapshot.auto_pause_when_converged {
-          no_further_by_persona
-            .values_mut()
-            .for_each(|value| *value = false);
-        }
-
-        let everyone_idle = no_further_by_persona.values().all(|v| *v);
-        if everyone_idle
-          && snapshot.auto_pause_when_converged
-          && let Err(error) =
-            evaluate_and_maybe_auto_pause(&state, &handle, &snapshot).await
-        {
-          tracing::warn!(%room_code, %error, "failed convergence halt gate");
-        }
-      }
-      Err(error) => {
-        no_further_by_persona.insert(persona.name, false);
-        tracing::warn!(%room_code, persona = %persona.name, %error, "chat turn failed");
-      }
+        .await
+    {
+      tracing::warn!(%room_code, persona = %persona.name, %error, "chat turn failed");
     }
 
     let interval = snapshot.chat_interval_seconds.max(1);
@@ -277,6 +245,10 @@ async fn run_debate_loop(
   }
 }
 
+/// True when the room transcript contains no leader or debater turn
+/// yet — i.e. only user-injected messages, if anything. The runtime
+/// runs a one-off leader kickoff in that state so the debate opens with
+/// a traffic-control note instead of jumping straight into Researcher.
 fn needs_leader_kickoff(history: &[RoomEvent]) -> bool {
   !history.iter().any(|event| {
     matches!(
@@ -284,10 +256,6 @@ fn needs_leader_kickoff(history: &[RoomEvent]) -> bool {
       RoomEventKind::AgentChat | RoomEventKind::LeaderNote
     )
   })
-}
-
-struct ChatTurnOutcome {
-  no_further_input: bool,
 }
 
 /// Runs one debater turn end-to-end. Builds the [`ChatClient`] for the
@@ -300,13 +268,14 @@ async fn run_chat_turn(
   room: &Room,
   persona: DebatePersona,
   workspace: RoomWorkspace,
-) -> Result<ChatTurnOutcome> {
+) -> Result<()> {
   let history = db::load_room_events(&state.db, &room.code).await?;
   let history_messages = render_transcript_messages(&history);
   let system_prompt = build_chat_system_prompt(room, persona);
   let workspace_files = list_shared_workspace_files(&workspace).await;
   let user_prompt = build_chat_user_prompt(room, persona, &workspace_files);
   let preamble = build_room_preamble(room);
+  let schedule_label = wake_schedule_label(room);
 
   let stream = state.ensure_room_stream(&room.code).await;
   let turn_id = new_turn_id();
@@ -325,6 +294,7 @@ async fn run_chat_turn(
     room.code.clone(),
     high.clone(),
     preamble,
+    schedule_label,
   );
   let do_nothing_tool = DoNothingTool::new();
   let inline_note_tool =
@@ -377,7 +347,7 @@ async fn run_chat_turn(
       turn_id,
       error: String::new(),
     });
-    return Ok(ChatTurnOutcome { no_further_input });
+    return Ok(());
   }
 
   let trimmed = final_text.trim().to_string();
@@ -386,9 +356,7 @@ async fn run_chat_turn(
       turn_id,
       error: "model produced no text after tool loop".to_string(),
     });
-    return Ok(ChatTurnOutcome {
-      no_further_input: false,
-    });
+    return Ok(());
   }
 
   let sequence = handle.allocate_event_sequence();
@@ -413,7 +381,7 @@ async fn run_chat_turn(
     turn_id,
     message: event,
   });
-  Ok(ChatTurnOutcome { no_further_input })
+  Ok(())
 }
 
 // -- Hook -----------------------------------------------------------------
@@ -454,8 +422,9 @@ pub struct DebateHook {
 
 /// Per-turn accumulator owned by both the [`DebateHook`] and the
 /// orchestrator. Reasoning deltas append to a string; the
-/// `do_nothing_called` flag flips on the first successful `do_nothing`
-/// invocation so the runtime can suppress the bubble after the turn.
+/// `do_nothing_called` and `pause_room_called` flags flip on the first
+/// successful invocation of those tools so the runtime can suppress the
+/// bubble after the turn.
 #[derive(Default)]
 pub struct TurnRecorder {
   inner: Mutex<TurnRecorderInner>,
@@ -465,6 +434,7 @@ pub struct TurnRecorder {
 struct TurnRecorderInner {
   reasoning: String,
   do_nothing_called: bool,
+  pause_room_called: bool,
 }
 
 impl TurnRecorder {
@@ -475,12 +445,23 @@ impl TurnRecorder {
     (inner.reasoning.clone(), inner.do_nothing_called)
   }
 
+  /// Returns `true` if the leader called `pause_room` successfully
+  /// during this turn. Used by the steering / kickoff paths to suppress
+  /// their own leader bubble when the pause tool already wrote one.
+  pub async fn pause_room_called(&self) -> bool {
+    self.inner.lock().await.pause_room_called
+  }
+
   pub(crate) async fn append_reasoning(&self, delta: &str) {
     self.inner.lock().await.reasoning.push_str(delta);
   }
 
   pub(crate) async fn mark_do_nothing(&self) {
     self.inner.lock().await.do_nothing_called = true;
+  }
+
+  pub(crate) async fn mark_pause_room(&self) {
+    self.inner.lock().await.pause_room_called = true;
   }
 }
 
@@ -632,6 +613,9 @@ where
     if ok && tool_name == do_nothing::NAME {
       self.recorder.mark_do_nothing().await;
     }
+    if ok && tool_name == pause_room::NAME {
+      self.recorder.mark_pause_room().await;
+    }
 
     if let Some(turn_id) = &self.turn_id {
       self.stream.send(WsEvent::DraftToolCompleted {
@@ -643,62 +627,10 @@ where
   }
 }
 
-async fn evaluate_and_maybe_auto_pause(
-  state: &AppState,
-  _handle: &RoomHandle,
-  room: &Room,
-) -> Result<()> {
-  let history = db::load_room_events(&state.db, &room.code).await?;
-  if history.is_empty() {
-    return Ok(());
-  }
-
-  let label = if room.resume_schedule_label.trim().is_empty() {
-    DEFAULT_WAKE_LABEL.to_string()
-  } else {
-    room.resume_schedule_label.clone()
-  };
-
-  let preamble = build_room_preamble(room);
-  let transcript = render_transcript_text(&history);
-  let user_prompt = render_gate_user_prompt(
-    LEADER_PAUSE_GATE_USER_PROMPT,
-    &preamble,
-    &label,
-    &transcript,
-  );
-
-  let pause_tool =
-    PauseRoomTool::new(state.clone(), room.code.clone(), label.clone());
-  let do_nothing_tool = DoNothingTool::new();
-  let inline_note_tool =
-    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
-
-  let stream = state.ensure_room_stream(&room.code).await;
-  let hook = DebateHook::for_gate(
-    stream,
-    state.clone(),
-    room.code.clone(),
-    LEADER_AGENT.to_string(),
-  );
-
-  let (_low, high) = current_provider_configs(state).await;
-  let client =
-    build_chat_client(&high).context("failed to construct high-tier client")?;
-  client
-    .run_pause_gate_turn(PauseGateInputs {
-      system_prompt: format!(
-        "{LEADER_PAUSE_GATE_PROMPT}\n\n{INLINE_NOTE_TOOL_HINT}"
-      ),
-      user_prompt,
-      pause_tool,
-      do_nothing_tool,
-      inline_note_tool,
-      hook,
-    })
-    .await
-}
-
+/// While paused, fires on every cron tick of `resume_schedule_cron` and
+/// asks the leader whether to wake the debate. While running (or while
+/// the user deactivated the room) we just sleep on the gate signal; the
+/// loop only does work when there is something to wake up.
 async fn run_resume_schedule_loop(
   state: AppState,
   handle: RoomHandle,
@@ -709,28 +641,21 @@ async fn run_resume_schedule_loop(
       return;
     }
 
-    let Some(room) = load_room_snapshot(&state, &room_code).await else {
-      return;
-    };
-
-    if !room.auto_pause_when_converged {
-      tokio::select! {
-        _ = sleep(Duration::from_secs(30)) => {}
-        _ = handle.stop_notify.notified() => return,
-      }
-      continue;
-    }
-
-    // Only run the wake gate when the debate is auto-paused. A manual
-    // user deactivation overrides this — leave the debate alone, the user
-    // will re-activate when they're ready.
-    if !handle.is_auto_paused() || handle.is_deactivated() {
+    // Only run the wake gate when the debate is paused and the user has
+    // not deactivated the room. A manual deactivation is the strongest
+    // off-switch — leave the debate alone, the user will re-activate
+    // when they're ready.
+    if !handle.is_debate_paused() || handle.is_deactivated() {
       tokio::select! {
         _ = handle.pause_notify.notified() => {}
         _ = handle.stop_notify.notified() => return,
       }
       continue;
     }
+
+    let Some(room) = load_room_snapshot(&state, &room_code).await else {
+      return;
+    };
 
     let now = Utc::now();
     let Some(next_tick) = next_cron_tick(&room.resume_schedule_cron, now)
@@ -754,7 +679,7 @@ async fn run_resume_schedule_loop(
     }
 
     if handle.is_stopped()
-      || !handle.is_auto_paused()
+      || !handle.is_debate_paused()
       || handle.is_deactivated()
     {
       continue;
@@ -780,12 +705,7 @@ async fn evaluate_scheduled_resume(
     return Ok(());
   }
 
-  let label = if room.resume_schedule_label.trim().is_empty() {
-    DEFAULT_WAKE_LABEL.to_string()
-  } else {
-    room.resume_schedule_label.clone()
-  };
-
+  let label = wake_schedule_label(room);
   let preamble = build_room_preamble(room);
   let transcript = render_transcript_text(&history);
   let user_prompt = render_gate_user_prompt(
@@ -912,6 +832,11 @@ async fn run_leader_steering(
   let recorder = hook.recorder();
   let inline_note_tool =
     GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
+  let pause_tool = PauseRoomTool::new(
+    state.clone(),
+    room.code.clone(),
+    wake_schedule_label(room),
+  );
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
@@ -922,6 +847,7 @@ async fn run_leader_steering(
       user_prompt: user,
       hook,
       inline_note_tool,
+      pause_tool,
     })
     .await
     .inspect_err(|error| {
@@ -930,6 +856,20 @@ async fn run_leader_steering(
         error: error.to_string(),
       });
     })?;
+
+  let (reasoning, _do_nothing_called) = recorder.snapshot().await;
+  let leader_paused = recorder.pause_room_called().await;
+
+  // If the leader paused via `pause_room` the tool already emitted both
+  // a leader bubble (with the pause reasoning) and the debate-state flip.
+  // Suppress the steering bubble in that case so we don't duplicate.
+  if leader_paused {
+    stream.send(WsEvent::DraftFailed {
+      turn_id,
+      error: String::new(),
+    });
+    return Ok(());
+  }
 
   let trimmed = final_text.trim().to_string();
   if trimmed.is_empty() {
@@ -963,7 +903,6 @@ async fn run_leader_steering(
     message: inline_event,
   });
 
-  let (reasoning, _do_nothing_called) = recorder.snapshot().await;
   let bubble_draft = RoomEvent {
     id: None,
     room_code: room.code.clone(),
@@ -1025,6 +964,11 @@ async fn run_leader_kickoff(
   let recorder = hook.recorder();
   let inline_note_tool =
     GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
+  let pause_tool = PauseRoomTool::new(
+    state.clone(),
+    room.code.clone(),
+    wake_schedule_label(room),
+  );
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
@@ -1035,6 +979,7 @@ async fn run_leader_kickoff(
       user_prompt: user,
       hook,
       inline_note_tool,
+      pause_tool,
     })
     .await
     .inspect_err(|error| {
@@ -1043,6 +988,19 @@ async fn run_leader_kickoff(
         error: error.to_string(),
       });
     })?;
+
+  let (reasoning, _do_nothing_called) = recorder.snapshot().await;
+  let leader_paused = recorder.pause_room_called().await;
+
+  // If the leader paused via `pause_room` the tool already emitted a
+  // leader bubble; suppress the kickoff bubble in that case.
+  if leader_paused {
+    stream.send(WsEvent::DraftFailed {
+      turn_id,
+      error: String::new(),
+    });
+    return Ok(());
+  }
 
   let trimmed = final_text.trim().to_string();
   if trimmed.is_empty() {
@@ -1074,7 +1032,6 @@ async fn run_leader_kickoff(
     message: inline_event,
   });
 
-  let (reasoning, _do_nothing_called) = recorder.snapshot().await;
   let bubble_draft = RoomEvent {
     id: None,
     room_code: room.code.clone(),
@@ -1360,6 +1317,18 @@ async fn list_shared_workspace_files(workspace: &RoomWorkspace) -> Vec<String> {
     .filter(|path| !SKIP.iter().any(|s| path == s))
     .take(MAX_LISTED)
     .collect()
+}
+
+/// User-facing wake-schedule label for the room. Falls back to a
+/// generic "Every hour" string when the room's stored label is blank so
+/// downstream prompts and `pause_room` notes never have an empty
+/// placeholder.
+pub(crate) fn wake_schedule_label(room: &Room) -> String {
+  if room.resume_schedule_label.trim().is_empty() {
+    DEFAULT_WAKE_LABEL.to_string()
+  } else {
+    room.resume_schedule_label.clone()
+  }
 }
 
 pub(crate) fn build_room_preamble(room: &Room) -> String {

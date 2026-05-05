@@ -16,7 +16,6 @@ interface CreateRoomForm {
   topic: string;
   goal: string;
   instruction: string;
-  autoPauseWhenConverged: boolean;
   resumeScheduleCron: string;
   resumeScheduleLabel: string;
   reportScheduleCron: string;
@@ -27,7 +26,6 @@ const EMPTY_FORM: CreateRoomForm = {
   topic: "",
   goal: "",
   instruction: "",
-  autoPauseWhenConverged: false,
   resumeScheduleCron: "0 * * * *",
   resumeScheduleLabel: "Every hour",
   reportScheduleCron: "0 9 * * *",
@@ -194,18 +192,11 @@ export class CreateRoomDialog extends LitElement {
             "Optional. Rules personas must follow plus any background context to treat as already-known facts. Appended to every persona prompt.",
           )}
           <div class="schedule-grid">
-            ${this.#renderBooleanSelect(
-              "auto-pause",
-              "Auto-pause after convergence",
-              form.autoPauseWhenConverged,
-              (value) => this.#patchForm({ autoPauseWhenConverged: value }),
-              "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
-            )}
             <div class="form-field">
               ${this.#renderLabel(
                 "wake-check",
                 "Wake-check schedule",
-                "Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate.",
+                "Times are interpreted in UTC. While the room is paused, the leader checks at this cadence whether to resume the debate.",
               )}
               <te-cron-picker
                 name="wake-check"
@@ -319,31 +310,6 @@ export class CreateRoomDialog extends LitElement {
     `;
   }
 
-  #renderBooleanSelect(
-    key: string,
-    label: string,
-    value: boolean,
-    onChange: (value: boolean) => void,
-    tooltip?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-select
-          size="small"
-          .value="${value ? "enabled" : "disabled"}"
-          @change="${(e: Event): void => {
-            const selected = readInputValue(e.target);
-            onChange(selected === "enabled");
-          }}"
-        >
-          <wa-option value="enabled">Enabled</wa-option>
-          <wa-option value="disabled">Disabled</wa-option>
-        </wa-select>
-      </label>
-    `;
-  }
-
   #patchForm(patch: Partial<CreateRoomForm>): void {
     this.formState = { ...this.formState, ...patch };
   }
@@ -355,7 +321,6 @@ export class CreateRoomDialog extends LitElement {
       instruction: this.formState.instruction === ""
         ? null
         : this.formState.instruction,
-      autoPauseWhenConverged: this.formState.autoPauseWhenConverged,
       resumeScheduleCron: this.formState.resumeScheduleCron,
       resumeScheduleLabel: this.formState.resumeScheduleLabel,
       reportScheduleCron: this.formState.reportScheduleCron,

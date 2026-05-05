@@ -270,9 +270,6 @@ async fn create_room(
     python_timeout_seconds: payload
       .python_timeout_seconds
       .unwrap_or(room_defaults::PYTHON_TIMEOUT_SECONDS),
-    auto_pause_when_converged: payload
-      .auto_pause_when_converged
-      .unwrap_or(room_defaults::AUTO_PAUSE_WHEN_CONVERGED),
     resume_schedule_cron: payload
       .resume_schedule_cron
       .map(|s| s.trim().to_string())
@@ -378,9 +375,6 @@ async fn update_room(
   if let Some(value) = payload.python_timeout_seconds {
     updated.python_timeout_seconds = value;
   }
-  if let Some(value) = payload.auto_pause_when_converged {
-    updated.auto_pause_when_converged = value;
-  }
   if let Some(value) = payload.resume_schedule_cron {
     let trimmed = value.trim();
     if !trimmed.is_empty() {
@@ -450,7 +444,6 @@ async fn clone_room(
     report_schedule_cron: source.report_schedule_cron.clone(),
     report_schedule_label: source.report_schedule_label.clone(),
     python_timeout_seconds: source.python_timeout_seconds,
-    auto_pause_when_converged: source.auto_pause_when_converged,
     resume_schedule_cron: source.resume_schedule_cron.clone(),
     resume_schedule_label: source.resume_schedule_label.clone(),
     created_at: now,
