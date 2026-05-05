@@ -227,6 +227,7 @@ async fn run_debate_loop(
     tokio::select! {
       _ = sleep(Duration::from_secs(interval)) => {}
       _ = handle.stop_notify.notified() => return,
+      _ = handle.config_notify.notified() => continue,
     }
   }
 }
@@ -613,6 +614,7 @@ async fn run_resume_schedule_loop(
       _ = sleep(wait) => {}
       _ = handle.pause_notify.notified() => continue,
       _ = handle.stop_notify.notified() => return,
+      _ = handle.config_notify.notified() => continue,
     }
 
     if handle.is_stopped() || !handle.is_paused() || !handle.is_auto_paused() {
@@ -765,6 +767,7 @@ async fn run_steering_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
     tokio::select! {
       _ = sleep(Duration::from_secs(interval)) => {}
       _ = handle.stop_notify.notified() => return,
+      _ = handle.config_notify.notified() => continue,
     }
     if handle.is_stopped() {
       return;
@@ -871,6 +874,7 @@ async fn run_report_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
     tokio::select! {
       _ = sleep(Duration::from_secs(interval)) => {}
       _ = handle.stop_notify.notified() => return,
+      _ = handle.config_notify.notified() => continue,
     }
     if handle.is_stopped() {
       return;

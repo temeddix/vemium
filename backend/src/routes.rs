@@ -294,6 +294,9 @@ async fn update_room(
     let mut rooms = state.rooms.write().await;
     rooms.insert(room_id, updated.clone());
   }
+  if let Some(handle) = state.room_handles.read().await.get(&room_id) {
+    handle.notify_config_changed();
+  }
 
   (StatusCode::OK, Json(json!({"room": updated.view()}))).into_response()
 }

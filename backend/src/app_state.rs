@@ -52,6 +52,10 @@ pub struct RoomHandle {
   /// Signal fired when `stopped` flips. Lets pauses break early on
   /// shutdown rather than blocking forever.
   pub stop_notify: Arc<Notify>,
+  /// Signal fired when room settings change (e.g. interval edits via the
+  /// HTTP API). Lets in-progress sleeps wake early so loops re-read fresh
+  /// config instead of blocking on the previous interval value.
+  pub config_notify: Arc<Notify>,
   /// Monotonic counter for the next event sequence number for this room.
   /// Seeded from the database on orchestrator startup, then owned in
   /// memory.
@@ -68,6 +72,7 @@ impl RoomHandle {
       auto_paused: Arc::new(AtomicBool::new(false)),
       stopped: Arc::new(AtomicBool::new(false)),
       stop_notify: Arc::new(Notify::new()),
+      config_notify: Arc::new(Notify::new()),
       next_event_sequence: Arc::new(AtomicU64::new(seed_event_seq + 1)),
       next_report_sequence: Arc::new(AtomicU64::new(seed_report_seq + 1)),
     }
@@ -106,6 +111,13 @@ impl RoomHandle {
     self.stop_notify.notify_waiters();
     // Ensure any thread waiting only on `pause_notify` also wakes up.
     self.pause_notify.notify_waiters();
+  }
+
+  /// Wakes any loop that is currently sleeping on a per-room interval so it
+  /// reloads the latest config snapshot. Call this after persisting a room
+  /// settings update.
+  pub fn notify_config_changed(&self) {
+    self.config_notify.notify_waiters();
   }
 
   pub fn is_paused(&self) -> bool {
