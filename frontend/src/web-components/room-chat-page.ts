@@ -12,6 +12,7 @@ import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
+import { repeat } from "lit/directives/repeat.js";
 
 import "./chat-composer.ts";
 
@@ -543,7 +544,11 @@ export class RoomChatPage extends LitElement {
     }
     return html`
       <div class="scroll">
-        ${entries.map((entry, idx) => this.#renderEntry(entry, entries, idx))}
+        ${repeat(
+          entries,
+          (entry) => entryKey(entry),
+          (entry, idx) => this.#renderEntry(entry, entries, idx),
+        )}
       </div>
     `;
   }
@@ -754,6 +759,25 @@ export class RoomChatPage extends LitElement {
     });
     this.dashboardState = this.store.getState();
   }
+}
+
+/**
+ * Stable identity for a `BubbleEntry` used as the `repeat` key. Persisted
+ * messages are keyed by their database id; live drafts are keyed by their
+ * `turnId`. The namespace prefix avoids collisions between the two id
+ * spaces. Without stable keys, a newly inserted `inline_note` row would
+ * shift later entries by index and cause Lit to recreate the active draft
+ * element, which resets the thinking-block scroll position and collapsed
+ * state.
+ */
+function entryKey(entry: BubbleEntry): string {
+  if (entry.type === "message" && entry.message !== null) {
+    return `m-${entry.message.id ?? entry.sortKey}`;
+  }
+  if (entry.type === "draft" && entry.draft !== null) {
+    return `d-${entry.draft.turnId}`;
+  }
+  return `x-${entry.sortKey}`;
 }
 
 /**
