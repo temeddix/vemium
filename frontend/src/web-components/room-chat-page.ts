@@ -14,7 +14,9 @@ import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
 import "./chat-composer.ts";
+
 import "./chat-message.ts";
+import { nextCronTick } from "./cron-picker.ts";
 import "./room-files-dialog.ts";
 import "./room-reports-dialog.ts";
 import "./room-settings-dialog.ts";
@@ -73,6 +75,16 @@ export class RoomChatPage extends LitElement {
 
   @state()
   private accessor noteDialog: NoteDialogState | null = null;
+
+  /**
+   * Wall-clock tick used to redraw the paused-room countdown each second.
+   * The interval handle is owned by `#countdownInterval` and only runs
+   * while the component is connected.
+   */
+  @state()
+  private accessor nowMillis = Date.now();
+
+  #countdownInterval: ReturnType<typeof setInterval> | null = null;
 
   #noteDialogRef: Ref<HTMLElement & { open: boolean }> = createRef();
 
@@ -273,6 +285,39 @@ export class RoomChatPage extends LitElement {
       font-size: 0.85rem;
       margin-top: 0.4rem;
     }
+
+    .paused-banner {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.2rem 0;
+      font-size: 0.75rem;
+      color: var(--wa-color-text-quiet);
+    }
+
+    .paused-banner-countdown {
+      font-family: var(--wa-font-family-code, ui-monospace, monospace);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .paused-banner-resume {
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      font: inherit;
+      color: var(--wa-color-brand-on-quiet);
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 0.15rem;
+    }
+
+    .paused-banner-resume:hover,
+    .paused-banner-resume:focus-visible {
+      color: var(--wa-color-text-normal);
+      outline: none;
+    }
   `;
 
   override connectedCallback(): void {
@@ -281,6 +326,10 @@ export class RoomChatPage extends LitElement {
     globalThis.addEventListener("scroll", this.#onWindowScroll, {
       passive: true,
     });
+    this.nowMillis = Date.now();
+    this.#countdownInterval = setInterval((): void => {
+      this.nowMillis = Date.now();
+    }, 1000);
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -299,6 +348,10 @@ export class RoomChatPage extends LitElement {
     globalThis.removeEventListener("scroll", this.#onWindowScroll);
     this.#unsubscribe?.();
     this.#unsubscribe = null;
+    if (this.#countdownInterval !== null) {
+      clearInterval(this.#countdownInterval);
+      this.#countdownInterval = null;
+    }
     super.disconnectedCallback();
   }
 
@@ -361,6 +414,7 @@ export class RoomChatPage extends LitElement {
         </header>
         ${this.#renderScrollArea(entries)}
         <div class="composer-wrap">
+          ${this.#renderPausedBanner(room)}
           <te-chat-composer
             ?disabled="${this.sending}"
             @te-send="${this.#onSend}"
@@ -435,6 +489,47 @@ export class RoomChatPage extends LitElement {
       >
         Deactivate
       </wa-dropdown-item>
+    `;
+  }
+
+  /**
+   * Renders the paused-room banner: a live HH:MM:SS countdown to the next
+   * scheduled leader wake check plus a Resume button that flips
+   * `DebateState` back to `Running` immediately. Hidden when the debate is
+   * already running, or when the user has deactivated the room - that
+   * state takes over the chrome via the `Deactivated` badge.
+   */
+  #renderPausedBanner(room: Room) {
+    if (room.debateState !== "paused" || room.roomState !== "active") {
+      return nothing;
+    }
+    const nextTick = nextCronTick(
+      room.resumeScheduleCron,
+      new Date(this.nowMillis),
+    );
+    const countdownText = nextTick === null
+      ? null
+      : formatCountdown(nextTick.getTime() - this.nowMillis);
+    return html`
+      <div class="paused-banner" role="status">
+        <span>
+          ${countdownText === null
+            ? html`
+              Leader will come back at the next scheduled check.
+            `
+            : html`
+              Leader will come back after
+              <span class="paused-banner-countdown">${countdownText}</span>
+            `}
+        </span>
+        <button
+          type="button"
+          class="paused-banner-resume"
+          @click="${(): Promise<void> => this.store.resumeRoom(room.code)}"
+        >
+          Resume now
+        </button>
+      </div>
     `;
   }
 
@@ -659,4 +754,26 @@ export class RoomChatPage extends LitElement {
     });
     this.dashboardState = this.store.getState();
   }
+}
+
+/**
+ * Formats a remaining-time delta. Under 24 hours renders as `HH:MM:SS`;
+ * 24 hours or more prepends a `N day(s) and` prefix so weekly schedules
+ * read naturally instead of overflowing the hour slot. Negative inputs
+ * clamp to zero so the banner never flashes a negative countdown between
+ * the target tick and the next interval recompute.
+ */
+function formatCountdown(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad2 = (n: number): string => n < 10 ? `0${n}` : `${n}`;
+  const clock = `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`;
+  if (days === 0) {
+    return clock;
+  }
+  const dayLabel = days === 1 ? "day" : "days";
+  return `${days} ${dayLabel} and ${clock}`;
 }

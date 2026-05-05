@@ -196,6 +196,109 @@ export class CronPicker extends LitElement {
   }
 }
 
+/**
+ * Computes the first firing of `expression` strictly after `now`, treating
+ * the cron expression in UTC the same way the backend does with the
+ * `cron` crate. Returns `null` when the expression fails to parse or when
+ * no firing falls within the next ~1 year (the iteration cap is generous
+ * enough to cover any realistic schedule the picker can emit).
+ */
+export function nextCronTick(expression: string, now: Date): Date | null {
+  const trimmed = expression.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const parts = trimmed.split(/\s+/);
+  if (parts.length !== 5) {
+    return null;
+  }
+  const [minute, hour, dom, month, dow] = parts;
+  const minuteSpec = parseField(minute, 0, 59);
+  const hourSpec = parseField(hour, 0, 23);
+  const domSpec = parseField(dom, 1, 31);
+  const monthSpec = parseField(month, 1, 12);
+  const dowSpec = parseField(dow, 0, 6);
+  if (
+    minuteSpec.error !== undefined || hourSpec.error !== undefined ||
+    domSpec.error !== undefined || monthSpec.error !== undefined ||
+    dowSpec.error !== undefined
+  ) {
+    return null;
+  }
+
+  const candidate = new Date(now.getTime());
+  candidate.setUTCSeconds(0, 0);
+  candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+
+  // Bound the search at ~1 year of minute-level steps. Real schedules
+  // emitted by the picker fire at least once a week, so the cap exists to
+  // protect against impossible combinations (e.g. `0 0 31 2 *`).
+  const MAX_ITERATIONS = 366 * 24 * 60;
+  for (let i = 0; i < MAX_ITERATIONS; i += 1) {
+    if (
+      matchesCron(
+        candidate,
+        minuteSpec,
+        hourSpec,
+        domSpec,
+        monthSpec,
+        dowSpec,
+      )
+    ) {
+      return candidate;
+    }
+    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+  }
+  return null;
+}
+
+function fieldMatches(
+  spec: FieldSpec,
+  value: number,
+  fieldMin: number,
+): boolean {
+  if (spec.star) {
+    return true;
+  }
+  if (spec.step !== null) {
+    return (value - fieldMin) % spec.step === 0;
+  }
+  return spec.values.includes(value);
+}
+
+function matchesCron(
+  date: Date,
+  minute: FieldSpec,
+  hour: FieldSpec,
+  dom: FieldSpec,
+  month: FieldSpec,
+  dow: FieldSpec,
+): boolean {
+  const m = date.getUTCMinutes();
+  const h = date.getUTCHours();
+  const d = date.getUTCDate();
+  const mo = date.getUTCMonth() + 1;
+  const w = date.getUTCDay();
+  if (!fieldMatches(minute, m, 0)) {
+    return false;
+  }
+  if (!fieldMatches(hour, h, 0)) {
+    return false;
+  }
+  if (!fieldMatches(month, mo, 1)) {
+    return false;
+  }
+  // Vixie cron semantics: when both day-of-month and day-of-week are
+  // restricted, fire when EITHER matches. When at most one is restricted,
+  // both must match (and the unrestricted one matches everything).
+  const domRestricted = !dom.star;
+  const dowRestricted = !dow.star;
+  if (domRestricted && dowRestricted) {
+    return fieldMatches(dom, d, 1) || fieldMatches(dow, w, 0);
+  }
+  return fieldMatches(dom, d, 1) && fieldMatches(dow, w, 0);
+}
+
 interface CronDescription {
   ok: boolean;
   text: string;

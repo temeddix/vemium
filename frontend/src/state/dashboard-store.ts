@@ -421,6 +421,16 @@ export class DashboardStore {
     await this.#postRoomStateAction(roomCode, "deactivate");
   }
 
+  /**
+   * User override for the leader-controlled `DebateState` gate. Wakes the
+   * paused debate immediately rather than waiting for the next scheduled
+   * leader check. Idempotent on the backend; calling on an already-running
+   * room is a no-op.
+   */
+  async resumeRoom(roomCode: string): Promise<void> {
+    await this.#postRoomStateAction(roomCode, "resume");
+  }
+
   async deleteRoom(roomCode: string): Promise<void> {
     try {
       await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomCode}`, {
@@ -447,7 +457,7 @@ export class DashboardStore {
 
   async #postRoomStateAction(
     roomCode: string,
-    action: "activate" | "deactivate",
+    action: "activate" | "deactivate" | "resume",
   ): Promise<void> {
     try {
       const response = await fetch(

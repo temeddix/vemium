@@ -20,6 +20,7 @@
 //! POST   /v1/rooms/:code/clone
 //! POST   /v1/rooms/:code/activate
 //! POST   /v1/rooms/:code/deactivate
+//! POST   /v1/rooms/:code/resume
 //! POST   /v1/rooms/:code/messages
 //! GET    /v1/rooms/:code/reports
 //! GET    /v1/rooms/:code/reports/:seq
@@ -31,8 +32,9 @@
 //!
 //! `/activate` and `/deactivate` flip the user-controlled [`RoomState`]
 //! gate. The leader-controlled [`DebateState`] gate (running / paused)
-//! has no public route — it only moves through the `pause_room` /
-//! `resume_room` tools called by the leader.
+//! normally moves through the `pause_room` / `resume_room` tools called
+//! by the leader; `/resume` is a user override that wakes the debate
+//! immediately without waiting for the next scheduled wake check.
 
 use crate::app_state::AppState;
 use crate::config::room_defaults;
@@ -82,6 +84,7 @@ pub fn create_router(state: AppState) -> Router {
     .route("/v1/rooms/:code/clone", post(clone_room))
     .route("/v1/rooms/:code/activate", post(activate_room))
     .route("/v1/rooms/:code/deactivate", post(deactivate_room))
+    .route("/v1/rooms/:code/resume", post(resume_room))
     .route("/v1/rooms/:code/messages", post(post_user_message))
     .route("/v1/rooms/:code/reports", get(list_reports))
     .route("/v1/rooms/:code/reports/:sequence", get(get_report))
@@ -555,6 +558,61 @@ async fn set_room_state(
   (
     StatusCode::OK,
     Json(json!({"roomState": new_state.as_str()})),
+  )
+    .into_response()
+}
+
+/// `POST /v1/rooms/:code/resume` — user override for the leader-controlled
+/// [`DebateState`] gate. Flips it to `Running` immediately without waiting
+/// for the next scheduled wake check. Idempotent: calling on an already-
+/// running room is a no-op success.
+async fn resume_room(
+  Path(code): Path<String>,
+  State(state): State<AppState>,
+) -> impl IntoResponse {
+  let updated_at = Utc::now();
+  let already_running = {
+    let mut rooms = state.rooms.write().await;
+    let Some(room) = rooms.get_mut(&code) else {
+      return not_found("room");
+    };
+    if matches!(room.debate_state, DebateState::Running) {
+      true
+    } else {
+      room.debate_state = DebateState::Running;
+      room.updated_at = updated_at;
+      false
+    }
+  };
+
+  if already_running {
+    return (
+      StatusCode::OK,
+      Json(json!({"debateState": DebateState::Running.as_str()})),
+    )
+      .into_response();
+  }
+
+  if let Err(error) =
+    db::update_debate_state(&state.db, &code, DebateState::Running, updated_at)
+      .await
+  {
+    tracing::warn!(%error, "failed to persist debate state change");
+    return internal("failed to update debate state");
+  }
+
+  if let Some(handle) = state.room_handles.read().await.get(&code) {
+    handle.request_resume_debate();
+  }
+
+  let stream = state.ensure_room_stream(&code).await;
+  stream.send(WsEvent::DebateState {
+    state: DebateState::Running,
+  });
+
+  (
+    StatusCode::OK,
+    Json(json!({"debateState": DebateState::Running.as_str()})),
   )
     .into_response()
 }
