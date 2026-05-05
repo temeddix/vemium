@@ -15,6 +15,7 @@ import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
 import "./chat-composer.ts";
 import "./chat-message.ts";
+import "./room-files-dialog.ts";
 import "./room-reports-dialog.ts";
 import "./room-settings-dialog.ts";
 
@@ -83,6 +84,9 @@ export class RoomChatPage extends LitElement {
     createRef();
 
   #reportsDialogRef: Ref<HTMLElementTagNameMap["te-room-reports-dialog"]> =
+    createRef();
+
+  #filesDialogRef: Ref<HTMLElementTagNameMap["te-room-files-dialog"]> =
     createRef();
 
   #unsubscribe: (() => void) | null = null;
@@ -342,6 +346,12 @@ export class RoomChatPage extends LitElement {
               Reports
             </wa-dropdown-item>
             <wa-dropdown-item
+              @click="${(): Promise<void> | undefined =>
+                this.#filesDialogRef.value?.show(room.code)}"
+            >
+              Files
+            </wa-dropdown-item>
+            <wa-dropdown-item
               variant="danger"
               @click="${(): Promise<void> => this.#confirmDelete(room.code)}"
             >
@@ -372,6 +382,10 @@ export class RoomChatPage extends LitElement {
         ${ref(this.#reportsDialogRef)}
         .reports="${view.reports}"
       ></te-room-reports-dialog>
+      <te-room-files-dialog
+        ${ref(this.#filesDialogRef)}
+        .store="${this.store}"
+      ></te-room-files-dialog>
       <wa-dialog
         ${ref(this.#noteDialogRef)}
         label="${this.noteDialog === null ? "" : this.noteDialog.text}"

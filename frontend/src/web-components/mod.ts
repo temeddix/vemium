@@ -6,6 +6,7 @@ import "./create-room-dialog.ts";
 import "./cron-picker.ts";
 import "./dashboard-provider.ts";
 import "./room-chat-page.ts";
+import "./room-files-dialog.ts";
 import "./room-list-page.ts";
 import "./room-reports-dialog.ts";
 import "./room-settings-dialog.ts";
