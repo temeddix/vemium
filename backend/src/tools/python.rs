@@ -13,8 +13,11 @@
 //!   only; lint/type stages have a fixed short cap.
 
 use crate::app_state::AppState;
+use crate::db;
+use crate::error::ReportError;
+use crate::models::{RoomEvent, RoomEventKind};
 use crate::python_runner::{PythonRunResult, PythonRunner, StageResult};
-use crate::streaming::WsEvent;
+use crate::streaming::{WsEvent, new_turn_id};
 use crate::workspace::RoomWorkspace;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
@@ -174,12 +177,34 @@ impl RunPythonTool {
     } else {
       INLINE_NOTE_FAIL
     };
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
-    stream.send(WsEvent::InlineNote {
-      author: self.author.clone(),
-      text: text.to_string(),
+    let handle = {
+      let handles = self.state.room_handles.read().await;
+      handles.get(&self.room_code).cloned()
+    };
+    let Some(handle) = handle else {
+      return;
+    };
+    let draft = RoomEvent {
+      id: None,
+      room_code: self.room_code.clone(),
+      sequence: handle.allocate_event_sequence(),
+      kind: RoomEventKind::InlineNote,
+      agent: Some(self.author.clone()),
+      content: text.to_string(),
+      reasoning: String::new(),
       detail: format_run_detail(result),
+      tool_calls: Vec::new(),
       timestamp: Utc::now(),
+    };
+    let event = db::insert_event(&self.state.db, &draft)
+      .await
+      .report()
+      .unwrap_or_else(|| draft.clone());
+
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
+    stream.send(WsEvent::MessageAdded {
+      turn_id: new_turn_id(),
+      message: event,
     });
   }
 }

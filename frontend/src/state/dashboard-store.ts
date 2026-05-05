@@ -5,6 +5,7 @@ import type {
   CreateMessageRequest,
   CreateRoomRequest,
   Draft,
+  DraftKind,
   DraftToolCall,
   Message,
   ProviderConfig,
@@ -14,10 +15,8 @@ import type {
   Room,
   RoomReport,
   RoomsListResponse,
-  RoomStatus,
   RoomView,
   SettingsEnvelope,
-  TurnKind,
   UpdateAppSettingsRequest,
   UpdateRoomRequest,
   WorkspaceFile,
@@ -404,12 +403,23 @@ export class DashboardStore {
     return `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files/download`;
   }
 
-  async pauseRoom(roomCode: string): Promise<void> {
-    await this.#postStatus(roomCode, "pause");
+  /**
+   * Flips the user-controlled gate on this room to `Active`. Independent
+   * of the leader-controlled `DebateState`: a room the leader paused stays
+   * paused until the leader (or the resume schedule) flips it back;
+   * activating only undoes a prior deactivation.
+   */
+  async activateRoom(roomCode: string): Promise<void> {
+    await this.#postRoomStateAction(roomCode, "activate");
   }
 
-  async resumeRoom(roomCode: string): Promise<void> {
-    await this.#postStatus(roomCode, "resume");
+  /**
+   * Flips the user-controlled gate on this room to `Deactivated`. The
+   * strongest off-switch - while deactivated the orchestrator is fully
+   * halted regardless of what the leader does.
+   */
+  async deactivateRoom(roomCode: string): Promise<void> {
+    await this.#postRoomStateAction(roomCode, "deactivate");
   }
 
   async deleteRoom(roomCode: string): Promise<void> {
@@ -436,9 +446,9 @@ export class DashboardStore {
     }
   }
 
-  async #postStatus(
+  async #postRoomStateAction(
     roomCode: string,
-    action: "pause" | "resume",
+    action: "activate" | "deactivate",
   ): Promise<void> {
     try {
       const response = await fetch(
@@ -461,18 +471,13 @@ export class DashboardStore {
       case "snapshot":
         this.#applySnapshot(event.room, event.messages, event.reports);
         break;
-      case "roomStatus":
-        this.#patchCurrentRoom((room) => ({ ...room, status: event.status }));
+      case "roomState":
+        this.#patchCurrentRoom((room) => ({ ...room, roomState: event.state }));
         break;
-      case "inlineNote":
-        this.#mutateView((view) => ({
-          ...view,
-          inlineNotes: [...view.inlineNotes, {
-            author: event.author,
-            text: event.text,
-            detail: event.detail,
-            timestamp: event.timestamp,
-          }],
+      case "debateState":
+        this.#patchCurrentRoom((room) => ({
+          ...room,
+          debateState: event.state,
         }));
         break;
       case "draftStarted":
@@ -590,7 +595,6 @@ export class DashboardStore {
       messages,
       drafts: [],
       reports: reports.map(toReportBuffer),
-      inlineNotes: [],
     };
     this.#patch({
       views: { ...this.#state.views, [room.code]: view },
@@ -644,7 +648,7 @@ export class DashboardStore {
 
 // -- Pure helpers ---------------------------------------------------------
 
-function emptyDraft(turnId: string, agent: string, kind: TurnKind): Draft {
+function emptyDraft(turnId: string, agent: string, kind: DraftKind): Draft {
   return {
     turnId,
     agent,
@@ -667,7 +671,7 @@ function upsertDraft(
   view: RoomView,
   turnId: string,
   agent: string,
-  kind: TurnKind,
+  kind: DraftKind,
 ): RoomView {
   const idx = view.drafts.findIndex((d) => d.turnId === turnId);
   if (idx < 0) {
@@ -695,6 +699,9 @@ function mapDraft(
 ): RoomView {
   const idx = view.drafts.findIndex((d) => d.turnId === turnId);
   if (idx < 0) {
+    // Default kind is `agent_chat` - placeholder for tokens that arrived
+    // ahead of `DraftStarted`. The server's replay will rewrite the kind
+    // before the next render if it's actually a leader-note draft.
     const placeholder = emptyDraft(turnId, "", "agent_chat");
     return {
       ...view,
@@ -779,6 +786,3 @@ function toReportBuffer(report: RoomReport): ReportBuffer {
 // export the alias so consumers (room-detail.ts) can keep their imports
 // minimal even though we never construct one directly here.
 export type { DraftToolCall };
-
-// Re-export for the dashboard view's status badge convenience.
-export type { RoomStatus };

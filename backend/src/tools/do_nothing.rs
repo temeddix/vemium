@@ -1,12 +1,18 @@
 //! `do_nothing` tool: an explicit opt-out signal usable by any persona or
-//! the leader. Calling it produces an inline note (dim text in the timeline)
-//! instead of a chat bubble. The caller's textual reply is discarded.
+//! the leader. Calling it persists an inline-note row (dim text in the
+//! timeline) instead of a chat bubble. The caller's textual reply is
+//! discarded.
 //!
 //! `reason` is required; the UI surfaces it only when the user clicks the
 //! note, so it can be a short justification without bloating the timeline.
+//! The reason is stored on `room_events.detail` so a page refresh restores
+//! it alongside the rest of the transcript.
 
 use crate::app_state::AppState;
-use crate::streaming::WsEvent;
+use crate::db;
+use crate::error::ReportError;
+use crate::models::{RoomEvent, RoomEventKind};
+use crate::streaming::{WsEvent, new_turn_id};
 use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -24,7 +30,7 @@ pub struct DoNothingTool {
   state: AppState,
   room_code: String,
   /// Author label used for the inline note. Personas pass their own name;
-  /// the gates pass `Leader (halt)` / `Leader (proceed)`.
+  /// the leader gates pass the plain "Leader" label.
   author: String,
 }
 
@@ -92,12 +98,37 @@ impl Tool for DoNothingTool {
       return Err(DoNothingError::EmptyReason);
     }
 
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
-    stream.send(WsEvent::InlineNote {
-      author: self.author.clone(),
-      text: INLINE_NOTE_TEXT.to_string(),
+    let handle = {
+      let handles = self.state.room_handles.read().await;
+      handles.get(&self.room_code).cloned()
+    };
+    // If the handle has gone (room deleted mid-turn), best-effort: drop
+    // the breadcrumb. The persona is about to wind down anyway.
+    let Some(handle) = handle else {
+      return Ok(DoNothingOutput { acknowledged: true });
+    };
+
+    let draft = RoomEvent {
+      id: None,
+      room_code: self.room_code.clone(),
+      sequence: handle.allocate_event_sequence(),
+      kind: RoomEventKind::InlineNote,
+      agent: Some(self.author.clone()),
+      content: INLINE_NOTE_TEXT.to_string(),
+      reasoning: String::new(),
       detail: reason,
+      tool_calls: Vec::new(),
       timestamp: Utc::now(),
+    };
+    let event = db::insert_event(&self.state.db, &draft)
+      .await
+      .report()
+      .unwrap_or_else(|| draft.clone());
+
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
+    stream.send(WsEvent::MessageAdded {
+      turn_id: new_turn_id(),
+      message: event,
     });
 
     Ok(DoNothingOutput { acknowledged: true })

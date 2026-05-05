@@ -27,12 +27,12 @@ use crate::app_state::{AppState, RoomHandle};
 use crate::db;
 use crate::error::ReportError;
 use crate::llm::{
-  DebateTurnInputs, HaltGateInputs, NoToolTurnInputs, ProceedGateInputs,
-  build_chat_client,
+  DebateTurnInputs, NoToolTurnInputs, PauseGateInputs, ResumeGateInputs,
+  SteeringTurnInputs, build_chat_client,
 };
 use crate::models::{
-  ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind, RoomStatus,
-  ToolCallRecord,
+  DebateState, ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind,
+  RoomState, ToolCallRecord,
 };
 use crate::python_runner::PythonRunner;
 use crate::streaming::{
@@ -40,9 +40,10 @@ use crate::streaming::{
   report_id_for,
 };
 use crate::tools::do_nothing::DoNothingTool;
-use crate::tools::halt_room::{HaltRoomTool, LEADER_HALT_AGENT};
+use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
-use crate::tools::proceed_room::{LEADER_PROCEED_AGENT, ProceedRoomTool};
+use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
+use crate::tools::resume_room::ResumeRoomTool;
 use crate::workspace::{DebateRoot, RoomWorkspace};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -83,17 +84,32 @@ const DEBATE_PERSONAS: [DebatePersona; 3] = [
 const CHAT_FORMAT_GUARDRAIL: &str =
   include_str!("prompts/chat_format_guardrail.md");
 
-const LEADER_STEERING_AGENT: &str = "Leader (steering)";
+/// Reminder injected into every persona system prompt that consumes the
+/// transcript. Explains the inline-note breadcrumb syntax and the
+/// `get_inline_note_detail` lookup tool so personas know how to fetch the
+/// click-to-reveal body of a breadcrumb when its label is not enough.
+const INLINE_NOTE_TOOL_HINT: &str = "Inline-note breadcrumbs in the \
+  transcript are tagged `(inline-note #N by Author)`. The visible label is \
+  usually enough context, but when you need the full body (e.g. the \
+  traceback behind a `Python script run fail` note), call \
+  `get_inline_note_detail` with `id=N`.";
+
+/// Inline-note label written before the leader's bubble on a periodic
+/// steering tick. The leader's `agent` field is always plain
+/// [`LEADER_AGENT`] now; this breadcrumb is what tells the user this
+/// particular bubble is the periodic nudge rather than a debater request
+/// or a gate decision.
+const STEERING_INLINE_NOTE: &str = "Appeared for steering";
 const LEADER_STEERING_PROMPT: &str = include_str!("prompts/leader_steering.md");
 const LEADER_REPORT_PROMPT: &str = include_str!("prompts/leader_report.md");
-const LEADER_HALT_GATE_PROMPT: &str =
-  include_str!("prompts/leader_halt_gate.md");
-const LEADER_PROCEED_GATE_PROMPT: &str =
-  include_str!("prompts/leader_proceed_gate.md");
-const LEADER_HALT_GATE_USER_PROMPT: &str =
-  include_str!("prompts/leader_halt_gate_user.md");
-const LEADER_PROCEED_GATE_USER_PROMPT: &str =
-  include_str!("prompts/leader_proceed_gate_user.md");
+const LEADER_PAUSE_GATE_PROMPT: &str =
+  include_str!("prompts/leader_pause_gate.md");
+const LEADER_RESUME_GATE_PROMPT: &str =
+  include_str!("prompts/leader_resume_gate.md");
+const LEADER_PAUSE_GATE_USER_PROMPT: &str =
+  include_str!("prompts/leader_pause_gate_user.md");
+const LEADER_RESUME_GATE_USER_PROMPT: &str =
+  include_str!("prompts/leader_resume_gate_user.md");
 
 const DEFAULT_WAKE_LABEL: &str = "Every hour";
 
@@ -103,9 +119,10 @@ const DO_NOTHING_TOOL_NAME: &str = "do_nothing";
 /// Maximum bytes emitted in tool args/output previews to the WebSocket.
 const PREVIEW_MAX_CHARS: usize = 240;
 
-/// On boot, brings every persisted room back online. Rooms with status
-/// `Paused` keep that state - the orchestrator starts but does not advance
-/// turns until the user resumes.
+/// On boot, brings every persisted room back online. Rooms in either
+/// [`RoomState::Deactivated`] or [`DebateState::Paused`] keep that state -
+/// the orchestrator starts but does not advance turns until the matching
+/// gate is flipped back.
 pub async fn restore_rooms(state: AppState) -> Result<()> {
   let rooms = db::load_all_rooms(&state.db).await?;
   for room in rooms {
@@ -122,8 +139,11 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   let report_seq = db::max_report_sequence(&state.db, &room_code).await?;
 
   let handle = RoomHandle::new(event_seq, report_seq);
-  if matches!(room.status, RoomStatus::Paused) {
-    handle.request_pause();
+  if matches!(room.room_state, RoomState::Deactivated) {
+    handle.request_deactivate();
+  }
+  if matches!(room.debate_state, DebateState::Paused) {
+    handle.request_pause_debate();
   }
 
   {
@@ -181,7 +201,7 @@ async fn run_debate_loop(
     if handle.is_stopped() {
       return;
     }
-    if handle.is_paused() {
+    if handle.is_blocked() {
       handle.pause_notify.notified().await;
       continue;
     }
@@ -277,6 +297,8 @@ async fn run_chat_turn(
     room.code.clone(),
     persona.name.to_string(),
   );
+  let inline_note_tool =
+    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
   let hook = DebateHook::new(turn_id.clone(), stream.clone());
   let recorder = hook.recorder();
 
@@ -292,6 +314,7 @@ async fn run_chat_turn(
       runner,
       leader_tool,
       do_nothing_tool,
+      inline_note_tool,
       hook,
       state: state.clone(),
       room_code: room.code.clone(),
@@ -339,17 +362,22 @@ async fn run_chat_turn(
 
   let sequence = handle.allocate_event_sequence();
   let timestamp = Utc::now();
-  let event = RoomEvent {
+  let draft = RoomEvent {
+    id: None,
     room_code: room.code.clone(),
     sequence,
     kind: RoomEventKind::AgentChat,
     agent: Some(persona.name.to_string()),
     content: trimmed,
     reasoning,
+    detail: String::new(),
     tool_calls,
     timestamp,
   };
-  db::insert_event(&state.db, &event).await.report();
+  let event = db::insert_event(&state.db, &draft)
+    .await
+    .report()
+    .unwrap_or_else(|| draft.clone());
 
   stream.send(WsEvent::MessageAdded {
     turn_id,
@@ -551,29 +579,34 @@ async fn evaluate_and_maybe_auto_pause(
   let preamble = build_room_preamble(room);
   let transcript = render_transcript_text(&history);
   let user_prompt = render_gate_user_prompt(
-    LEADER_HALT_GATE_USER_PROMPT,
+    LEADER_PAUSE_GATE_USER_PROMPT,
     &preamble,
     &label,
     &transcript,
   );
 
-  let halt_tool =
-    HaltRoomTool::new(state.clone(), room.code.clone(), label.clone());
+  let pause_tool =
+    PauseRoomTool::new(state.clone(), room.code.clone(), label.clone());
   let do_nothing_tool = DoNothingTool::new(
     state.clone(),
     room.code.clone(),
-    LEADER_HALT_AGENT.to_string(),
+    LEADER_AGENT.to_string(),
   );
+  let inline_note_tool =
+    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
     build_chat_client(&high).context("failed to construct high-tier client")?;
   client
-    .run_halt_gate_turn(HaltGateInputs {
-      system_prompt: LEADER_HALT_GATE_PROMPT.to_string(),
+    .run_pause_gate_turn(PauseGateInputs {
+      system_prompt: format!(
+        "{LEADER_PAUSE_GATE_PROMPT}\n\n{INLINE_NOTE_TOOL_HINT}"
+      ),
       user_prompt,
-      halt_tool,
+      pause_tool,
       do_nothing_tool,
+      inline_note_tool,
     })
     .await
 }
@@ -600,7 +633,10 @@ async fn run_resume_schedule_loop(
       continue;
     }
 
-    if !handle.is_paused() || !handle.is_auto_paused() {
+    // Only run the wake gate when the debate is auto-paused. A manual
+    // user deactivation overrides this — leave the debate alone, the user
+    // will re-activate when they're ready.
+    if !handle.is_auto_paused() || handle.is_deactivated() {
       tokio::select! {
         _ = handle.pause_notify.notified() => {}
         _ = handle.stop_notify.notified() => return,
@@ -629,7 +665,10 @@ async fn run_resume_schedule_loop(
       _ = handle.config_notify.notified() => continue,
     }
 
-    if handle.is_stopped() || !handle.is_paused() || !handle.is_auto_paused() {
+    if handle.is_stopped()
+      || !handle.is_auto_paused()
+      || handle.is_deactivated()
+    {
       continue;
     }
 
@@ -662,28 +701,33 @@ async fn evaluate_scheduled_resume(
   let preamble = build_room_preamble(room);
   let transcript = render_transcript_text(&history);
   let user_prompt = render_gate_user_prompt(
-    LEADER_PROCEED_GATE_USER_PROMPT,
+    LEADER_RESUME_GATE_USER_PROMPT,
     &preamble,
     &label,
     &transcript,
   );
 
-  let proceed_tool = ProceedRoomTool::new(state.clone(), room.code.clone());
+  let resume_tool = ResumeRoomTool::new(state.clone(), room.code.clone());
   let do_nothing_tool = DoNothingTool::new(
     state.clone(),
     room.code.clone(),
-    LEADER_PROCEED_AGENT.to_string(),
+    LEADER_AGENT.to_string(),
   );
+  let inline_note_tool =
+    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
     build_chat_client(&high).context("failed to construct high-tier client")?;
   client
-    .run_proceed_gate_turn(ProceedGateInputs {
-      system_prompt: LEADER_PROCEED_GATE_PROMPT.to_string(),
+    .run_resume_gate_turn(ResumeGateInputs {
+      system_prompt: format!(
+        "{LEADER_RESUME_GATE_PROMPT}\n\n{INLINE_NOTE_TOOL_HINT}"
+      ),
       user_prompt,
-      proceed_tool,
+      resume_tool,
       do_nothing_tool,
+      inline_note_tool,
     })
     .await
 }
@@ -722,7 +766,7 @@ async fn run_steering_loop(
     if handle.is_stopped() {
       return;
     }
-    if handle.is_paused() {
+    if handle.is_blocked() {
       continue;
     }
 
@@ -747,7 +791,9 @@ async fn run_leader_steering(
   }
 
   let preamble = build_room_preamble(room);
-  let system = format!("{LEADER_STEERING_PROMPT}\n\n{preamble}");
+  let system = format!(
+    "{LEADER_STEERING_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}"
+  );
   let transcript = render_transcript_text(&history);
   let user = format!(
     "Here is the recent debate transcript:\n\n{transcript}\n\nIssue \
@@ -759,21 +805,24 @@ async fn run_leader_steering(
 
   stream.send(WsEvent::DraftStarted {
     turn_id: turn_id.clone(),
-    agent: LEADER_STEERING_AGENT.to_string(),
+    agent: LEADER_AGENT.to_string(),
     kind: TurnKind::LeaderNote,
   });
 
   let hook = DebateHook::new(turn_id.clone(), stream.clone());
   let recorder = hook.recorder();
+  let inline_note_tool =
+    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
     build_chat_client(&high).context("failed to construct high-tier client")?;
   let final_text = client
-    .run_steering_turn(NoToolTurnInputs {
+    .run_steering_turn(SteeringTurnInputs {
       system_prompt: system,
       user_prompt: user,
       hook,
+      inline_note_tool,
     })
     .await
     .inspect_err(|error| {
@@ -792,24 +841,51 @@ async fn run_leader_steering(
     return Ok(());
   }
 
-  let (reasoning, tool_calls) = recorder.snapshot().await;
-  let sequence = handle.allocate_event_sequence();
+  // Persist the inline-note breadcrumb first so the timeline shows the
+  // gate context just before the bubble.
   let timestamp = Utc::now();
-  let event = RoomEvent {
+  let inline_draft = RoomEvent {
+    id: None,
     room_code: room.code.clone(),
-    sequence,
+    sequence: handle.allocate_event_sequence(),
+    kind: RoomEventKind::InlineNote,
+    agent: Some(LEADER_AGENT.to_string()),
+    content: STEERING_INLINE_NOTE.to_string(),
+    reasoning: String::new(),
+    detail: String::new(),
+    tool_calls: Vec::new(),
+    timestamp,
+  };
+  let inline_event = db::insert_event(&state.db, &inline_draft)
+    .await
+    .report()
+    .unwrap_or_else(|| inline_draft.clone());
+  stream.send(WsEvent::MessageAdded {
+    turn_id: new_turn_id(),
+    message: inline_event,
+  });
+
+  let (reasoning, tool_calls) = recorder.snapshot().await;
+  let bubble_draft = RoomEvent {
+    id: None,
+    room_code: room.code.clone(),
+    sequence: handle.allocate_event_sequence(),
     kind: RoomEventKind::LeaderNote,
-    agent: Some(LEADER_STEERING_AGENT.to_string()),
+    agent: Some(LEADER_AGENT.to_string()),
     content: trimmed,
     reasoning,
+    detail: String::new(),
     tool_calls,
     timestamp,
   };
-  db::insert_event(&state.db, &event).await.report();
+  let bubble_event = db::insert_event(&state.db, &bubble_draft)
+    .await
+    .report()
+    .unwrap_or_else(|| bubble_draft.clone());
 
   stream.send(WsEvent::MessageAdded {
     turn_id,
-    message: event,
+    message: bubble_event,
   });
   Ok(())
 }
@@ -860,7 +936,7 @@ async fn run_report_loop(
     if handle.is_stopped() {
       return;
     }
-    if handle.is_paused() {
+    if handle.is_blocked() {
       continue;
     }
 
@@ -1021,10 +1097,11 @@ pub(crate) async fn current_provider_configs(
 
 fn build_chat_system_prompt(room: &Room, persona: DebatePersona) -> String {
   format!(
-    "{persona_prompt}\n\n{preamble}\n\n{guardrail}",
+    "{persona_prompt}\n\n{preamble}\n\n{guardrail}\n\n{hint}",
     persona_prompt = persona.system_prompt,
     preamble = build_room_preamble(room),
     guardrail = CHAT_FORMAT_GUARDRAIL,
+    hint = INLINE_NOTE_TOOL_HINT,
   )
 }
 
@@ -1085,20 +1162,21 @@ pub(crate) fn build_room_preamble(room: &Room) -> String {
     out.push_str("\nInstruction: ");
     out.push_str(instruction);
   }
+  out.push_str("\nCurrent time: ");
+  out.push_str(&format_transcript_timestamp(Utc::now()));
   out
 }
 
 /// Renders persisted messages as the agent's chat history. Each row is
-/// folded into one assistant message tagged with the speaker name so a new
-/// debater can tell whose turn was whose.
+/// folded into one assistant message tagged with timestamp + speaker so a
+/// new debater can tell whose turn was whose and when each happened.
 fn render_transcript_messages(
   events: &[RoomEvent],
 ) -> Vec<rig::completion::Message> {
   events
     .iter()
     .map(|event| {
-      let speaker = event.agent.as_deref().unwrap_or("speaker");
-      let body = format!("{speaker}: {}", event.content);
+      let body = format_transcript_line(event);
       let assistant_content = AssistantContent::text(body);
       rig::completion::Message::Assistant {
         id: None,
@@ -1114,12 +1192,42 @@ fn render_transcript_messages(
 fn render_transcript_text(events: &[RoomEvent]) -> String {
   events
     .iter()
-    .map(|event| {
-      let speaker = event.agent.as_deref().unwrap_or("speaker");
-      format!("[{speaker}] {}", event.content)
-    })
+    .map(format_transcript_line)
     .collect::<Vec<_>>()
     .join("\n\n")
+}
+
+/// Formats one event for the transcript. Chat-bubble kinds (agent / leader
+/// / user) get `[timestamp] speaker: content`; inline notes get the body
+/// label only with an `(inline-note #N by Author)` marker so a persona can
+/// look up the click-to-reveal detail via `get_inline_note_detail`.
+fn format_transcript_line(event: &RoomEvent) -> String {
+  let timestamp = format_transcript_timestamp(event.timestamp);
+  let speaker = event.agent.as_deref().unwrap_or("speaker");
+  match event.kind {
+    RoomEventKind::InlineNote => {
+      let id_marker = match event.id {
+        Some(id) => format!("#{id}"),
+        None => "#?".to_string(),
+      };
+      format!(
+        "[{timestamp}] (inline-note {id_marker} by {speaker}) {}",
+        event.content
+      )
+    }
+    RoomEventKind::AgentChat
+    | RoomEventKind::LeaderNote
+    | RoomEventKind::UserChat => {
+      format!("[{timestamp}] {speaker}: {}", event.content)
+    }
+  }
+}
+
+/// Renders an absolute UTC timestamp in the canonical persona-prompt
+/// format `YYYY-MM-DD HH:MM:SS UTC`. Kept in one place so the transcript
+/// lines and the system-prompt "Current time" header agree exactly.
+pub(crate) fn format_transcript_timestamp(timestamp: DateTime<Utc>) -> String {
+  timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
 fn render_gate_user_prompt(

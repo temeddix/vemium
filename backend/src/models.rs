@@ -22,37 +22,69 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Lifecycle state of a [`Room`].
+/// User-controlled lifecycle gate for a [`Room`].
 ///
-/// Rooms are intentionally endless — there is no terminal "completed" state.
-/// A room only stops if the user pauses it, deletes it, or it fails.
+/// `Deactivated` is the strongest off-switch in the system: while in this
+/// state the orchestrator loop does not advance regardless of
+/// [`DebateState`] or any leader decision. Only the user (via the room
+/// menu) can flip this back to `Active`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RoomStatus {
-  /// Orchestrator is running and debaters are speaking on cadence.
+pub enum RoomState {
+  /// User has the room turned on. The orchestrator may run depending on
+  /// [`DebateState`].
   Active,
-  /// Orchestrator is suspended at a turn boundary; no LLM calls are issued.
-  Paused,
-  /// Orchestrator hit an unrecoverable error. The room remains visible for
-  /// inspection but does not advance.
-  Failed,
+  /// User has explicitly turned the room off. The orchestrator is fully
+  /// halted and the leader cannot wake it.
+  Deactivated,
 }
 
-impl RoomStatus {
+impl RoomState {
   pub fn as_str(self) -> &'static str {
     match self {
       Self::Active => "active",
-      Self::Paused => "paused",
-      Self::Failed => "failed",
+      Self::Deactivated => "deactivated",
     }
   }
 
   pub fn parse(value: &str) -> anyhow::Result<Self> {
     match value {
       "active" => Ok(Self::Active),
+      "deactivated" => Ok(Self::Deactivated),
+      other => Err(anyhow::anyhow!("unknown room state: {other}")),
+    }
+  }
+}
+
+/// Leader-controlled debate gate for a [`Room`].
+///
+/// Flipped by `pause_room` / `resume_room` (the leader's pause/resume
+/// gates) and by the auto-pause-on-converge path. Only meaningful when
+/// [`RoomState`] is `Active`; while the room is `Deactivated` this state
+/// is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DebateState {
+  /// Debaters are speaking on cadence.
+  Running,
+  /// Leader has paused the debate at a turn boundary; no LLM calls are
+  /// issued until the leader (or the resume schedule) flips this back.
+  Paused,
+}
+
+impl DebateState {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Running => "running",
+      Self::Paused => "paused",
+    }
+  }
+
+  pub fn parse(value: &str) -> anyhow::Result<Self> {
+    match value {
+      "running" => Ok(Self::Running),
       "paused" => Ok(Self::Paused),
-      "failed" => Ok(Self::Failed),
-      other => Err(anyhow::anyhow!("unknown room status: {other}")),
+      other => Err(anyhow::anyhow!("unknown debate state: {other}")),
     }
   }
 }
@@ -182,7 +214,8 @@ pub struct Room {
   pub topic: String,
   pub goal: String,
   pub instruction: Option<String>,
-  pub status: RoomStatus,
+  pub room_state: RoomState,
+  pub debate_state: DebateState,
   /// Sleep between consecutive debater turns, in seconds.
   pub chat_interval_seconds: u64,
   /// Cadence (in seconds) at which the leader emits a steering `leader_note`
@@ -215,7 +248,8 @@ impl Room {
       topic: self.topic.clone(),
       goal: self.goal.clone(),
       instruction: self.instruction.clone(),
-      status: self.status,
+      room_state: self.room_state,
+      debate_state: self.debate_state,
       chat_interval_seconds: self.chat_interval_seconds,
       steering_interval_seconds: self.steering_interval_seconds,
       report_schedule_cron: self.report_schedule_cron.clone(),
@@ -238,7 +272,8 @@ pub struct RoomView {
   pub topic: String,
   pub goal: String,
   pub instruction: Option<String>,
-  pub status: RoomStatus,
+  pub room_state: RoomState,
+  pub debate_state: DebateState,
   pub chat_interval_seconds: u64,
   pub steering_interval_seconds: u64,
   pub report_schedule_cron: String,
@@ -251,8 +286,12 @@ pub struct RoomView {
   pub updated_at: DateTime<Utc>,
 }
 
-/// Categorisation of a row in `room_events`. All kinds are part of the
-/// LLM-visible transcript and are rendered as message bubbles by the UI.
+/// Categorisation of a row in `room_events`. Chat-bubble kinds
+/// (`AgentChat`, `LeaderNote`, `UserChat`) are part of the LLM-visible
+/// transcript and render as full message bubbles. `InlineNote` is a
+/// lightweight breadcrumb (dim text next to the author's avatar) — its
+/// `content` holds the always-visible label and `detail` holds the
+/// click-to-reveal expansion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoomEventKind {
@@ -263,6 +302,10 @@ pub enum RoomEventKind {
   /// The human operator injected a message into the room. The orchestrator
   /// picks it up like any other transcript entry on the next turn.
   UserChat,
+  /// A short status breadcrumb (e.g. "Decided to do nothing.",
+  /// "Appeared for steering"). Always-visible label lives in `content`;
+  /// click-to-reveal text lives in `detail`.
+  InlineNote,
 }
 
 impl RoomEventKind {
@@ -271,6 +314,7 @@ impl RoomEventKind {
       Self::AgentChat => "agent_chat",
       Self::LeaderNote => "leader_note",
       Self::UserChat => "user_chat",
+      Self::InlineNote => "inline_note",
     }
   }
 
@@ -279,19 +323,30 @@ impl RoomEventKind {
       "agent_chat" => Ok(Self::AgentChat),
       "leader_note" => Ok(Self::LeaderNote),
       "user_chat" => Ok(Self::UserChat),
+      "inline_note" => Ok(Self::InlineNote),
       other => Err(anyhow::anyhow!("unknown room event kind: {other}")),
     }
   }
 }
 
-/// One finalized message in a room's chat log. The text content, the
-/// model's reasoning trace, and every tool call executed during the turn
-/// all live on the same row — there are no separate `tool_call` rows. The
-/// room's full visible history is the ordered list of these joined with
-/// [`RoomReport`] entries.
+/// One finalized row in `room_events`. For chat-bubble kinds, `content`
+/// is the message text, `reasoning` is the model's chain-of-thought, and
+/// `tool_calls` is every tool invocation from the turn (no separate
+/// `tool_call` rows). For [`RoomEventKind::InlineNote`], `content` is the
+/// short label and `detail` is the click-to-reveal expansion; the other
+/// payload fields are empty.
+///
+/// `id` is `None` for in-memory events that have not yet been persisted;
+/// the database assigns the actual primary key on insert.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomEvent {
+  /// Database primary key. `None` for events constructed in memory before
+  /// they hit `db::insert_event`; populated on every row read back from
+  /// the database, and reflected to the wire so the frontend (and the
+  /// inline-note detail tool) can address rows by id.
+  #[serde(default)]
+  pub id: Option<i64>,
   pub room_code: String,
   pub sequence: u64,
   pub kind: RoomEventKind,
@@ -301,6 +356,10 @@ pub struct RoomEvent {
   /// none, or when the provider doesn't expose reasoning separately.
   #[serde(default)]
   pub reasoning: String,
+  /// Click-to-reveal expansion for [`RoomEventKind::InlineNote`] rows.
+  /// Empty for every other kind.
+  #[serde(default)]
+  pub detail: String,
   /// Tools invoked during this turn, in invocation order. Empty when the
   /// turn called no tools.
   #[serde(default)]

@@ -36,10 +36,11 @@ use crate::python_runner::PythonRunner;
 use crate::runtime::{DebateHook, ReportHook, TurnRecorder};
 use crate::streaming::{RoomStream, TurnId, WsEvent};
 use crate::tools::do_nothing::DoNothingTool;
-use crate::tools::halt_room::HaltRoomTool;
+use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
-use crate::tools::proceed_room::ProceedRoomTool;
+use crate::tools::pause_room::PauseRoomTool;
 use crate::tools::python::RunPythonTool;
+use crate::tools::resume_room::ResumeRoomTool;
 use crate::tools::web_fetch::WebFetchTool;
 use crate::tools::workspace::{
   CreateSubjectFolderTool, ListFilesTool, ListSubjectFoldersTool, ReadFileTool,
@@ -79,6 +80,7 @@ pub struct DebateTurnInputs {
   pub runner: PythonRunner,
   pub leader_tool: RequestLeaderDecisionTool,
   pub do_nothing_tool: DoNothingTool,
+  pub inline_note_tool: GetInlineNoteDetailTool,
   pub hook: DebateHook,
   /// App state passed through so per-turn tools that emit `InlineNote` can
   /// reach the room's WebSocket stream.
@@ -88,29 +90,43 @@ pub struct DebateTurnInputs {
   pub author: String,
 }
 
-/// Inputs for the halt-gate tool loop. The model must call exactly one of
-/// the two tools — either `halt_room` (pause + leader bubble) or
-/// `do_nothing` (no-op + inline note). The gate never streams tokens to
-/// the UI; tool calls carry the entire decision.
-pub struct HaltGateInputs {
+/// Inputs for the pause-gate tool loop. The model must call exactly one of
+/// the two terminating tools - either `pause_room` (debate paused + leader
+/// bubble) or `do_nothing` (no-op + inline note); `get_inline_note_detail`
+/// is also available so the gate can dig into a breadcrumb (e.g. a
+/// Python-run traceback) before deciding. The gate never streams tokens
+/// to the UI; tool calls carry the entire decision.
+pub struct PauseGateInputs {
   pub system_prompt: String,
   pub user_prompt: String,
-  pub halt_tool: HaltRoomTool,
+  pub pause_tool: PauseRoomTool,
   pub do_nothing_tool: DoNothingTool,
+  pub inline_note_tool: GetInlineNoteDetailTool,
 }
 
-/// Inputs for the proceed-gate tool loop. Mirror of [`HaltGateInputs`] for
-/// the wake-on-cron decision; choices are `proceed_room` or `do_nothing`.
-pub struct ProceedGateInputs {
+/// Inputs for the resume-gate tool loop. Mirror of [`PauseGateInputs`] for
+/// the wake-on-cron decision; choices are `resume_room` or `do_nothing`,
+/// with `get_inline_note_detail` available for context lookups.
+pub struct ResumeGateInputs {
   pub system_prompt: String,
   pub user_prompt: String,
-  pub proceed_tool: ProceedRoomTool,
+  pub resume_tool: ResumeRoomTool,
   pub do_nothing_tool: DoNothingTool,
+  pub inline_note_tool: GetInlineNoteDetailTool,
 }
 
-/// Inputs for a no-tool streaming turn (leader evaluation / report). The
-/// `hook` is generic over its concrete type so the same struct can be
-/// reused for both [`DebateHook`] and [`ReportHook`].
+/// Inputs for the leader steering turn. Streams tokens via the hook and
+/// exposes `get_inline_note_detail` so the leader can pull breadcrumb
+/// bodies before composing the steering note.
+pub struct SteeringTurnInputs {
+  pub system_prompt: String,
+  pub user_prompt: String,
+  pub hook: DebateHook,
+  pub inline_note_tool: GetInlineNoteDetailTool,
+}
+
+/// Inputs for a no-tool streaming turn (leader report). Used only by the
+/// report flow now; gate / steering turns carry their own input types.
 pub struct NoToolTurnInputs<H> {
   pub system_prompt: String,
   pub user_prompt: String,
@@ -127,27 +143,25 @@ pub trait ChatClient: Send + Sync {
   /// streams; the returned String is the final assistant message.
   async fn run_debate_turn(&self, inputs: DebateTurnInputs) -> Result<String>;
 
-  /// Streaming no-tool turn used for the periodic leader steering nudge.
-  /// The hook receives token / reasoning deltas; the result is the final
-  /// text.
+  /// Streaming turn used for the periodic leader steering nudge. The hook
+  /// receives token / reasoning deltas; the result is the final text. The
+  /// steering turn carries the `get_inline_note_detail` tool so the leader
+  /// can peek at breadcrumb bodies before composing its note.
   async fn run_steering_turn(
     &self,
-    inputs: NoToolTurnInputs<DebateHook>,
+    inputs: SteeringTurnInputs,
   ) -> Result<String>;
 
-  /// Non-streaming gate turn for the convergence halt decision. The model
-  /// is expected to call exactly one of `halt_room` / `do_nothing`; both
+  /// Non-streaming gate turn for the convergence pause decision. The model
+  /// is expected to call exactly one of `pause_room` / `do_nothing`; both
   /// tools own their side effects, so the assistant's text reply is
   /// discarded.
-  async fn run_halt_gate_turn(&self, inputs: HaltGateInputs) -> Result<()>;
+  async fn run_pause_gate_turn(&self, inputs: PauseGateInputs) -> Result<()>;
 
   /// Non-streaming gate turn for the scheduled wake decision. Mirrors
-  /// [`Self::run_halt_gate_turn`] but with `proceed_room` instead of
-  /// `halt_room`.
-  async fn run_proceed_gate_turn(
-    &self,
-    inputs: ProceedGateInputs,
-  ) -> Result<()>;
+  /// [`Self::run_pause_gate_turn`] but with `resume_room` instead of
+  /// `pause_room`.
+  async fn run_resume_gate_turn(&self, inputs: ResumeGateInputs) -> Result<()>;
 
   /// Streaming no-tool turn used for the periodic leader report. Like
   /// [`Self::run_evaluation_turn`], but the hook is a [`ReportHook`] that
@@ -231,32 +245,29 @@ impl ChatClient for OllamaChatClient {
 
   async fn run_steering_turn(
     &self,
-    inputs: NoToolTurnInputs<DebateHook>,
+    inputs: SteeringTurnInputs,
   ) -> Result<String> {
     let builder = self
       .client
       .agent(&self.model)
       .additional_params(ollama_extra_params());
-    run_no_tool_stream(builder, inputs).await
+    run_steering_stream(builder, inputs).await
   }
 
-  async fn run_halt_gate_turn(&self, inputs: HaltGateInputs) -> Result<()> {
+  async fn run_pause_gate_turn(&self, inputs: PauseGateInputs) -> Result<()> {
     let builder = self
       .client
       .agent(&self.model)
       .additional_params(ollama_extra_params());
-    run_halt_gate_with_builder(builder, inputs).await
+    run_pause_gate_with_builder(builder, inputs).await
   }
 
-  async fn run_proceed_gate_turn(
-    &self,
-    inputs: ProceedGateInputs,
-  ) -> Result<()> {
+  async fn run_resume_gate_turn(&self, inputs: ResumeGateInputs) -> Result<()> {
     let builder = self
       .client
       .agent(&self.model)
       .additional_params(ollama_extra_params());
-    run_proceed_gate_with_builder(builder, inputs).await
+    run_resume_gate_with_builder(builder, inputs).await
   }
 
   async fn run_report_turn(
@@ -333,32 +344,29 @@ impl ChatClient for OpenRouterChatClient {
 
   async fn run_steering_turn(
     &self,
-    inputs: NoToolTurnInputs<DebateHook>,
+    inputs: SteeringTurnInputs,
   ) -> Result<String> {
     let builder = self
       .client
       .agent(&self.model)
       .additional_params(openrouter_extra_params());
-    run_no_tool_stream(builder, inputs).await
+    run_steering_stream(builder, inputs).await
   }
 
-  async fn run_halt_gate_turn(&self, inputs: HaltGateInputs) -> Result<()> {
+  async fn run_pause_gate_turn(&self, inputs: PauseGateInputs) -> Result<()> {
     let builder = self
       .client
       .agent(&self.model)
       .additional_params(openrouter_extra_params());
-    run_halt_gate_with_builder(builder, inputs).await
+    run_pause_gate_with_builder(builder, inputs).await
   }
 
-  async fn run_proceed_gate_turn(
-    &self,
-    inputs: ProceedGateInputs,
-  ) -> Result<()> {
+  async fn run_resume_gate_turn(&self, inputs: ResumeGateInputs) -> Result<()> {
     let builder = self
       .client
       .agent(&self.model)
       .additional_params(openrouter_extra_params());
-    run_proceed_gate_with_builder(builder, inputs).await
+    run_resume_gate_with_builder(builder, inputs).await
   }
 
   async fn run_report_turn(
@@ -417,6 +425,7 @@ where
     .tool(WriteFileTool::new(inputs.workspace))
     .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
+    .tool(inputs.inline_note_tool)
     .build();
 
   let reasoning_stream = inputs.hook.stream().clone();
@@ -453,21 +462,27 @@ where
   Ok(final_text)
 }
 
-/// Streaming no-tool turn used by leader evaluations. Same shape as
-/// [`run_chat_turn_with_builder`] but without the tool wiring.
-async fn run_no_tool_stream<M>(
+/// Streaming steering turn for the leader. Mirrors
+/// [`run_chat_turn_with_builder`] but with only the
+/// `get_inline_note_detail` tool attached so the leader can pull
+/// breadcrumb bodies before composing its note.
+async fn run_steering_stream<M>(
   builder: AgentBuilder<M>,
-  inputs: NoToolTurnInputs<DebateHook>,
+  inputs: SteeringTurnInputs,
 ) -> Result<String>
 where
   M: CompletionModel + 'static,
 {
-  let agent = builder.preamble(&inputs.system_prompt).build();
+  let agent = builder
+    .preamble(&inputs.system_prompt)
+    .tool(inputs.inline_note_tool)
+    .build();
   let reasoning_stream = inputs.hook.stream().clone();
   let reasoning_turn_id = inputs.hook.turn_id().clone();
   let reasoning_recorder = inputs.hook.recorder();
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
+    .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
     .with_hook(inputs.hook)
     .await;
 
@@ -492,21 +507,24 @@ where
   Ok(final_text)
 }
 
-/// Runs the halt-gate tool loop: build the agent with `halt_room` +
-/// `do_nothing` and let the model pick exactly one. The tools own their
-/// side effects (bubble + status flip for halt; inline note for nothing),
-/// so we discard the assistant's text reply.
-async fn run_halt_gate_with_builder<M>(
+/// Runs the pause-gate tool loop: build the agent with `pause_room` +
+/// `do_nothing` and let the model pick exactly one to terminate. The
+/// `get_inline_note_detail` tool is also attached so the gate can dig
+/// into a breadcrumb before deciding. The terminating tools own their
+/// side effects (bubble + debate-state flip for pause; inline note for
+/// nothing), so we discard the assistant's text reply.
+async fn run_pause_gate_with_builder<M>(
   builder: AgentBuilder<M>,
-  inputs: HaltGateInputs,
+  inputs: PauseGateInputs,
 ) -> Result<()>
 where
   M: CompletionModel + 'static,
 {
   let agent = builder
     .preamble(&inputs.system_prompt)
-    .tool(inputs.halt_tool)
+    .tool(inputs.pause_tool)
     .tool(inputs.do_nothing_tool)
+    .tool(inputs.inline_note_tool)
     .build();
   agent
     .prompt(inputs.user_prompt)
@@ -516,18 +534,19 @@ where
   Ok(())
 }
 
-/// Mirror of [`run_halt_gate_with_builder`] for the wake-on-cron decision.
-async fn run_proceed_gate_with_builder<M>(
+/// Mirror of [`run_pause_gate_with_builder`] for the wake-on-cron decision.
+async fn run_resume_gate_with_builder<M>(
   builder: AgentBuilder<M>,
-  inputs: ProceedGateInputs,
+  inputs: ResumeGateInputs,
 ) -> Result<()>
 where
   M: CompletionModel + 'static,
 {
   let agent = builder
     .preamble(&inputs.system_prompt)
-    .tool(inputs.proceed_tool)
+    .tool(inputs.resume_tool)
     .tool(inputs.do_nothing_tool)
+    .tool(inputs.inline_note_tool)
     .build();
   agent
     .prompt(inputs.user_prompt)

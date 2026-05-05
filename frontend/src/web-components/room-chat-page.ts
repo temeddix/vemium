@@ -6,8 +6,8 @@ import {
 } from "@/app/chat";
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
-import type { Draft, Message, Room, RoomView } from "@/app/types";
-import { roomStatusToText } from "@/app/utils";
+import type { Draft, Message, Room, RoomView, TurnKind } from "@/app/types";
+import { roomBadgeText } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -18,13 +18,6 @@ import "./chat-message.ts";
 import "./room-files-dialog.ts";
 import "./room-reports-dialog.ts";
 import "./room-settings-dialog.ts";
-
-interface InlineNoteEntry {
-  author: string;
-  text: string;
-  detail: string;
-  timestamp: string;
-}
 
 interface NoteDialogState {
   author: string;
@@ -38,21 +31,24 @@ declare global {
   }
 }
 
+/**
+ * One entry rendered in the scroll area. Either a finalized message (chat
+ * bubble or inline-note breadcrumb depending on `kind`), or a live draft.
+ * Drafts are always chat-bubble shaped - inline notes are persisted
+ * directly without a draft phase.
+ */
 interface BubbleEntry {
-  type: "message" | "draft" | "inline-note";
+  type: "message" | "draft";
   message: Message | null;
   draft: Draft | null;
-  inlineNote: InlineNoteEntry | null;
   /** Sort key shared between persisted messages and live drafts. */
   sortKey: number;
   /** ISO timestamp used for time-gap separators and grouping decisions. */
   timestamp: string;
   /** Speaker identity for grouping (matches `Message.agent`/`Draft.agent`). */
   agentKey: string;
-  kind: BubbleKind;
+  kind: TurnKind;
 }
-
-type BubbleKind = "agent_chat" | "leader_note" | "user_chat";
 
 /**
  * Top-level page for `/room/:code`. Owns the chat-stream subscription
@@ -223,11 +219,15 @@ export class RoomChatPage extends LitElement {
       border-radius: 0.4rem;
     }
 
-    .inline-note-button:hover,
-    .inline-note-button:focus-visible {
+    .inline-note-button:hover:not(:disabled),
+    .inline-note-button:focus-visible:not(:disabled) {
       background: var(--wa-color-fill-quiet);
       color: var(--wa-color-text-normal);
       outline: none;
+    }
+
+    .inline-note-button:disabled {
+      cursor: default;
     }
 
     .inline-note-author {
@@ -327,14 +327,14 @@ export class RoomChatPage extends LitElement {
                 : `Reconnecting #${this.dashboardState?.reconnectAttempt ?? 0}`}
             </wa-badge>
             <wa-badge size="small" appearance="outlined">
-              ${roomStatusToText(room.status)}
+              ${roomBadgeText(room.roomState, room.debateState)}
             </wa-badge>
           </div>
           <wa-dropdown placement="bottom-end">
             <wa-button slot="trigger" size="small" title="More actions">
               <wa-icon name="ellipsis-vertical"></wa-icon>
             </wa-button>
-            ${this.#renderPauseItem(room)}
+            ${this.#renderActivationItem(room)}
             <wa-dropdown-item
               @click="${(): void => this.#settingsDialogRef.value?.show(room)}"
             >
@@ -419,21 +419,21 @@ export class RoomChatPage extends LitElement {
     `;
   }
 
-  #renderPauseItem(room: Room) {
-    if (room.status === "paused") {
+  #renderActivationItem(room: Room) {
+    if (room.roomState === "deactivated") {
       return html`
         <wa-dropdown-item
-          @click="${(): Promise<void> => this.store.resumeRoom(room.code)}"
+          @click="${(): Promise<void> => this.store.activateRoom(room.code)}"
         >
-          Resume
+          Activate
         </wa-dropdown-item>
       `;
     }
     return html`
       <wa-dropdown-item
-        @click="${(): Promise<void> => this.store.pauseRoom(room.code)}"
+        @click="${(): Promise<void> => this.store.deactivateRoom(room.code)}"
       >
-        Pause
+        Deactivate
       </wa-dropdown-item>
     `;
   }
@@ -460,14 +460,11 @@ export class RoomChatPage extends LitElement {
       previous?.timestamp ?? null,
       entry.timestamp,
     );
-    if (entry.type === "inline-note" && entry.inlineNote !== null) {
+    if (entry.kind === "inline_note" && entry.message !== null) {
       return this.#renderInlineNote(
-        entry.inlineNote,
+        entry.message,
         showSeparator,
-        entry.timestamp,
         next,
-        entry.agentKey,
-        entry.kind,
       );
     }
     const isLast = isLastInRun(
@@ -496,29 +493,34 @@ export class RoomChatPage extends LitElement {
   }
 
   /** Renders an inline-note breadcrumb (e.g. `do_nothing`, Python run
-   * outcome). The avatar matches the chat-bubble row layout so the note
-   * visually attaches to the author's identity, and the dim text is a
-   * button that opens a dialog with the full detail. */
+   * outcome, or a leader appearance like "Appeared for steering"). The
+   * avatar matches the chat-bubble row layout so the note visually
+   * attaches to the author's identity, and the dim text is a button that
+   * opens a dialog with the full detail. */
   #renderInlineNote(
-    note: InlineNoteEntry,
+    message: Message,
     showSeparator: boolean,
-    timestamp: string,
     next: BubbleEntry | null,
-    agentKey: string,
-    kind: BubbleKind,
   ) {
+    const author = message.agent ?? "";
     const showAvatar = isLastInRun(
-      { kind, agent: agentKey },
+      { kind: "inline_note", agent: author },
       next === null ? null : { kind: next.kind, agent: next.agentKey },
     );
-    const color = resolveAvatarColor(kind, note.author);
+    const color = resolveAvatarColor("inline_note", message.agent);
     const avatarStyle =
       `background:${color.background};color:${color.foreground}`;
+    const hasDetail = message.detail !== "";
+    const onClick = (): void => {
+      if (hasDetail) {
+        this.#openNoteDialog(author, message.content, message.detail);
+      }
+    };
     return html`
       ${showSeparator
         ? html`
           <div class="time-separator">
-            ${formatSeparatorTimestamp(timestamp)}
+            ${formatSeparatorTimestamp(message.timestamp)}
           </div>
         `
         : nothing}
@@ -531,21 +533,18 @@ export class RoomChatPage extends LitElement {
         <button
           type="button"
           class="inline-note-button"
-          @click="${(): void => this.#openNoteDialog(note)}"
+          ?disabled="${!hasDetail}"
+          @click="${onClick}"
         >
-          <span class="inline-note-author">${note.author}</span>
-          <span> ${note.text}</span>
+          <span class="inline-note-author">${author}</span>
+          <span> ${message.content}</span>
         </button>
       </div>
     `;
   }
 
-  #openNoteDialog(note: InlineNoteEntry): void {
-    this.noteDialog = {
-      author: note.author,
-      text: note.text,
-      detail: note.detail,
-    };
+  #openNoteDialog(author: string, text: string, detail: string): void {
+    this.noteDialog = { author, text, detail };
     const dialog = this.#noteDialogRef.value;
     if (dialog !== undefined) {
       dialog.open = true;
@@ -557,32 +556,15 @@ export class RoomChatPage extends LitElement {
       type: "message",
       message,
       draft: null,
-      inlineNote: null,
       sortKey: message.sequence,
       timestamp: message.timestamp,
       agentKey: message.agent ?? "",
       kind: message.kind,
     }));
-    const notes: BubbleEntry[] = view.inlineNotes.map((note, idx) => ({
-      type: "inline-note",
-      message: null,
-      draft: null,
-      inlineNote: {
-        author: note.author,
-        text: note.text,
-        detail: note.detail,
-        timestamp: note.timestamp,
-      },
-      sortKey: Number.MAX_SAFE_INTEGER - 1 + idx,
-      timestamp: note.timestamp,
-      agentKey: note.author,
-      kind: "leader_note",
-    }));
     const drafts: BubbleEntry[] = view.drafts.map((draft) => ({
       type: "draft",
       message: null,
       draft,
-      inlineNote: null,
       // Drafts always sort after every persisted message (sequences live in
       // the same monotonic counter, so any unfinished draft is "newer than
       // anything we've seen").
@@ -591,9 +573,7 @@ export class RoomChatPage extends LitElement {
       agentKey: draft.agent,
       kind: draft.kind,
     }));
-    return [...messages, ...notes, ...drafts].sort((a, b) =>
-      a.sortKey - b.sortKey
-    );
+    return [...messages, ...drafts].sort((a, b) => a.sortKey - b.sortKey);
   }
 
   // -- Actions ------------------------------------------------------------

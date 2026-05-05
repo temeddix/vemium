@@ -1,7 +1,7 @@
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
-import type { Room, RoomStatus } from "@/app/types";
-import { formatTimestamp, roomStatusToText } from "@/app/utils";
+import type { Room } from "@/app/types";
+import { formatTimestamp, roomBadgeText } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -253,7 +253,7 @@ export class RoomListPage extends LitElement {
                   <span class="room-time">${formatTimestamp(
                     room.createdAt,
                   )}</span>
-                  ${this.#renderStatusBadge(room.status)}
+                  ${this.#renderStatusBadge(room)}
                 </span>
               </a>
               <span class="room-card-menu">
@@ -280,10 +280,10 @@ export class RoomListPage extends LitElement {
     `;
   }
 
-  #renderStatusBadge(status: RoomStatus) {
+  #renderStatusBadge(room: Room) {
     return html`
       <wa-badge size="small" appearance="outlined">
-        ${roomStatusToText(status)}
+        ${roomBadgeText(room.roomState, room.debateState)}
       </wa-badge>
     `;
   }

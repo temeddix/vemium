@@ -1,4 +1,4 @@
-import type { RoomStatus } from "@/app/types";
+import type { DebateState, RoomState } from "@/app/types";
 
 export function formatTimestamp(timestamp: string): string {
   const date = new Date(timestamp);
@@ -12,15 +12,21 @@ export function formatTimestamp(timestamp: string): string {
   });
 }
 
-export function roomStatusToText(status: RoomStatus): string {
-  switch (status) {
-    case "active":
-      return "Active";
-    case "paused":
-      return "Paused";
-    case "failed":
-      return "Failed";
+/**
+ * Returns a single short label that summarizes both gates for a status
+ * badge. While the room is `Deactivated` the leader's gate is irrelevant
+ * and we surface only that; while `Active` we expose the debate gate
+ * (`Running` / `Paused`) so users can tell whether the leader has stopped
+ * the debate at a checkpoint.
+ */
+export function roomBadgeText(
+  roomState: RoomState,
+  debateState: DebateState,
+): string {
+  if (roomState === "deactivated") {
+    return "Deactivated";
   }
+  return debateState === "running" ? "Running" : "Paused";
 }
 
 export function sleep(milliseconds: number): Promise<void> {

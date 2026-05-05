@@ -18,8 +18,8 @@
 //! PATCH  /v1/rooms/:code
 //! DELETE /v1/rooms/:code
 //! POST   /v1/rooms/:code/clone
-//! POST   /v1/rooms/:code/pause
-//! POST   /v1/rooms/:code/resume
+//! POST   /v1/rooms/:code/activate
+//! POST   /v1/rooms/:code/deactivate
 //! POST   /v1/rooms/:code/messages
 //! GET    /v1/rooms/:code/reports
 //! GET    /v1/rooms/:code/reports/:seq
@@ -28,6 +28,11 @@
 //! GET    /v1/rooms/:code/files/download
 //! GET    /v1/rooms/:code/stream    (WebSocket)
 //! ```
+//!
+//! `/activate` and `/deactivate` flip the user-controlled [`RoomState`]
+//! gate. The leader-controlled [`DebateState`] gate (running / paused)
+//! has no public route — it only moves through the `pause_room` /
+//! `resume_room` tools called by the leader.
 
 use crate::app_state::AppState;
 use crate::config::room_defaults;
@@ -35,8 +40,8 @@ use crate::db;
 use crate::error::ReportError;
 use crate::models::{
   AppSettings, CloneRoomRequest, CreateMessageRequest, CreateRoomRequest,
-  ProviderConfig, REDACTED_API_KEY_SENTINEL, Room, RoomEvent, RoomEventKind,
-  RoomStatus, UpdateAppSettingsRequest, UpdateRoomRequest,
+  DebateState, ProviderConfig, REDACTED_API_KEY_SENTINEL, Room, RoomEvent,
+  RoomEventKind, RoomState, UpdateAppSettingsRequest, UpdateRoomRequest,
 };
 use crate::provider_models;
 use crate::runtime;
@@ -75,8 +80,8 @@ pub fn create_router(state: AppState) -> Router {
       get(get_room).patch(update_room).delete(delete_room),
     )
     .route("/v1/rooms/:code/clone", post(clone_room))
-    .route("/v1/rooms/:code/pause", post(pause_room))
-    .route("/v1/rooms/:code/resume", post(resume_room))
+    .route("/v1/rooms/:code/activate", post(activate_room))
+    .route("/v1/rooms/:code/deactivate", post(deactivate_room))
     .route("/v1/rooms/:code/messages", post(post_user_message))
     .route("/v1/rooms/:code/reports", get(list_reports))
     .route("/v1/rooms/:code/reports/:sequence", get(get_report))
@@ -244,7 +249,8 @@ async fn create_room(
       .instruction
       .map(|s| s.trim().to_string())
       .filter(|s| !s.is_empty()),
-    status: RoomStatus::Active,
+    room_state: RoomState::Active,
+    debate_state: DebateState::Running,
     chat_interval_seconds: payload
       .chat_interval_seconds
       .unwrap_or(room_defaults::CHAT_INTERVAL_SECONDS),
@@ -437,7 +443,8 @@ async fn clone_room(
     topic: source.topic.clone(),
     goal: source.goal.clone(),
     instruction: source.instruction.clone(),
-    status: RoomStatus::Active,
+    room_state: RoomState::Active,
+    debate_state: DebateState::Running,
     chat_interval_seconds: source.chat_interval_seconds,
     steering_interval_seconds: source.steering_interval_seconds,
     report_schedule_cron: source.report_schedule_cron.clone(),
@@ -495,24 +502,32 @@ async fn delete_room(
   (StatusCode::NO_CONTENT, Json(json!({}))).into_response()
 }
 
-async fn pause_room(
+/// `POST /v1/rooms/:code/activate` — flips the user-controlled
+/// [`RoomState`] gate to `Active`. Independent of [`DebateState`]: a room
+/// that the leader paused stays paused until the leader (or the resume
+/// schedule) flips it back; activating only undoes a prior deactivate.
+async fn activate_room(
   Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  set_room_status(state, &code, RoomStatus::Paused).await
+  set_room_state(state, &code, RoomState::Active).await
 }
 
-async fn resume_room(
+/// `POST /v1/rooms/:code/deactivate` — flips the user-controlled
+/// [`RoomState`] gate to `Deactivated`. The strongest off-switch: while
+/// deactivated the orchestrator does not advance regardless of
+/// [`DebateState`].
+async fn deactivate_room(
   Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  set_room_status(state, &code, RoomStatus::Active).await
+  set_room_state(state, &code, RoomState::Deactivated).await
 }
 
-async fn set_room_status(
+async fn set_room_state(
   state: AppState,
   room_code: &str,
-  status: RoomStatus,
+  new_state: RoomState,
 ) -> axum::response::Response {
   let updated_at = Utc::now();
   {
@@ -520,14 +535,14 @@ async fn set_room_status(
     let Some(room) = rooms.get_mut(room_code) else {
       return not_found("room");
     };
-    room.status = status;
+    room.room_state = new_state;
     room.updated_at = updated_at;
   }
   if let Err(error) =
-    db::update_room_status(&state.db, room_code, status, updated_at).await
+    db::update_room_state(&state.db, room_code, new_state, updated_at).await
   {
-    tracing::warn!(%error, "failed to persist status change");
-    return internal("failed to update status");
+    tracing::warn!(%error, "failed to persist room state change");
+    return internal("failed to update room state");
   }
 
   let handle = {
@@ -535,17 +550,20 @@ async fn set_room_status(
     handles.get(room_code).cloned()
   };
   if let Some(handle) = handle {
-    match status {
-      RoomStatus::Paused => handle.request_pause(),
-      RoomStatus::Active => handle.request_resume(),
-      RoomStatus::Failed => handle.request_stop(),
+    match new_state {
+      RoomState::Active => handle.request_activate(),
+      RoomState::Deactivated => handle.request_deactivate(),
     }
   }
 
   let stream = state.ensure_room_stream(room_code).await;
-  stream.send(WsEvent::RoomStatus { status });
+  stream.send(WsEvent::RoomState { state: new_state });
 
-  (StatusCode::OK, Json(json!({"status": status.as_str()}))).into_response()
+  (
+    StatusCode::OK,
+    Json(json!({"roomState": new_state.as_str()})),
+  )
+    .into_response()
 }
 
 /// Author of a `user_chat` row. Stable string so the frontend can pick the
@@ -577,21 +595,26 @@ async fn post_user_message(
     }
   };
 
-  let event = RoomEvent {
+  let draft = RoomEvent {
+    id: None,
     room_code: code.clone(),
     sequence: handle.allocate_event_sequence(),
     kind: RoomEventKind::UserChat,
     agent: Some(USER_AGENT_NAME.to_string()),
     content,
     reasoning: String::new(),
+    detail: String::new(),
     tool_calls: Vec::new(),
     timestamp: Utc::now(),
   };
 
-  if let Err(error) = db::insert_event(&state.db, &event).await {
-    tracing::warn!(%error, "failed to insert user message");
-    return internal("failed to persist message");
-  }
+  let event = match db::insert_event(&state.db, &draft).await {
+    Ok(stored) => stored,
+    Err(error) => {
+      tracing::warn!(%error, "failed to insert user message");
+      return internal("failed to persist message");
+    }
+  };
 
   let stream = state.ensure_room_stream(&code).await;
   stream.send(WsEvent::MessageAdded {

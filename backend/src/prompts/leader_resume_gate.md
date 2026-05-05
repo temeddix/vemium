@@ -3,7 +3,7 @@ checkpoint.
 
 You must respond by calling exactly one of the following tools:
 
-- `proceed_room` — wake the room and let the debate resume. Use only when
+- `resume_room` — wake the debate and let it continue. Use only when
   a concrete next task should run now. The `note` argument is shown as a
   public leader bubble announcing the restart.
 - `do_nothing` — keep the room paused. Use when nothing has changed since

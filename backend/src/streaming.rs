@@ -41,7 +41,7 @@
 //! subscribers a header to attach incoming tokens to.
 
 use crate::models::{
-  ReportStatus, RoomEvent, RoomReport, RoomStatus, RoomView,
+  DebateState, ReportStatus, RoomEvent, RoomReport, RoomState, RoomView,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -221,18 +221,14 @@ pub enum WsEvent {
     reports: Vec<RoomReport>,
   },
 
-  /// Room lifecycle change: active <-> paused, or terminal failure.
-  RoomStatus { status: RoomStatus },
+  /// User-controlled lifecycle gate flipped (active <-> deactivated).
+  /// Emitted only by the user-facing `/v1/rooms/:code/{activate,deactivate}`
+  /// endpoints — the leader cannot move this gate.
+  RoomState { state: RoomState },
 
-  /// Non-bubble short note (dim text) for lightweight status breadcrumbs.
-  /// `detail` is shown only when the user clicks the note; `text` is the
-  /// always-visible label (e.g. "Decided to do nothing.").
-  InlineNote {
-    author: String,
-    text: String,
-    detail: String,
-    timestamp: DateTime<Utc>,
-  },
+  /// Leader-controlled debate gate flipped (running <-> paused). Emitted by
+  /// `pause_room` / `resume_room` and by the auto-pause-on-converge path.
+  DebateState { state: DebateState },
 
   /// A new turn has started. Subsequent `Draft*` frames with the same
   /// `turnId` belong to this draft until a matching `MessageAdded` /
