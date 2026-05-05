@@ -401,8 +401,8 @@ export class RoomSettingsDialog extends LitElement {
           name="circle-question"
           tabindex="0"
         ></wa-icon>
-        <wa-tooltip for="${anchorId}" placement="top">${tooltip}</wa-tooltip>
       </span>
+      <wa-tooltip for="${anchorId}" placement="top">${tooltip}</wa-tooltip>
     `;
   }
 
@@ -473,10 +473,10 @@ export class RoomSettingsDialog extends LitElement {
             name="circle-question"
             tabindex="0"
           ></wa-icon>
-          <wa-tooltip for="${legendAnchor}" placement="top">
-            ${tierTooltip}
-          </wa-tooltip>
         </legend>
+        <wa-tooltip for="${legendAnchor}" placement="top">
+          ${tierTooltip}
+        </wa-tooltip>
         <label class="form-field">
           ${this.#renderLabel(
             `${keyPrefix}-api-type`,
