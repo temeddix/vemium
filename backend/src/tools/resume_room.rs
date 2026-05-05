@@ -1,13 +1,16 @@
-//! `halt_room` tool: leader gate decision to pause a room when the debate
-//! has converged. Persists a `leader_note` bubble carrying the reasoning
-//! and flips the room into a paused state so the resume scheduler picks it
-//! up at the next cron tick.
+//! `resume_room` tool: leader gate decision to wake a paused debate at a
+//! scheduled checkpoint. Persists a `leader_note` bubble announcing the
+//! restart and flips the room's [`DebateState`] back to `Running`.
+//!
+//! Note: this is the leader-controlled gate. The user-controlled
+//! activate/deactivate path is independent and lives on the routes layer.
 
 use crate::app_state::AppState;
 use crate::db;
 use crate::error::ReportError;
-use crate::models::{RoomEvent, RoomEventKind, RoomStatus};
+use crate::models::{DebateState, RoomEvent, RoomEventKind};
 use crate::streaming::{WsEvent, new_turn_id};
+use crate::tools::pause_room::LEADER_AGENT;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -15,65 +18,52 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-const NAME: &str = "halt_room";
-pub const LEADER_HALT_AGENT: &str = "Leader (halt)";
+const NAME: &str = "resume_room";
 
 #[derive(Clone)]
-pub struct HaltRoomTool {
+pub struct ResumeRoomTool {
   state: AppState,
   room_code: String,
-  /// Cached schedule label so the default note stays meaningful when the
-  /// model returns an empty `note`.
-  schedule_label: String,
 }
 
-impl HaltRoomTool {
-  pub fn new(
-    state: AppState,
-    room_code: String,
-    schedule_label: String,
-  ) -> Self {
-    Self {
-      state,
-      room_code,
-      schedule_label,
-    }
+impl ResumeRoomTool {
+  pub fn new(state: AppState, room_code: String) -> Self {
+    Self { state, room_code }
   }
 }
 
 #[derive(Debug, Deserialize)]
-pub struct HaltRoomArgs {
+pub struct ResumeRoomArgs {
   /// Reasoning shown as a public leader note bubble.
   pub note: String,
 }
 
 #[derive(Debug, Serialize)]
-pub struct HaltRoomOutput {
+pub struct ResumeRoomOutput {
   pub acknowledged: bool,
 }
 
 #[derive(Debug, Error)]
-pub enum HaltRoomError {
+pub enum ResumeRoomError {
   #[error("room handle missing")]
   HandleMissing,
-  #[error("failed to update room status: {0}")]
+  #[error("failed to update debate state: {0}")]
   Persist(String),
 }
 
-impl Tool for HaltRoomTool {
+impl Tool for ResumeRoomTool {
   const NAME: &'static str = NAME;
-  type Args = HaltRoomArgs;
-  type Output = HaltRoomOutput;
-  type Error = HaltRoomError;
+  type Args = ResumeRoomArgs;
+  type Output = ResumeRoomOutput;
+  type Error = ResumeRoomError;
 
   async fn definition(&self, _prompt: String) -> ToolDefinition {
     ToolDefinition {
       name: NAME.to_string(),
-      description: "Pause the room until the next scheduled wake check. \
-                    Call this when every persona has clearly run out of \
-                    contributions and waiting is safe. Your `note` is \
-                    persisted as a public leader bubble so the user sees \
-                    why."
+      description: "Wake the room and let the debate resume. Call this when \
+                    a concrete next task should run now. Your `note` is \
+                    persisted as a public leader bubble announcing the \
+                    restart."
         .to_string(),
       parameters: json!({
         "type": "object",
@@ -81,7 +71,7 @@ impl Tool for HaltRoomTool {
         "properties": {
           "note": {
             "type": "string",
-            "description": "One or two sentences explaining why halting now is the right call."
+            "description": "One or two sentences explaining why resuming now is the right call."
           }
         },
         "required": ["note"]
@@ -92,11 +82,7 @@ impl Tool for HaltRoomTool {
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
     let trimmed = args.note.trim();
     let note = if trimmed.is_empty() {
-      format!(
-        "All personas reported no further contribution. I approve pausing now. \
-         I will re-check on schedule: {}.",
-        self.schedule_label
-      )
+      "Scheduled check approved restart. Resuming debate now.".to_string()
     } else {
       trimmed.to_string()
     };
@@ -106,20 +92,25 @@ impl Tool for HaltRoomTool {
       handles.get(&self.room_code).cloned()
     };
     let Some(handle) = handle else {
-      return Err(HaltRoomError::HandleMissing);
+      return Err(ResumeRoomError::HandleMissing);
     };
 
-    let event = RoomEvent {
+    let draft = RoomEvent {
+      id: None,
       room_code: self.room_code.clone(),
       sequence: handle.allocate_event_sequence(),
       kind: RoomEventKind::LeaderNote,
-      agent: Some(LEADER_HALT_AGENT.to_string()),
+      agent: Some(LEADER_AGENT.to_string()),
       content: note,
       reasoning: String::new(),
+      detail: String::new(),
       tool_calls: Vec::new(),
       timestamp: Utc::now(),
     };
-    db::insert_event(&self.state.db, &event).await.report();
+    let event = db::insert_event(&self.state.db, &draft)
+      .await
+      .report()
+      .unwrap_or_else(|| draft.clone());
 
     let stream = self.state.ensure_room_stream(&self.room_code).await;
     stream.send(WsEvent::MessageAdded {
@@ -131,24 +122,24 @@ impl Tool for HaltRoomTool {
     {
       let mut rooms = self.state.rooms.write().await;
       if let Some(room) = rooms.get_mut(&self.room_code) {
-        room.status = RoomStatus::Paused;
+        room.debate_state = DebateState::Running;
         room.updated_at = updated_at;
       }
     }
-    db::update_room_status(
+    db::update_debate_state(
       &self.state.db,
       &self.room_code,
-      RoomStatus::Paused,
+      DebateState::Running,
       updated_at,
     )
     .await
-    .map_err(|e| HaltRoomError::Persist(e.to_string()))?;
+    .map_err(|e| ResumeRoomError::Persist(e.to_string()))?;
 
-    handle.request_auto_pause();
-    stream.send(WsEvent::RoomStatus {
-      status: RoomStatus::Paused,
+    handle.request_resume_debate();
+    stream.send(WsEvent::DebateState {
+      state: DebateState::Running,
     });
 
-    Ok(HaltRoomOutput { acknowledged: true })
+    Ok(ResumeRoomOutput { acknowledged: true })
   }
 }

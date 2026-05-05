@@ -2,7 +2,19 @@
 // `backend/src/models.rs` and `backend/src/streaming.rs` exactly; field
 // names follow the camelCase convention emitted by serde.
 
-export type RoomStatus = "active" | "paused" | "failed";
+/**
+ * User-controlled lifecycle gate. `deactivated` is the strongest off-switch
+ * in the system: while in this state the orchestrator does not advance
+ * regardless of [`DebateState`]. Only the user (via the room menu) flips
+ * this back to `active`.
+ */
+export type RoomState = "active" | "deactivated";
+/**
+ * Leader-controlled debate gate. Flipped by the leader's `pause_room` /
+ * `resume_room` tools and by the auto-pause-on-converge path. Only
+ * meaningful when [`RoomState`] is `active`.
+ */
+export type DebateState = "running" | "paused";
 export type ReportStatus = "streaming" | "done" | "failed";
 /**
  * Which provider family a `ProviderConfig` targets. Selects the underlying
@@ -67,7 +79,8 @@ export interface Room {
   topic: string;
   goal: string;
   instruction: string | null;
-  status: RoomStatus;
+  roomState: RoomState;
+  debateState: DebateState;
   chatIntervalSeconds: number;
   steeringIntervalSeconds: number;
   reportScheduleCron: string;
@@ -84,14 +97,26 @@ export interface Room {
  * One finalized message in a room's chat log. Reasoning trace and the list
  * of tool calls invoked during the turn are inline on the same record;
  * there is no separate "tool_call" event type any more.
+ *
+ * For `kind === "inline_note"` rows, `content` is the always-visible label
+ * and `detail` is the click-to-reveal expansion; the rest of the payload
+ * (reasoning, toolCalls) is empty.
  */
 export interface Message {
+  /**
+   * Database primary key. `null` only for in-memory drafts before they hit
+   * the persistence layer; every row coming over the WebSocket carries an
+   * `id` so the frontend (and the inline-note detail tool) can address it.
+   */
+  id: number | null;
   roomCode: string;
   sequence: number;
   kind: TurnKind;
   agent: string | null;
   content: string;
   reasoning: string;
+  /** Click-to-reveal expansion for `inline_note` rows; empty otherwise. */
+  detail: string;
   toolCalls: ToolCallRecord[];
   timestamp: string;
 }
@@ -117,11 +142,25 @@ export interface ToolCallRecord {
 // -- WebSocket events -----------------------------------------------------
 
 /**
- * All kinds participate in the LLM-visible transcript and render as message
- * bubbles. `user_chat` only ever appears on a finalized `Message` (humans
- * don't stream tokens, so there are no `user_chat` drafts).
+ * Categorisation of a row in `room_events`. `agent_chat`, `leader_note`,
+ * and `user_chat` render as full chat bubbles. `inline_note` is a
+ * lightweight breadcrumb (dim text next to the author's avatar); its
+ * `content` holds the always-visible label and `detail` holds the
+ * click-to-reveal expansion.
+ *
+ * `user_chat` only ever appears on a finalized `Message` (humans don't
+ * stream tokens, so there are no `user_chat` drafts).
  */
-export type TurnKind = "agent_chat" | "leader_note" | "user_chat";
+export type TurnKind =
+  | "agent_chat"
+  | "leader_note"
+  | "user_chat"
+  | "inline_note";
+
+/** Subset of [`TurnKind`] that drafts can carry - there are no inline-note
+ * or user drafts (inline notes are persisted directly without a draft
+ * phase, and humans don't stream). */
+export type DraftKind = "agent_chat" | "leader_note";
 
 /**
  * First frame on every connect. Carries the room state and the persisted
@@ -135,24 +174,23 @@ export interface WsSnapshot {
   reports: RoomReport[];
 }
 
-export interface WsRoomStatus {
-  type: "roomStatus";
-  status: RoomStatus;
+/** User-controlled gate flipped (active <-> deactivated). */
+export interface WsRoomState {
+  type: "roomState";
+  state: RoomState;
 }
 
-export interface WsInlineNote {
-  type: "inlineNote";
-  author: string;
-  text: string;
-  detail: string;
-  timestamp: string;
+/** Leader-controlled gate flipped (running <-> paused). */
+export interface WsDebateState {
+  type: "debateState";
+  state: DebateState;
 }
 
 export interface WsDraftStarted {
   type: "draftStarted";
   turnId: string;
   agent: string;
-  kind: TurnKind;
+  kind: DraftKind;
 }
 
 export interface WsDraftText {
@@ -224,8 +262,8 @@ export interface WsReportCompleted {
 
 export type WsEvent =
   | WsSnapshot
-  | WsRoomStatus
-  | WsInlineNote
+  | WsRoomState
+  | WsDebateState
   | WsDraftStarted
   | WsDraftText
   | WsDraftReasoning
@@ -276,7 +314,7 @@ export interface CloneRoomRequest {
 export interface Draft {
   turnId: string;
   agent: string;
-  kind: TurnKind;
+  kind: DraftKind;
   content: string;
   reasoning: string;
   toolCalls: DraftToolCall[];
@@ -308,16 +346,14 @@ export interface ReportBuffer {
  */
 export interface RoomView {
   room: Room;
-  /** Finalized messages, newest last. Replaced wholesale on snapshot. */
+  /** Finalized rows, newest last. Includes inline-note breadcrumbs alongside
+   * chat bubbles; the page partitions them at render time. Replaced
+   * wholesale on snapshot. */
   messages: Message[];
   /** In-flight drafts, keyed by turnId. Usually 0 or 1 entries. */
   drafts: Draft[];
   /** All reports for this room, newest last. */
   reports: ReportBuffer[];
-  /** Non-bubble short notes rendered next to the author's avatar. */
-  inlineNotes: Array<
-    { author: string; text: string; detail: string; timestamp: string }
-  >;
 }
 
 // -- Misc -----------------------------------------------------------------

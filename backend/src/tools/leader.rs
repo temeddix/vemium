@@ -12,7 +12,8 @@ use crate::db;
 use crate::error::ReportError;
 use crate::llm::build_chat_client;
 use crate::models::{ProviderConfig, RoomEvent, RoomEventKind};
-use crate::streaming::WsEvent;
+use crate::streaming::{WsEvent, new_turn_id};
+use crate::tools::pause_room::LEADER_AGENT;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -21,7 +22,11 @@ use serde_json::json;
 use thiserror::Error;
 
 const NAME: &str = "request_leader_decision";
-const LEADER_AGENT_LABEL: &str = "Leader (on demand)";
+/// Inline-note label written before the leader's chat bubble. The leader
+/// always speaks under the plain "Leader" name now; this breadcrumb is
+/// what tells the user this particular bubble was triggered on demand by
+/// a debater rather than by the periodic steering tick.
+const ON_DEMAND_INLINE_NOTE: &str = "Appeared on demand";
 
 /// Embeds enough context to invoke the high model, persist the resulting
 /// `leader_note`, and broadcast it to subscribed WS clients.
@@ -159,10 +164,11 @@ impl RequestLeaderDecisionTool {
     user
   }
 
-  /// Best-effort: persist the leader's reply as a `leader_note` event and
-  /// emit a WS turn so subscribers see it without waiting for a refresh.
-  /// Failures are logged but do not propagate - the calling agent already
-  /// has the answer in hand.
+  /// Best-effort: persist an inline-note breadcrumb attributing the
+  /// upcoming bubble to an on-demand request, then persist the leader's
+  /// reply as a `leader_note` event and emit a WS turn so subscribers see
+  /// it without waiting for a refresh. Failures are logged but do not
+  /// propagate - the calling agent already has the answer in hand.
   async fn persist_and_broadcast(&self, content: &str) {
     let handle = {
       let handles = self.state.room_handles.read().await;
@@ -171,29 +177,56 @@ impl RequestLeaderDecisionTool {
     let Some(handle) = handle else {
       return;
     };
-    let sequence = handle.allocate_event_sequence();
-    let timestamp = Utc::now();
-    let event = RoomEvent {
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
+
+    // Inline-note breadcrumb that precedes the leader's bubble. Carries
+    // the same timestamp as the bubble so they sort together.
+    let now = Utc::now();
+    let inline_draft = RoomEvent {
+      id: None,
       room_code: self.room_code.clone(),
-      sequence,
+      sequence: handle.allocate_event_sequence(),
+      kind: RoomEventKind::InlineNote,
+      agent: Some(LEADER_AGENT.to_string()),
+      content: ON_DEMAND_INLINE_NOTE.to_string(),
+      reasoning: String::new(),
+      detail: String::new(),
+      tool_calls: Vec::new(),
+      timestamp: now,
+    };
+    let inline_event = db::insert_event(&self.state.db, &inline_draft)
+      .await
+      .report()
+      .unwrap_or_else(|| inline_draft.clone());
+    stream.send(WsEvent::MessageAdded {
+      turn_id: new_turn_id(),
+      message: inline_event,
+    });
+
+    let bubble_draft = RoomEvent {
+      id: None,
+      room_code: self.room_code.clone(),
+      sequence: handle.allocate_event_sequence(),
       kind: RoomEventKind::LeaderNote,
-      agent: Some(LEADER_AGENT_LABEL.to_string()),
+      agent: Some(LEADER_AGENT.to_string()),
       content: content.to_string(),
       reasoning: String::new(),
+      detail: String::new(),
       tool_calls: Vec::new(),
-      timestamp,
+      timestamp: now,
     };
+    let bubble_event = db::insert_event(&self.state.db, &bubble_draft)
+      .await
+      .report()
+      .unwrap_or_else(|| bubble_draft.clone());
 
-    db::insert_event(&self.state.db, &event).await.report();
-
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
     // No draft phase: the on-demand leader call resolves synchronously
     // before the calling agent's turn continues, so there is nothing to
     // stream incrementally. Emit `MessageAdded` directly with a fresh
     // turn id; the frontend has no draft to retire and just appends.
     stream.send(WsEvent::MessageAdded {
-      turn_id: crate::streaming::new_turn_id(),
-      message: event,
+      turn_id: new_turn_id(),
+      message: bubble_event,
     });
   }
 }

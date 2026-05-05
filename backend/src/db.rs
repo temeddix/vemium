@@ -11,8 +11,8 @@
 //! [`max_report_sequence`] seed those counters.
 
 use crate::models::{
-  AppSettings, ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind,
-  RoomReport, RoomStatus,
+  AppSettings, DebateState, ProviderConfig, ReportStatus, Room, RoomEvent,
+  RoomEventKind, RoomReport, RoomState,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -55,19 +55,20 @@ pub async fn init_pool(database_url: &str) -> Result<SqlitePool> {
 pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   sqlx::query(
     "INSERT INTO rooms (
-        code, topic, goal, instruction, status,
+        code, topic, goal, instruction, room_state, debate_state,
         chat_interval_seconds, steering_interval_seconds,
         report_schedule_cron, report_schedule_label,
         python_timeout_seconds, auto_pause_when_converged,
         resume_schedule_cron, resume_schedule_label,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(&room.code)
   .bind(&room.topic)
   .bind(&room.goal)
   .bind(room.instruction.as_deref())
-  .bind(room.status.as_str())
+  .bind(room.room_state.as_str())
+  .bind(room.debate_state.as_str())
   .bind(room.chat_interval_seconds as i64)
   .bind(room.steering_interval_seconds as i64)
   .bind(&room.report_schedule_cron)
@@ -90,7 +91,8 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
 pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   sqlx::query(
     "UPDATE rooms SET
-        topic = ?, goal = ?, instruction = ?, status = ?,
+        topic = ?, goal = ?, instruction = ?,
+        room_state = ?, debate_state = ?,
         chat_interval_seconds = ?, steering_interval_seconds = ?,
         report_schedule_cron = ?, report_schedule_label = ?,
         python_timeout_seconds = ?, auto_pause_when_converged = ?,
@@ -101,7 +103,8 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(&room.topic)
   .bind(&room.goal)
   .bind(room.instruction.as_deref())
-  .bind(room.status.as_str())
+  .bind(room.room_state.as_str())
+  .bind(room.debate_state.as_str())
   .bind(room.chat_interval_seconds as i64)
   .bind(room.steering_interval_seconds as i64)
   .bind(&room.report_schedule_cron)
@@ -119,21 +122,43 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   Ok(())
 }
 
-/// Updates only `status` and `updated_at`. Fast-path used by the orchestrator
-/// when pausing/resuming/failing a room.
-pub async fn update_room_status(
+/// Updates the user-controlled [`RoomState`] gate (`active` /
+/// `deactivated`) and `updated_at`. Used by the user-facing
+/// `/v1/rooms/:code/activate` and `/deactivate` endpoints.
+pub async fn update_room_state(
   pool: &SqlitePool,
   room_code: &str,
-  status: RoomStatus,
+  state: RoomState,
   updated_at: DateTime<Utc>,
 ) -> Result<()> {
-  sqlx::query("UPDATE rooms SET status = ?, updated_at = ? WHERE code = ?")
-    .bind(status.as_str())
+  sqlx::query("UPDATE rooms SET room_state = ?, updated_at = ? WHERE code = ?")
+    .bind(state.as_str())
     .bind(updated_at.to_rfc3339())
     .bind(room_code)
     .execute(pool)
     .await
-    .context("failed to update room status")?;
+    .context("failed to update room_state")?;
+  Ok(())
+}
+
+/// Updates the leader-controlled [`DebateState`] gate (`running` /
+/// `paused`) and `updated_at`. Used by `pause_room` / `resume_room` and
+/// the auto-pause-on-converge path.
+pub async fn update_debate_state(
+  pool: &SqlitePool,
+  room_code: &str,
+  state: DebateState,
+  updated_at: DateTime<Utc>,
+) -> Result<()> {
+  sqlx::query(
+    "UPDATE rooms SET debate_state = ?, updated_at = ? WHERE code = ?",
+  )
+  .bind(state.as_str())
+  .bind(updated_at.to_rfc3339())
+  .bind(room_code)
+  .execute(pool)
+  .await
+  .context("failed to update debate_state")?;
   Ok(())
 }
 
@@ -168,9 +193,14 @@ pub async fn code_taken(pool: &SqlitePool, code: &str) -> Result<bool> {
 }
 
 fn parse_room_row(row: SqliteRow) -> Result<Room> {
-  let status_str: String =
-    row.try_get("status").context("rooms.status missing")?;
-  let status = RoomStatus::parse(&status_str)?;
+  let room_state_str: String = row
+    .try_get("room_state")
+    .context("rooms.room_state missing")?;
+  let room_state = RoomState::parse(&room_state_str)?;
+  let debate_state_str: String = row
+    .try_get("debate_state")
+    .context("rooms.debate_state missing")?;
+  let debate_state = DebateState::parse(&debate_state_str)?;
 
   let chat_interval: i64 = row
     .try_get("chat_interval_seconds")
@@ -192,7 +222,8 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
     instruction: row
       .try_get("instruction")
       .context("rooms.instruction missing")?,
-    status,
+    room_state,
+    debate_state,
     chat_interval_seconds: chat_interval as u64,
     steering_interval_seconds: steering_interval as u64,
     report_schedule_cron: row
@@ -273,16 +304,21 @@ pub async fn update_app_settings(
 
 // -- Events ----------------------------------------------------------------
 
-/// Inserts one finalized message row. The caller is responsible for
-/// populating `reasoning` (empty when none) and `tool_calls` (empty Vec
-/// when none) so the schema stays uniform across kinds.
-pub async fn insert_event(pool: &SqlitePool, event: &RoomEvent) -> Result<()> {
+/// Inserts one finalized event row. The caller is responsible for
+/// populating `reasoning`, `tool_calls`, and `detail` with their per-kind
+/// defaults (empty string / empty Vec) so the schema stays uniform. The
+/// returned [`RoomEvent`] carries the database-assigned `id` so callers
+/// can persist or broadcast it without a follow-up read.
+pub async fn insert_event(
+  pool: &SqlitePool,
+  event: &RoomEvent,
+) -> Result<RoomEvent> {
   let tool_calls_json = serde_json::to_string(&event.tool_calls)
     .context("failed to serialize tool_calls")?;
-  sqlx::query(
+  let result = sqlx::query(
     "INSERT INTO room_events
-        (room_code, sequence, kind, agent, content, reasoning, tool_calls, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (room_code, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(&event.room_code)
   .bind(event.sequence as i64)
@@ -290,12 +326,15 @@ pub async fn insert_event(pool: &SqlitePool, event: &RoomEvent) -> Result<()> {
   .bind(event.agent.as_deref())
   .bind(&event.content)
   .bind(&event.reasoning)
+  .bind(&event.detail)
   .bind(tool_calls_json)
   .bind(event.timestamp.to_rfc3339())
   .execute(pool)
   .await
   .context("failed to insert room event")?;
-  Ok(())
+  let mut stored = event.clone();
+  stored.id = Some(result.last_insert_rowid());
+  Ok(stored)
 }
 
 pub async fn load_room_events(
@@ -303,7 +342,7 @@ pub async fn load_room_events(
   room_code: &str,
 ) -> Result<Vec<RoomEvent>> {
   let rows = sqlx::query(
-    "SELECT room_code, sequence, kind, agent, content, reasoning, tool_calls, timestamp
+    "SELECT id, room_code, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp
      FROM room_events
      WHERE room_code = ?
      ORDER BY sequence ASC",
@@ -314,6 +353,25 @@ pub async fn load_room_events(
   .context("failed to load room events")?;
 
   rows.into_iter().map(parse_event_row).collect()
+}
+
+/// Loads a single inline-note row by primary key. Used by the
+/// `get_inline_note_detail` tool so personas can pull the click-to-reveal
+/// expansion of an inline note they spotted in the transcript.
+pub async fn load_inline_note(
+  pool: &SqlitePool,
+  id: i64,
+) -> Result<Option<RoomEvent>> {
+  let row = sqlx::query(
+    "SELECT id, room_code, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp
+     FROM room_events
+     WHERE id = ? AND kind = 'inline_note'",
+  )
+  .bind(id)
+  .fetch_optional(pool)
+  .await
+  .context("failed to load inline note")?;
+  row.map(parse_event_row).transpose()
 }
 
 /// Copies every event from `source` into `target`, preserving sequence
@@ -329,8 +387,8 @@ pub async fn clone_room_events(
   let mut tx = pool.begin().await.context("failed to begin clone tx")?;
   sqlx::query(
     "INSERT INTO room_events
-        (room_code, sequence, kind, agent, content, reasoning, tool_calls, timestamp)
-     SELECT ?, sequence, kind, agent, content, reasoning, tool_calls, timestamp
+        (room_code, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp)
+     SELECT ?, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp
      FROM room_events
      WHERE room_code = ?
      ORDER BY sequence ASC",
@@ -365,6 +423,7 @@ pub async fn max_event_sequence(
 }
 
 fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
+  let id: i64 = row.try_get("id").context("room_events.id missing")?;
   let sequence: i64 = row
     .try_get("sequence")
     .context("room_events.sequence missing")?;
@@ -377,6 +436,7 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     .context("room_events.tool_calls invalid JSON")?;
 
   Ok(RoomEvent {
+    id: Some(id),
     room_code: row
       .try_get("room_code")
       .context("room_events.room_code missing")?,
@@ -389,6 +449,9 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     reasoning: row
       .try_get("reasoning")
       .context("room_events.reasoning missing")?,
+    detail: row
+      .try_get("detail")
+      .context("room_events.detail missing")?,
     tool_calls,
     timestamp: parse_timestamp(&row, "timestamp")?,
   })

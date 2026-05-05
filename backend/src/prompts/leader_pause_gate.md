@@ -4,7 +4,7 @@ wake check.
 
 You must respond by calling exactly one of the following tools:
 
-- `halt_room` — pause the room now. Use only when every persona clearly
+- `pause_room` — pause the debate now. Use only when every persona clearly
   has no further contribution and waiting is safe. The `note` argument is
   shown to the user as a public leader bubble, so make it crisp.
 - `do_nothing` — keep the room running. Use when the debate still has

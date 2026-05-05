@@ -27,20 +27,35 @@ use tokio::sync::{Notify, RwLock};
 
 /// Per-room control plane shared between the orchestrator and the HTTP API.
 ///
-/// The orchestrator polls `paused` and `stopped` at every turn boundary and
-/// `await`s on `pause_notify` while paused. The API toggles the flags and
-/// then notifies. Keeping this small and lock-free avoids contention when a
-/// room is broadcasting tokens at high frequency.
+/// The orchestrator polls the gate flags and `stopped` at every turn
+/// boundary and `await`s on `pause_notify` while blocked. The API and the
+/// leader gate tools toggle the flags and then notify. Keeping this small
+/// and lock-free avoids contention when a room is broadcasting tokens at
+/// high frequency.
+///
+/// Two orthogonal gates feed [`RoomHandle::is_blocked`]:
+///
+/// - `room_deactivated` is the user-controlled gate (the [`RoomState`]
+///   `Active`/`Deactivated` axis). The strongest off-switch in the system:
+///   while set the orchestrator is fully halted regardless of debate
+///   state.
+/// - `debate_paused` is the leader-controlled gate (the [`DebateState`]
+///   `Running`/`Paused` axis). Flipped by the `pause_room`/`resume_room`
+///   gate tools and the auto-pause-on-converge path.
 #[derive(Debug, Clone)]
 pub struct RoomHandle {
-  /// `true` while the room is in the `paused` lifecycle state. The
-  /// orchestrator does not start a new turn while this is set.
-  pub paused: Arc<AtomicBool>,
-  /// Signal fired whenever `paused` changes. The orchestrator awaits this
-  /// to wake up from a pause.
-  pub pause_notify: Arc<Notify>,
-  /// True when the current paused state was initiated by auto-convergence.
+  /// `true` while the user has deactivated the room. Strongest off-switch.
+  pub room_deactivated: Arc<AtomicBool>,
+  /// `true` while the leader has paused the debate. Independent of
+  /// `room_deactivated`; both must be off for the orchestrator to advance.
+  pub debate_paused: Arc<AtomicBool>,
+  /// True when the current `debate_paused` state was initiated by the
+  /// auto-convergence halt path. Reset whenever `debate_paused` flips back
+  /// to `false`.
   pub auto_paused: Arc<AtomicBool>,
+  /// Signal fired whenever any gate (`room_deactivated` /
+  /// `debate_paused`) changes. The orchestrator awaits this to wake up.
+  pub pause_notify: Arc<Notify>,
   /// Permanent stop signal. When `true`, the orchestrator finishes its
   /// current turn (if any) and exits. Used by the delete handler.
   pub stopped: Arc<AtomicBool>,
@@ -62,9 +77,10 @@ pub struct RoomHandle {
 impl RoomHandle {
   pub fn new(seed_event_seq: u64, seed_report_seq: u64) -> Self {
     Self {
-      paused: Arc::new(AtomicBool::new(false)),
-      pause_notify: Arc::new(Notify::new()),
+      room_deactivated: Arc::new(AtomicBool::new(false)),
+      debate_paused: Arc::new(AtomicBool::new(false)),
       auto_paused: Arc::new(AtomicBool::new(false)),
+      pause_notify: Arc::new(Notify::new()),
       stopped: Arc::new(AtomicBool::new(false)),
       stop_notify: Arc::new(Notify::new()),
       config_notify: Arc::new(Notify::new()),
@@ -83,20 +99,42 @@ impl RoomHandle {
     self.next_report_sequence.fetch_add(1, Ordering::SeqCst)
   }
 
-  pub fn request_pause(&self) {
-    self.paused.store(true, Ordering::SeqCst);
+  /// Flips the user-controlled gate to `Deactivated`. The orchestrator
+  /// stops advancing turns regardless of [`DebateState`].
+  pub fn request_deactivate(&self) {
+    self.room_deactivated.store(true, Ordering::SeqCst);
+    self.pause_notify.notify_waiters();
+  }
+
+  /// Flips the user-controlled gate back to `Active`. The leader's
+  /// `debate_paused` flag (if any) is left untouched so a previously
+  /// auto-paused room stays paused after the user re-activates it.
+  pub fn request_activate(&self) {
+    self.room_deactivated.store(false, Ordering::SeqCst);
+    self.pause_notify.notify_waiters();
+  }
+
+  /// Leader-side debate pause (manual, non-auto). Flips
+  /// [`DebateState`] to `Paused`.
+  pub fn request_pause_debate(&self) {
+    self.debate_paused.store(true, Ordering::SeqCst);
     self.auto_paused.store(false, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
   }
 
+  /// Leader-side debate pause via the auto-convergence halt path. Sets
+  /// `auto_paused` so the resume scheduler knows it can wake the room on
+  /// the next cron tick.
   pub fn request_auto_pause(&self) {
-    self.paused.store(true, Ordering::SeqCst);
+    self.debate_paused.store(true, Ordering::SeqCst);
     self.auto_paused.store(true, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
   }
 
-  pub fn request_resume(&self) {
-    self.paused.store(false, Ordering::SeqCst);
+  /// Leader-side debate resume. Flips [`DebateState`] back to `Running`
+  /// and clears the auto-paused marker.
+  pub fn request_resume_debate(&self) {
+    self.debate_paused.store(false, Ordering::SeqCst);
     self.auto_paused.store(false, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
   }
@@ -115,8 +153,18 @@ impl RoomHandle {
     self.config_notify.notify_waiters();
   }
 
-  pub fn is_paused(&self) -> bool {
-    self.paused.load(Ordering::SeqCst)
+  /// True while either gate is engaged. The orchestrator must not advance
+  /// turns whenever this returns `true`.
+  pub fn is_blocked(&self) -> bool {
+    self.is_deactivated() || self.is_debate_paused()
+  }
+
+  pub fn is_deactivated(&self) -> bool {
+    self.room_deactivated.load(Ordering::SeqCst)
+  }
+
+  pub fn is_debate_paused(&self) -> bool {
+    self.debate_paused.load(Ordering::SeqCst)
   }
 
   pub fn is_stopped(&self) -> bool {
