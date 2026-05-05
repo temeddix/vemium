@@ -12,26 +12,52 @@
 //! - The room's `python_timeout_seconds` governs the actual script run
 //!   only; lint/type stages have a fixed short cap.
 
-use crate::python_runner::{PythonRunResult, PythonRunner};
+use crate::app_state::AppState;
+use crate::python_runner::{PythonRunResult, PythonRunner, StageResult};
+use crate::streaming::WsEvent;
 use crate::workspace::RoomWorkspace;
+use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::fmt::Write as _;
 use thiserror::Error;
+use uuid::Uuid;
 
 const NAME: &str = "run_python";
+const INLINE_NOTE_SUCCESS: &str = "Python script run success";
+const INLINE_NOTE_FAIL: &str = "Python script run fail";
 
 /// Tool that delegates to a [`PythonRunner`]. One instance per room/turn.
-#[derive(Debug, Clone)]
+/// On every call the tool also emits an `InlineNote` summarizing the run so
+/// the timeline shows whether the script went green end-to-end (or where it
+/// got stuck), with the per-stage stdout/stderr available in the detail.
+#[derive(Clone)]
 pub struct RunPythonTool {
   workspace: RoomWorkspace,
   runner: PythonRunner,
+  state: AppState,
+  room_id: Uuid,
+  /// Author label used for the inline note. Personas pass their own name.
+  author: String,
 }
 
 impl RunPythonTool {
-  pub fn new(workspace: RoomWorkspace, runner: PythonRunner) -> Self {
-    Self { workspace, runner }
+  pub fn new(
+    workspace: RoomWorkspace,
+    runner: PythonRunner,
+    state: AppState,
+    room_id: Uuid,
+    author: String,
+  ) -> Self {
+    Self {
+      workspace,
+      runner,
+      state,
+      room_id,
+      author,
+    }
   }
 }
 
@@ -132,9 +158,66 @@ impl Tool for RunPythonTool {
       .run(&relative, &args.args)
       .await
       .map_err(RunPythonError::from_anyhow)?;
+    self.emit_inline_note(&result).await;
     Ok(RunPythonOutput {
       script_path: relative,
       result,
     })
+  }
+}
+
+impl RunPythonTool {
+  async fn emit_inline_note(&self, result: &PythonRunResult) {
+    let text = if result.overall_ok {
+      INLINE_NOTE_SUCCESS
+    } else {
+      INLINE_NOTE_FAIL
+    };
+    let stream = self.state.ensure_room_stream(self.room_id).await;
+    stream.send(WsEvent::InlineNote {
+      author: self.author.clone(),
+      text: text.to_string(),
+      detail: format_run_detail(result),
+      timestamp: Utc::now(),
+    });
+  }
+}
+
+/// Formats the full run pipeline as a single human-readable block: one section
+/// per executed stage with its rendered command, exit code, duration, and
+/// captured stdout/stderr. Truncated outputs already carry a marker from the
+/// runner; we do not re-truncate here.
+fn format_run_detail(result: &PythonRunResult) -> String {
+  let mut out = String::new();
+  for stage in &result.stages {
+    if !out.is_empty() {
+      out.push_str("\n\n");
+    }
+    append_stage(&mut out, stage);
+  }
+  if let Some(failed) = result.failed_at {
+    if !out.is_empty() {
+      out.push_str("\n\n");
+    }
+    let _ = write!(out, "Pipeline aborted at: {}", failed.label());
+  }
+  out
+}
+
+fn append_stage(out: &mut String, stage: &StageResult) {
+  let _ = writeln!(out, "$ {}", stage.command);
+  let exit_label = match (stage.exit_code, stage.timed_out) {
+    (_, true) => "timeout".to_string(),
+    (Some(code), false) => code.to_string(),
+    (None, false) => "?".to_string(),
+  };
+  let _ = writeln!(out, "exit: {} ({}ms)", exit_label, stage.duration_ms);
+  if !stage.stdout.is_empty() {
+    out.push_str(stage.stdout.trim_end());
+    out.push('\n');
+  }
+  if !stage.stderr.is_empty() {
+    out.push_str(stage.stderr.trim_end());
+    out.push('\n');
   }
 }

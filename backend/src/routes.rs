@@ -138,9 +138,6 @@ async fn create_room(
     python_timeout_seconds: payload
       .python_timeout_seconds
       .unwrap_or(room_defaults::PYTHON_TIMEOUT_SECONDS),
-    python_feedback_every: payload
-      .python_feedback_every
-      .unwrap_or(room_defaults::PYTHON_FEEDBACK_EVERY),
     auto_pause_when_converged: payload
       .auto_pause_when_converged
       .unwrap_or(room_defaults::AUTO_PAUSE_WHEN_CONVERGED),
@@ -259,9 +256,6 @@ async fn update_room(
   }
   if let Some(value) = payload.python_timeout_seconds {
     updated.python_timeout_seconds = value;
-  }
-  if let Some(value) = payload.python_feedback_every {
-    updated.python_feedback_every = value;
   }
   if let Some(value) = payload.auto_pause_when_converged {
     updated.auto_pause_when_converged = value;

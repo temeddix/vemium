@@ -22,13 +22,14 @@ import "./room-settings-dialog.ts";
 interface InlineNoteEntry {
   author: string;
   text: string;
-  reason: string;
+  detail: string;
   timestamp: string;
 }
 
 interface NoteDialogState {
   author: string;
-  reason: string;
+  text: string;
+  detail: string;
 }
 
 declare global {
@@ -232,18 +233,19 @@ export class RoomChatPage extends LitElement {
       font-weight: 600;
     }
 
-    .reason-dialog-author {
+    .detail-dialog-author {
       font-size: 0.78rem;
       color: var(--wa-color-text-quiet);
       margin-bottom: 0.4rem;
     }
 
-    .reason-dialog-body {
+    .detail-dialog-body {
       font-size: 0.95rem;
       line-height: 1.5;
       white-space: pre-wrap;
       word-wrap: break-word;
       overflow-wrap: anywhere;
+      font-family: var(--wa-font-family-code, ui-monospace, monospace);
     }
 
     .empty {
@@ -378,12 +380,12 @@ export class RoomChatPage extends LitElement {
       ></te-room-reports-dialog>
       <wa-dialog
         ${ref(this.#noteDialogRef)}
-        label="Decided to do nothing"
+        label="${this.noteDialog === null ? "" : this.noteDialog.text}"
         @wa-hide="${this.#onNoteDialogHide}"
       >
         ${this.noteDialog === null ? nothing : html`
-          <div class="reason-dialog-author">${this.noteDialog.author}</div>
-          <div class="reason-dialog-body">${this.noteDialog.reason}</div>
+          <div class="detail-dialog-author">${this.noteDialog.author}</div>
+          <div class="detail-dialog-body">${this.noteDialog.detail}</div>
         `}
       </wa-dialog>
     `;
@@ -487,9 +489,10 @@ export class RoomChatPage extends LitElement {
     `;
   }
 
-  /** Renders a `do_nothing` breadcrumb. The avatar matches the chat-bubble
-   * row layout so the note visually attaches to the author's identity, and
-   * the dim text is a button that opens a dialog with the full reason. */
+  /** Renders an inline-note breadcrumb (e.g. `do_nothing`, Python run
+   * outcome). The avatar matches the chat-bubble row layout so the note
+   * visually attaches to the author's identity, and the dim text is a
+   * button that opens a dialog with the full detail. */
   #renderInlineNote(
     note: InlineNoteEntry,
     showSeparator: boolean,
@@ -534,7 +537,11 @@ export class RoomChatPage extends LitElement {
   }
 
   #openNoteDialog(note: InlineNoteEntry): void {
-    this.noteDialog = { author: note.author, reason: note.reason };
+    this.noteDialog = {
+      author: note.author,
+      text: note.text,
+      detail: note.detail,
+    };
     const dialog = this.#noteDialogRef.value;
     if (dialog !== undefined) {
       dialog.open = true;
@@ -563,7 +570,7 @@ export class RoomChatPage extends LitElement {
       inlineNote: {
         author: note.author,
         text: note.text,
-        reason: note.reason,
+        detail: note.detail,
         timestamp: note.timestamp,
       },
       sortKey: Number.MAX_SAFE_INTEGER - 1 + idx,

@@ -64,10 +64,10 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
         id, name, slug, topic, goal, instruction, background, status,
         chat_interval_seconds, steering_interval_seconds,
         report_interval_seconds, python_timeout_seconds,
-        python_feedback_every, auto_pause_when_converged,
+        auto_pause_when_converged,
         resume_schedule_cron, resume_schedule_label,
         low_provider_config, high_provider_config, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(room.id.to_string())
   .bind(&room.name)
@@ -81,7 +81,6 @@ pub async fn insert_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(room.steering_interval_seconds as i64)
   .bind(room.report_interval_seconds as i64)
   .bind(room.python_timeout_seconds as i64)
-  .bind(room.python_feedback_every as i64)
   .bind(room.auto_pause_when_converged)
   .bind(&room.resume_schedule_cron)
   .bind(&room.resume_schedule_label)
@@ -109,7 +108,7 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
         name = ?, slug = ?, topic = ?, goal = ?, instruction = ?,
         background = ?, status = ?, chat_interval_seconds = ?,
         steering_interval_seconds = ?, report_interval_seconds = ?,
-        python_timeout_seconds = ?, python_feedback_every = ?,
+        python_timeout_seconds = ?,
         auto_pause_when_converged = ?, resume_schedule_cron = ?,
         resume_schedule_label = ?, low_provider_config = ?,
         high_provider_config = ?, updated_at = ?
@@ -126,7 +125,6 @@ pub async fn update_room(pool: &SqlitePool, room: &Room) -> Result<()> {
   .bind(room.steering_interval_seconds as i64)
   .bind(room.report_interval_seconds as i64)
   .bind(room.python_timeout_seconds as i64)
-  .bind(room.python_feedback_every as i64)
   .bind(room.auto_pause_when_converged)
   .bind(&room.resume_schedule_cron)
   .bind(&room.resume_schedule_label)
@@ -235,9 +233,6 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
   let python_timeout: i64 = row
     .try_get("python_timeout_seconds")
     .context("rooms.python_timeout_seconds missing")?;
-  let python_feedback: i64 = row
-    .try_get("python_feedback_every")
-    .context("rooms.python_feedback_every missing")?;
   let auto_pause_when_converged: bool = row
     .try_get("auto_pause_when_converged")
     .context("rooms.auto_pause_when_converged missing")?;
@@ -265,7 +260,6 @@ fn parse_room_row(row: SqliteRow) -> Result<Room> {
     steering_interval_seconds: steering_interval as u64,
     report_interval_seconds: report_interval as u64,
     python_timeout_seconds: python_timeout as u64,
-    python_feedback_every: python_feedback as u32,
     auto_pause_when_converged,
     resume_schedule_cron,
     resume_schedule_label,

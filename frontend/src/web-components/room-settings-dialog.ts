@@ -24,7 +24,6 @@ interface SettingsForm {
   steeringIntervalSeconds: number;
   reportIntervalSeconds: number;
   pythonTimeoutSeconds: number;
-  pythonFeedbackEvery: number;
   autoPauseWhenConverged: boolean;
   resumeScheduleCron: string;
   resumeScheduleLabel: string;
@@ -265,13 +264,6 @@ export class RoomSettingsDialog extends LitElement {
             (v) => this.#patchForm({ pythonTimeoutSeconds: v }),
             "Hard cap for a single Python script run, in seconds. Scripts that exceed this are killed.",
             "sec",
-          )} ${this.#renderNumberField(
-            "python-feedback-every",
-            "Python feedback every",
-            form.pythonFeedbackEvery,
-            (v) => this.#patchForm({ pythonFeedbackEvery: v }),
-            "Inject a status message back into the debate every N failed Python attempts so personas can react.",
-            "fails",
           )}
         </div>
         <div class="schedule-grid">
@@ -590,7 +582,6 @@ export class RoomSettingsDialog extends LitElement {
       steeringIntervalSeconds: this.form.steeringIntervalSeconds,
       reportIntervalSeconds: this.form.reportIntervalSeconds,
       pythonTimeoutSeconds: this.form.pythonTimeoutSeconds,
-      pythonFeedbackEvery: this.form.pythonFeedbackEvery,
       autoPauseWhenConverged: this.form.autoPauseWhenConverged,
       resumeScheduleCron: this.form.resumeScheduleCron,
       resumeScheduleLabel: this.form.resumeScheduleLabel,
@@ -617,7 +608,6 @@ function formFromRoom(room: Room): SettingsForm {
     steeringIntervalSeconds: room.steeringIntervalSeconds,
     reportIntervalSeconds: room.reportIntervalSeconds,
     pythonTimeoutSeconds: room.pythonTimeoutSeconds,
-    pythonFeedbackEvery: room.pythonFeedbackEvery,
     autoPauseWhenConverged: room.autoPauseWhenConverged,
     resumeScheduleCron: room.resumeScheduleCron,
     resumeScheduleLabel: room.resumeScheduleLabel,

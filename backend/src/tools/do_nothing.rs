@@ -97,7 +97,7 @@ impl Tool for DoNothingTool {
     stream.send(WsEvent::InlineNote {
       author: self.author.clone(),
       text: INLINE_NOTE_TEXT.to_string(),
-      reason,
+      detail: reason,
       timestamp: Utc::now(),
     });
 

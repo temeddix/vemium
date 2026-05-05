@@ -48,7 +48,7 @@ pub enum PythonStage {
 }
 
 impl PythonStage {
-  fn label(self) -> &'static str {
+  pub fn label(self) -> &'static str {
     match self {
       Self::RuffFormat => "ruff format",
       Self::RuffCheck => "ruff check",

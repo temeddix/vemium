@@ -225,12 +225,12 @@ pub enum WsEvent {
   RoomStatus { status: RoomStatus },
 
   /// Non-bubble short note (dim text) for lightweight status breadcrumbs.
-  /// `reason` is shown only when the user clicks the note; `text` is the
+  /// `detail` is shown only when the user clicks the note; `text` is the
   /// always-visible label (e.g. "Decided to do nothing.").
   InlineNote {
     author: String,
     text: String,
-    reason: String,
+    detail: String,
     timestamp: DateTime<Utc>,
   },
 

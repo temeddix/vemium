@@ -295,7 +295,7 @@ export class DashboardStore {
           inlineNotes: [...view.inlineNotes, {
             author: event.author,
             text: event.text,
-            reason: event.reason,
+            detail: event.detail,
             timestamp: event.timestamp,
           }],
         }));

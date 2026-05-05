@@ -23,8 +23,6 @@ pub mod room_defaults {
   pub const REPORT_INTERVAL_SECONDS: u64 = 86_400;
   /// Single Python script run capped at 10 minutes.
   pub const PYTHON_TIMEOUT_SECONDS: u64 = 600;
-  /// Every 10 failed Python attempts the runner pings the debate.
-  pub const PYTHON_FEEDBACK_EVERY: u32 = 10;
   /// Whether convergence-based auto-pause is enabled by default.
   pub const AUTO_PAUSE_WHEN_CONVERGED: bool = false;
   /// Default wake-check cron (UTC): at minute 0 of every hour.

@@ -150,9 +150,6 @@ pub struct Room {
   pub report_interval_seconds: u64,
   /// Wall-clock cap (seconds) for a single Python script execution.
   pub python_timeout_seconds: u64,
-  /// Every N failed Python attempts, the runner injects a summary message
-  /// back into the debate so other personas can vote on continuing.
-  pub python_feedback_every: u32,
   /// If true, the runtime can pause the room when all personas converge
   /// with no further contributions and the leader approves the halt.
   pub auto_pause_when_converged: bool,
@@ -183,7 +180,6 @@ impl Room {
       steering_interval_seconds: self.steering_interval_seconds,
       report_interval_seconds: self.report_interval_seconds,
       python_timeout_seconds: self.python_timeout_seconds,
-      python_feedback_every: self.python_feedback_every,
       auto_pause_when_converged: self.auto_pause_when_converged,
       resume_schedule_cron: self.resume_schedule_cron.clone(),
       resume_schedule_label: self.resume_schedule_label.clone(),
@@ -212,7 +208,6 @@ pub struct RoomView {
   pub steering_interval_seconds: u64,
   pub report_interval_seconds: u64,
   pub python_timeout_seconds: u64,
-  pub python_feedback_every: u32,
   pub auto_pause_when_converged: bool,
   pub resume_schedule_cron: String,
   pub resume_schedule_label: String,
@@ -355,7 +350,6 @@ pub struct CreateRoomRequest {
   pub steering_interval_seconds: Option<u64>,
   pub report_interval_seconds: Option<u64>,
   pub python_timeout_seconds: Option<u64>,
-  pub python_feedback_every: Option<u32>,
   pub auto_pause_when_converged: Option<bool>,
   pub resume_schedule_cron: Option<String>,
   pub resume_schedule_label: Option<String>,
@@ -389,7 +383,6 @@ pub struct UpdateRoomRequest {
   pub steering_interval_seconds: Option<u64>,
   pub report_interval_seconds: Option<u64>,
   pub python_timeout_seconds: Option<u64>,
-  pub python_feedback_every: Option<u32>,
   pub auto_pause_when_converged: Option<bool>,
   pub resume_schedule_cron: Option<String>,
   pub resume_schedule_label: Option<String>,

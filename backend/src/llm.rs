@@ -30,6 +30,7 @@ use rig::providers::{
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde_json::{Value, json};
 
+use crate::app_state::AppState;
 use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
 use crate::runtime::{DebateHook, ReportHook, TurnRecorder};
@@ -45,11 +46,12 @@ use crate::tools::workspace::{
   WriteFileTool,
 };
 use crate::workspace::RoomWorkspace;
+use uuid::Uuid;
 
 /// Tool-call iteration safety net. The LLM may keep requesting tools forever
 /// in a degenerate case; this caps a single turn at a finite number of tool
 /// rounds before forcing the agent to produce a final reply.
-const MAX_TOOL_ROUNDS_PER_TURN: usize = 8;
+const MAX_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 /// Native Ollama enables thinking output via a top-level `think: true` flag
 /// on the chat request. Without it, models that *can* think (qwen3, gpt-oss,
@@ -79,6 +81,12 @@ pub struct DebateTurnInputs {
   pub leader_tool: RequestLeaderDecisionTool,
   pub do_nothing_tool: DoNothingTool,
   pub hook: DebateHook,
+  /// App state passed through so per-turn tools that emit `InlineNote` can
+  /// reach the room's WebSocket stream.
+  pub state: AppState,
+  pub room_id: Uuid,
+  /// Author label embedded into inline notes (the persona's name).
+  pub author: String,
 }
 
 /// Inputs for the halt-gate tool loop. The model must call exactly one of
@@ -396,7 +404,13 @@ where
   let agent = builder
     .preamble(&inputs.system_prompt)
     .tool(WebFetchTool::new())
-    .tool(RunPythonTool::new(inputs.workspace.clone(), inputs.runner))
+    .tool(RunPythonTool::new(
+      inputs.workspace.clone(),
+      inputs.runner,
+      inputs.state,
+      inputs.room_id,
+      inputs.author,
+    ))
     .tool(ListSubjectFoldersTool::new(inputs.workspace.clone()))
     .tool(CreateSubjectFolderTool::new(inputs.workspace.clone()))
     .tool(ListFilesTool::new(inputs.workspace.clone()))

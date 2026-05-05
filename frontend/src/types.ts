@@ -43,7 +43,6 @@ export interface Room {
   steeringIntervalSeconds: number;
   reportIntervalSeconds: number;
   pythonTimeoutSeconds: number;
-  pythonFeedbackEvery: number;
   autoPauseWhenConverged: boolean;
   resumeScheduleCron: string;
   resumeScheduleLabel: string;
@@ -117,7 +116,7 @@ export interface WsInlineNote {
   type: "inlineNote";
   author: string;
   text: string;
-  reason: string;
+  detail: string;
   timestamp: string;
 }
 
@@ -226,7 +225,6 @@ export interface CreateRoomRequest {
   steeringIntervalSeconds?: number;
   reportIntervalSeconds?: number;
   pythonTimeoutSeconds?: number;
-  pythonFeedbackEvery?: number;
   autoPauseWhenConverged?: boolean;
   resumeScheduleCron?: string;
   resumeScheduleLabel?: string;
@@ -296,7 +294,7 @@ export interface RoomView {
   reports: ReportBuffer[];
   /** Non-bubble short notes rendered next to the author's avatar. */
   inlineNotes: Array<
-    { author: string; text: string; reason: string; timestamp: string }
+    { author: string; text: string; detail: string; timestamp: string }
   >;
 }
 

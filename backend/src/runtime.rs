@@ -288,6 +288,9 @@ async fn run_chat_turn(
       leader_tool,
       do_nothing_tool,
       hook,
+      state: state.clone(),
+      room_id: room.id,
+      author: persona.name.to_string(),
     })
     .await;
 
