@@ -57,29 +57,25 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-/// Persona definition for one of the four rotating debaters.
+/// Persona definition for one of the rotating debaters.
 #[derive(Clone, Copy)]
 struct DebatePersona {
   name: &'static str,
   system_prompt: &'static str,
 }
 
-const DEBATE_PERSONAS: [DebatePersona; 4] = [
+const DEBATE_PERSONAS: [DebatePersona; 3] = [
   DebatePersona {
-    name: "Data Scavenger",
-    system_prompt: include_str!("prompts/data_scavenger.md"),
+    name: "Researcher",
+    system_prompt: include_str!("prompts/researcher.md"),
   },
   DebatePersona {
-    name: "Macro Strategist",
-    system_prompt: include_str!("prompts/macro_strategist.md"),
+    name: "Strategist",
+    system_prompt: include_str!("prompts/strategist.md"),
   },
   DebatePersona {
-    name: "Quant Engineer",
-    system_prompt: include_str!("prompts/quant_engineer.md"),
-  },
-  DebatePersona {
-    name: "Compliance Lawyer",
-    system_prompt: include_str!("prompts/compliance_lawyer.md"),
+    name: "Skeptic",
+    system_prompt: include_str!("prompts/skeptic.md"),
   },
 ];
 
@@ -254,7 +250,8 @@ async fn run_chat_turn(
   let history = db::load_room_events(&state.db, &room.code).await?;
   let history_messages = render_transcript_messages(&history);
   let system_prompt = build_chat_system_prompt(room, persona);
-  let user_prompt = build_chat_user_prompt(room, persona);
+  let workspace_files = list_shared_workspace_files(&workspace).await;
+  let user_prompt = build_chat_user_prompt(room, persona, &workspace_files);
   let preamble = build_room_preamble(room);
 
   let stream = state.ensure_room_stream(&room.code).await;
@@ -1031,15 +1028,53 @@ fn build_chat_system_prompt(room: &Room, persona: DebatePersona) -> String {
   )
 }
 
-fn build_chat_user_prompt(room: &Room, persona: DebatePersona) -> String {
-  format!(
+fn build_chat_user_prompt(
+  room: &Room,
+  persona: DebatePersona,
+  workspace_files: &[String],
+) -> String {
+  let mut prompt = format!(
     "Speak as {name} on the room's topic. Reference prior turns when \
      useful. Keep it short and concrete. The room's pinned context:\n\n\
      Topic: {topic}\nGoal: {goal}",
     name = persona.name,
     topic = room.topic,
     goal = room.goal,
-  )
+  );
+  if !workspace_files.is_empty() {
+    prompt.push_str(
+      "\n\nShared workspace files (saved by you or other personas; open with \
+       `read_file` if relevant):\n",
+    );
+    for path in workspace_files {
+      prompt.push_str("- ");
+      prompt.push_str(path);
+      prompt.push('\n');
+    }
+  }
+  prompt
+}
+
+/// Lists files saved in the room workspace so personas can see what
+/// artifacts other turns produced. Boilerplate (the Python project
+/// manifest, lockfiles) is filtered out so only meaningful work shows up.
+/// Capped to keep the prompt bounded.
+async fn list_shared_workspace_files(workspace: &RoomWorkspace) -> Vec<String> {
+  const MAX_LISTED: usize = 50;
+  const SKIP: &[&str] = &["pyproject.toml", "uv.lock", ".python-version"];
+  let files = match workspace.list_files(std::path::Path::new(".")).await {
+    Ok(files) => files,
+    Err(error) => {
+      tracing::warn!(%error, "failed to list workspace files for prompt");
+      return Vec::new();
+    }
+  };
+  files
+    .into_iter()
+    .map(|f| f.relative_path)
+    .filter(|path| !SKIP.iter().any(|s| path == s))
+    .take(MAX_LISTED)
+    .collect()
 }
 
 pub(crate) fn build_room_preamble(room: &Room) -> String {

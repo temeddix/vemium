@@ -65,29 +65,6 @@ export function resolveAvatarColor(
 }
 
 /**
- * Initial(s) shown inside an avatar circle. One letter for single-word
- * names, two for multi-word names ("Data Scavenger" -> "DS"). Always
- * upper-case ASCII so the small render stays legible.
- */
-export function avatarInitials(kind: TurnKind, agent: string | null): string {
-  if (kind === "user_chat") {
-    return "ME";
-  }
-  const source = (agent ?? "?").trim();
-  if (source === "") {
-    return "?";
-  }
-  const words = source.split(/\s+/).filter((w) => w.length > 0);
-  if (words.length === 0) {
-    return "?";
-  }
-  if (words.length === 1) {
-    return words[0].charAt(0).toUpperCase();
-  }
-  return (words[0].charAt(0) + words[1].charAt(0)).toUpperCase();
-}
-
-/**
  * Returns true when the chat should insert a centered timestamp separator
  * between `previous` and `current`. First message always gets one; later
  * separators only appear when the gap exceeds [`TIME_GAP_THRESHOLD_MS`].
