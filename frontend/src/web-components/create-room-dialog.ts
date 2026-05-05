@@ -131,6 +131,15 @@ export class CreateRoomDialog extends LitElement {
       padding: 0 0.3rem;
     }
 
+    wa-input,
+    wa-textarea,
+    wa-select {
+      display: block;
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+    }
+
     .provider-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -140,15 +149,12 @@ export class CreateRoomDialog extends LitElement {
     .schedule-grid {
       display: grid;
       gap: 0.6rem;
-      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      border-radius: 0.5rem;
-      padding: 0.6rem;
     }
 
     fieldset.tier {
-      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      border-radius: 0.5rem;
-      padding: 0.6rem;
+      border: 0;
+      padding: 0;
+      margin: 0;
       display: grid;
       gap: 0.4rem;
     }
@@ -159,7 +165,8 @@ export class CreateRoomDialog extends LitElement {
       gap: 0.3rem;
       font-size: 0.78rem;
       font-weight: 600;
-      padding: 0 0.3rem;
+      padding: 0;
+      margin-bottom: 0.2rem;
     }
 
     .footer-row {
