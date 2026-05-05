@@ -1,46 +1,29 @@
 //! `do_nothing` tool: an explicit opt-out signal usable by any persona or
-//! the leader. Calling it persists an inline-note row (dim text in the
-//! timeline) instead of a chat bubble. The caller's textual reply is
-//! discarded.
+//! the leader. Calling it terminates the turn without producing a chat
+//! bubble; the `DebateHook` writes the public inline-note breadcrumb that
+//! tells the user what happened.
 //!
-//! `reason` is required; the UI surfaces it only when the user clicks the
-//! note, so it can be a short justification without bloating the timeline.
-//! The reason is stored on `room_events.detail` so a page refresh restores
-//! it alongside the rest of the transcript.
+//! `reason` is required; it travels into the inline-note `detail` field so
+//! the user only sees it on click and the timeline label stays terse.
 
-use crate::app_state::AppState;
-use crate::db;
-use crate::error::ReportError;
-use crate::models::{RoomEvent, RoomEventKind};
-use crate::streaming::{WsEvent, new_turn_id};
-use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-const NAME: &str = "do_nothing";
-const INLINE_NOTE_TEXT: &str = "Decided to do nothing.";
+use crate::tools::InlineNote;
 
-/// Embeds enough context to emit an inline note attributed to a specific
-/// author. Constructed fresh per turn / gate run; cheap to clone.
-#[derive(Clone)]
-pub struct DoNothingTool {
-  state: AppState,
-  room_code: String,
-  /// Author label used for the inline note. Personas pass their own name;
-  /// the leader gates pass the plain "Leader" label.
-  author: String,
-}
+pub const NAME: &str = "do_nothing";
+pub const INLINE_NOTE_TEXT: &str = "Decided to do nothing.";
+pub const INLINE_NOTE_FAIL_TEXT: &str = "Tried to do nothing (failed)";
+
+#[derive(Clone, Default)]
+pub struct DoNothingTool;
 
 impl DoNothingTool {
-  pub fn new(state: AppState, room_code: String, author: String) -> Self {
-    Self {
-      state,
-      room_code,
-      author,
-    }
+  pub fn new() -> Self {
+    Self
   }
 }
 
@@ -93,44 +76,28 @@ impl Tool for DoNothingTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let reason = args.reason.trim().to_string();
-    if reason.is_empty() {
+    if args.reason.trim().is_empty() {
       return Err(DoNothingError::EmptyReason);
     }
-
-    let handle = {
-      let handles = self.state.room_handles.read().await;
-      handles.get(&self.room_code).cloned()
-    };
-    // If the handle has gone (room deleted mid-turn), best-effort: drop
-    // the breadcrumb. The persona is about to wind down anyway.
-    let Some(handle) = handle else {
-      return Ok(DoNothingOutput { acknowledged: true });
-    };
-
-    let draft = RoomEvent {
-      id: None,
-      room_code: self.room_code.clone(),
-      sequence: handle.allocate_event_sequence(),
-      kind: RoomEventKind::InlineNote,
-      agent: Some(self.author.clone()),
-      content: INLINE_NOTE_TEXT.to_string(),
-      reasoning: String::new(),
-      detail: reason,
-      tool_calls: Vec::new(),
-      timestamp: Utc::now(),
-    };
-    let event = db::insert_event(&self.state.db, &draft)
-      .await
-      .report()
-      .unwrap_or_else(|| draft.clone());
-
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
-    stream.send(WsEvent::MessageAdded {
-      turn_id: new_turn_id(),
-      message: event,
-    });
-
     Ok(DoNothingOutput { acknowledged: true })
+  }
+}
+
+/// Builds the inline-note attached to a `do_nothing` invocation. On success
+/// the reason becomes the detail body; on failure the rig-provided error
+/// string is shown instead.
+pub fn format_inline_note(args: &str, result: &str, ok: bool) -> InlineNote {
+  if !ok {
+    return InlineNote {
+      text: INLINE_NOTE_FAIL_TEXT.to_string(),
+      detail: result.to_string(),
+    };
+  }
+  let reason = serde_json::from_str::<DoNothingArgs>(args)
+    .map(|args| args.reason.trim().to_string())
+    .unwrap_or_default();
+  InlineNote {
+    text: INLINE_NOTE_TEXT.to_string(),
+    detail: reason,
   }
 }

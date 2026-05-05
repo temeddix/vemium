@@ -32,14 +32,14 @@ use crate::llm::{
 };
 use crate::models::{
   DebateState, ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind,
-  RoomState, ToolCallRecord,
+  RoomState,
 };
 use crate::python_runner::PythonRunner;
 use crate::streaming::{
-  ReportId, RoomStream, ToolCallId, TurnId, TurnKind, WsEvent, new_turn_id,
-  report_id_for,
+  ReportId, RoomStream, TurnId, TurnKind, WsEvent, new_turn_id, report_id_for,
 };
-use crate::tools::do_nothing::DoNothingTool;
+use crate::tools::do_nothing::{self, DoNothingTool};
+use crate::tools::format_tool_inline_note;
 use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
@@ -54,7 +54,7 @@ use rig::message::AssistantContent;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
@@ -112,12 +112,6 @@ const LEADER_RESUME_GATE_USER_PROMPT: &str =
   include_str!("prompts/leader_resume_gate_user.md");
 
 const DEFAULT_WAKE_LABEL: &str = "Every hour";
-
-/// Tool name personas / leader gates call to opt out of producing a bubble.
-const DO_NOTHING_TOOL_NAME: &str = "do_nothing";
-
-/// Maximum bytes emitted in tool args/output previews to the WebSocket.
-const PREVIEW_MAX_CHARS: usize = 240;
 
 /// On boot, brings every persisted room back online. Rooms in either
 /// [`RoomState::Deactivated`] or [`DebateState::Paused`] keep that state -
@@ -292,14 +286,16 @@ async fn run_chat_turn(
     high.clone(),
     preamble,
   );
-  let do_nothing_tool = DoNothingTool::new(
+  let do_nothing_tool = DoNothingTool::new();
+  let inline_note_tool =
+    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
+  let hook = DebateHook::for_draft(
+    turn_id.clone(),
+    stream.clone(),
     state.clone(),
     room.code.clone(),
     persona.name.to_string(),
   );
-  let inline_note_tool =
-    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
-  let hook = DebateHook::new(turn_id.clone(), stream.clone());
   let recorder = hook.recorder();
 
   let client =
@@ -316,9 +312,6 @@ async fn run_chat_turn(
       do_nothing_tool,
       inline_note_tool,
       hook,
-      state: state.clone(),
-      room_code: room.code.clone(),
-      author: persona.name.to_string(),
     })
     .await;
 
@@ -333,14 +326,12 @@ async fn run_chat_turn(
     }
   };
 
-  let (reasoning, tool_calls) = recorder.snapshot().await;
-  let no_further_input = tool_calls
-    .iter()
-    .any(|call| call.tool == DO_NOTHING_TOOL_NAME && call.ok);
+  let (reasoning, do_nothing_called) = recorder.snapshot().await;
+  let no_further_input = do_nothing_called;
 
   // When `do_nothing` was called we discard any text the model also
-  // produced and retire the draft without persisting a bubble. The tool
-  // already emitted the `InlineNote` itself.
+  // produced and retire the draft without persisting a bubble. The hook
+  // already emitted the inline-note breadcrumb when the tool returned.
   if no_further_input {
     stream.send(WsEvent::DraftFailed {
       turn_id,
@@ -371,7 +362,6 @@ async fn run_chat_turn(
     content: trimmed,
     reasoning,
     detail: String::new(),
-    tool_calls,
     timestamp,
   };
   let event = db::insert_event(&state.db, &draft)
@@ -391,32 +381,41 @@ async fn run_chat_turn(
 /// Bridge between Rig's [`PromptHook`] callbacks and our WebSocket /
 /// persistence layer. One instance per turn.
 ///
-/// The hook does NOT persist anything per-event. Reasoning deltas and tool
-/// invocations are accumulated in [`TurnRecorder`] (shared by `Arc` with
-/// the orchestrator); the orchestrator pulls them out at turn end and
-/// inserts a single `room_events` row containing the message text plus the
-/// inline reasoning + tool calls. The hook's only job is to fan WebSocket
-/// `Draft*` frames out to subscribers in real time.
+/// Two distinct uses:
+///
+/// - **Streaming flows** (debater turn, leader steering): construct via
+///   [`DebateHook::for_draft`] with the draft's `turn_id`. The hook
+///   forwards `DraftText` deltas live and brackets tool invocations with
+///   `DraftToolStarted` / `DraftToolCompleted` so the UI can show a
+///   spinner while a tool runs.
+/// - **Gate flows** (pause / resume gates): construct via
+///   [`DebateHook::for_gate`]. There is no draft bubble in flight, so
+///   `Draft*` frames are suppressed.
+///
+/// In both cases the hook persists one `inline_note` row per tool result
+/// (using the per-tool formatter from [`format_tool_inline_note`]) and
+/// broadcasts it as a `MessageAdded` lifecycle frame. Reasoning deltas
+/// and a `do_nothing_called` flag are accumulated in [`TurnRecorder`] so
+/// the orchestrator can finish the turn (or skip the bubble) when the
+/// stream drains.
 #[derive(Clone)]
 pub struct DebateHook {
-  turn_id: TurnId,
+  /// Some when this hook is attached to a streaming draft. None for
+  /// gate-only runs that don't have a draft bubble in flight.
+  turn_id: Option<TurnId>,
   stream: Arc<RoomStream>,
+  state: AppState,
+  room_code: String,
+  /// Author label written to inline-note rows for tool calls during this
+  /// turn (e.g. the persona's name, or `LEADER_AGENT` for gate runs).
+  author: String,
   recorder: Arc<TurnRecorder>,
-  /// `rig::internal_call_id -> (call_id, tool_name, started_at)` for
-  /// in-flight tool calls, so we can correlate results back to starts.
-  tool_starts: Arc<Mutex<HashMap<String, ToolStart>>>,
-}
-
-#[derive(Clone)]
-struct ToolStart {
-  call_id: ToolCallId,
-  tool: String,
-  started_at: Instant,
 }
 
 /// Per-turn accumulator owned by both the [`DebateHook`] and the
-/// orchestrator. Reasoning deltas append to a string; finished tool calls
-/// append to a vec in invocation order.
+/// orchestrator. Reasoning deltas append to a string; the
+/// `do_nothing_called` flag flips on the first successful `do_nothing`
+/// invocation so the runtime can suppress the bubble after the turn.
 #[derive(Default)]
 pub struct TurnRecorder {
   inner: Mutex<TurnRecorderInner>,
@@ -425,33 +424,63 @@ pub struct TurnRecorder {
 #[derive(Default)]
 struct TurnRecorderInner {
   reasoning: String,
-  tool_calls: Vec<ToolCallRecord>,
+  do_nothing_called: bool,
 }
 
 impl TurnRecorder {
-  /// Returns the accumulated `(reasoning, tool_calls)` for this turn.
-  /// Called once at turn end after the LLM stream has fully drained.
-  pub async fn snapshot(&self) -> (String, Vec<ToolCallRecord>) {
+  /// Returns `(reasoning, do_nothing_called)` for this turn. Called once
+  /// at turn end after the LLM stream has fully drained.
+  pub async fn snapshot(&self) -> (String, bool) {
     let inner = self.inner.lock().await;
-    (inner.reasoning.clone(), inner.tool_calls.clone())
+    (inner.reasoning.clone(), inner.do_nothing_called)
   }
 
   pub(crate) async fn append_reasoning(&self, delta: &str) {
     self.inner.lock().await.reasoning.push_str(delta);
   }
 
-  pub(crate) async fn record_tool_call(&self, record: ToolCallRecord) {
-    self.inner.lock().await.tool_calls.push(record);
+  pub(crate) async fn mark_do_nothing(&self) {
+    self.inner.lock().await.do_nothing_called = true;
   }
 }
 
 impl DebateHook {
-  fn new(turn_id: TurnId, stream: Arc<RoomStream>) -> Self {
+  /// Hook attached to a streaming draft. `Draft*` frames flow under the
+  /// supplied `turn_id`; tool inline-note rows are persisted as the
+  /// model invokes each tool.
+  pub fn for_draft(
+    turn_id: TurnId,
+    stream: Arc<RoomStream>,
+    state: AppState,
+    room_code: String,
+    author: String,
+  ) -> Self {
     Self {
-      turn_id,
+      turn_id: Some(turn_id),
       stream,
+      state,
+      room_code,
+      author,
       recorder: Arc::new(TurnRecorder::default()),
-      tool_starts: Arc::new(Mutex::new(HashMap::new())),
+    }
+  }
+
+  /// Hook attached to a gate run. No draft is in flight, so `Draft*`
+  /// frames are suppressed; tool inline-note rows are still persisted
+  /// and broadcast as `MessageAdded`.
+  pub fn for_gate(
+    stream: Arc<RoomStream>,
+    state: AppState,
+    room_code: String,
+    author: String,
+  ) -> Self {
+    Self {
+      turn_id: None,
+      stream,
+      state,
+      room_code,
+      author,
+      recorder: Arc::new(TurnRecorder::default()),
     }
   }
 
@@ -459,12 +488,53 @@ impl DebateHook {
     &self.stream
   }
 
-  pub(crate) fn turn_id(&self) -> &TurnId {
-    &self.turn_id
+  pub(crate) fn turn_id(&self) -> Option<&TurnId> {
+    self.turn_id.as_ref()
   }
 
   pub(crate) fn recorder(&self) -> Arc<TurnRecorder> {
     self.recorder.clone()
+  }
+
+  /// Builds an `inline_note` row for a finished tool call, persists it,
+  /// and broadcasts it on the room stream so connected clients render it
+  /// without a refresh. Best-effort: a missing room handle (room deleted
+  /// mid-turn) drops the breadcrumb silently.
+  async fn persist_tool_inline_note(
+    &self,
+    tool_name: &str,
+    args: &str,
+    result: &str,
+    ok: bool,
+  ) {
+    let handle = {
+      let handles = self.state.room_handles.read().await;
+      handles.get(&self.room_code).cloned()
+    };
+    let Some(handle) = handle else {
+      return;
+    };
+
+    let note = format_tool_inline_note(tool_name, args, result, ok);
+    let draft = RoomEvent {
+      id: None,
+      room_code: self.room_code.clone(),
+      sequence: handle.allocate_event_sequence(),
+      kind: RoomEventKind::InlineNote,
+      agent: Some(self.author.clone()),
+      content: note.text,
+      reasoning: String::new(),
+      detail: note.detail,
+      timestamp: Utc::now(),
+    };
+    let event = db::insert_event(&self.state.db, &draft)
+      .await
+      .report()
+      .unwrap_or_else(|| draft.clone());
+    self.stream.send(WsEvent::MessageAdded {
+      turn_id: new_turn_id(),
+      message: event,
+    });
   }
 }
 
@@ -477,10 +547,12 @@ where
     text_delta: &str,
     _aggregated_text: &str,
   ) -> HookAction {
-    self.stream.send(WsEvent::DraftText {
-      turn_id: self.turn_id.clone(),
-      delta: text_delta.to_string(),
-    });
+    if let Some(turn_id) = &self.turn_id {
+      self.stream.send(WsEvent::DraftText {
+        turn_id: turn_id.clone(),
+        delta: text_delta.to_string(),
+      });
+    }
     HookAction::cont()
   }
 
@@ -488,74 +560,45 @@ where
     &self,
     tool_name: &str,
     _tool_call_id: Option<String>,
-    internal_call_id: &str,
-    args: &str,
+    _internal_call_id: &str,
+    _args: &str,
   ) -> ToolCallHookAction {
-    let call_id = internal_call_id.to_string();
-    self.stream.send(WsEvent::DraftToolStarted {
-      turn_id: self.turn_id.clone(),
-      call_id: call_id.clone(),
-      tool: tool_name.to_string(),
-      args_preview: preview(args),
-    });
-    self.tool_starts.lock().await.insert(
-      call_id.clone(),
-      ToolStart {
-        call_id,
+    if let Some(turn_id) = &self.turn_id {
+      self.stream.send(WsEvent::DraftToolStarted {
+        turn_id: turn_id.clone(),
         tool: tool_name.to_string(),
-        started_at: Instant::now(),
-      },
-    );
+      });
+    }
     ToolCallHookAction::cont()
   }
 
   async fn on_tool_result(
     &self,
-    _tool_name: &str,
+    tool_name: &str,
     _tool_call_id: Option<String>,
-    internal_call_id: &str,
+    _internal_call_id: &str,
     args: &str,
     result: &str,
   ) -> HookAction {
-    let started = self.tool_starts.lock().await.remove(internal_call_id);
-    let Some(ToolStart {
-      call_id,
-      tool,
-      started_at,
-    }) = started
-    else {
-      tracing::warn!(
-        internal_call_id,
-        "tool result without matching start; dropping"
-      );
-      return HookAction::cont();
-    };
-    let duration_ms = started_at.elapsed().as_millis() as u64;
     // Heuristic: rig surfaces tool errors via `Result::Err`, which it then
     // serializes with a recognizable "Tool error:" prefix in the assistant
     // message back to the model. Treat anything else as success.
     let ok = !result.starts_with("Tool error:");
-    let preview_text = preview(result);
-    let args_value: serde_json::Value =
-      serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
 
-    let record = ToolCallRecord {
-      tool: tool.clone(),
-      args: args_value,
-      ok,
-      output_preview: preview_text.clone(),
-      duration_ms,
-    };
-    self.recorder.record_tool_call(record).await;
+    self
+      .persist_tool_inline_note(tool_name, args, result, ok)
+      .await;
 
-    self.stream.send(WsEvent::DraftToolCompleted {
-      turn_id: self.turn_id.clone(),
-      call_id,
-      tool,
-      ok,
-      output_preview: preview_text,
-      duration_ms,
-    });
+    if ok && tool_name == do_nothing::NAME {
+      self.recorder.mark_do_nothing().await;
+    }
+
+    if let Some(turn_id) = &self.turn_id {
+      self.stream.send(WsEvent::DraftToolCompleted {
+        turn_id: turn_id.clone(),
+        tool: tool_name.to_string(),
+      });
+    }
     HookAction::cont()
   }
 }
@@ -587,13 +630,17 @@ async fn evaluate_and_maybe_auto_pause(
 
   let pause_tool =
     PauseRoomTool::new(state.clone(), room.code.clone(), label.clone());
-  let do_nothing_tool = DoNothingTool::new(
+  let do_nothing_tool = DoNothingTool::new();
+  let inline_note_tool =
+    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
+
+  let stream = state.ensure_room_stream(&room.code).await;
+  let hook = DebateHook::for_gate(
+    stream,
     state.clone(),
     room.code.clone(),
     LEADER_AGENT.to_string(),
   );
-  let inline_note_tool =
-    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
@@ -607,6 +654,7 @@ async fn evaluate_and_maybe_auto_pause(
       pause_tool,
       do_nothing_tool,
       inline_note_tool,
+      hook,
     })
     .await
 }
@@ -708,13 +756,17 @@ async fn evaluate_scheduled_resume(
   );
 
   let resume_tool = ResumeRoomTool::new(state.clone(), room.code.clone());
-  let do_nothing_tool = DoNothingTool::new(
+  let do_nothing_tool = DoNothingTool::new();
+  let inline_note_tool =
+    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
+
+  let stream = state.ensure_room_stream(&room.code).await;
+  let hook = DebateHook::for_gate(
+    stream,
     state.clone(),
     room.code.clone(),
     LEADER_AGENT.to_string(),
   );
-  let inline_note_tool =
-    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
@@ -728,6 +780,7 @@ async fn evaluate_scheduled_resume(
       resume_tool,
       do_nothing_tool,
       inline_note_tool,
+      hook,
     })
     .await
 }
@@ -809,7 +862,13 @@ async fn run_leader_steering(
     kind: TurnKind::LeaderNote,
   });
 
-  let hook = DebateHook::new(turn_id.clone(), stream.clone());
+  let hook = DebateHook::for_draft(
+    turn_id.clone(),
+    stream.clone(),
+    state.clone(),
+    room.code.clone(),
+    LEADER_AGENT.to_string(),
+  );
   let recorder = hook.recorder();
   let inline_note_tool =
     GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
@@ -853,7 +912,6 @@ async fn run_leader_steering(
     content: STEERING_INLINE_NOTE.to_string(),
     reasoning: String::new(),
     detail: String::new(),
-    tool_calls: Vec::new(),
     timestamp,
   };
   let inline_event = db::insert_event(&state.db, &inline_draft)
@@ -865,7 +923,7 @@ async fn run_leader_steering(
     message: inline_event,
   });
 
-  let (reasoning, tool_calls) = recorder.snapshot().await;
+  let (reasoning, _do_nothing_called) = recorder.snapshot().await;
   let bubble_draft = RoomEvent {
     id: None,
     room_code: room.code.clone(),
@@ -875,7 +933,6 @@ async fn run_leader_steering(
     content: trimmed,
     reasoning,
     detail: String::new(),
-    tool_calls,
     timestamp,
   };
   let bubble_event = db::insert_event(&state.db, &bubble_draft)
@@ -1240,13 +1297,4 @@ fn render_gate_user_prompt(
     .replace("{preamble}", preamble)
     .replace("{schedule_label}", schedule_label)
     .replace("{transcript}", transcript)
-}
-
-fn preview(text: &str) -> String {
-  if text.chars().count() <= PREVIEW_MAX_CHARS {
-    return text.to_string();
-  }
-  let mut out: String = text.chars().take(PREVIEW_MAX_CHARS).collect();
-  out.push_str("...");
-  out
 }

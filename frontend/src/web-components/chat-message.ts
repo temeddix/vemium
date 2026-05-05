@@ -1,11 +1,5 @@
 import { type PersonaColor, resolveAvatarColor } from "@/app/chat";
-import type {
-  Draft,
-  DraftToolCall,
-  Message,
-  ToolCallRecord,
-  TurnKind,
-} from "@/app/types";
+import type { Draft, Message, TurnKind } from "@/app/types";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { ref } from "lit/directives/ref.js";
@@ -16,14 +10,6 @@ declare global {
   }
 }
 
-interface ToolCallView {
-  tool: string;
-  status: "running" | "ok" | "error";
-  argsPreview: string;
-  outputPreview: string | null;
-  durationMs: number | null;
-}
-
 /**
  * One chat row. Renders either a finalized [`Message`] or an in-flight
  * [`Draft`] in an Instagram-style bubble: friend (AI) on the left with an
@@ -31,6 +17,12 @@ interface ToolCallView {
  * whether the avatar slot and the agent-name label should appear (gated by
  * grouping with neighboring rows); this component owns everything inside
  * the row.
+ *
+ * Tool invocations are NOT rendered inline on the bubble - they are
+ * persisted as separate `inline_note` rows the page renders alongside
+ * bubbles. While a tool is running on an in-flight draft, the bubble
+ * shows a small "running `<tool>`" indicator that disappears as soon as
+ * the matching `draftToolCompleted` arrives.
  */
 @customElement("te-chat-message")
 export class ChatMessage extends LitElement {
@@ -202,41 +194,21 @@ export class ChatMessage extends LitElement {
       }
     }
 
-    .tool-list {
-      display: grid;
-      gap: 0.3rem;
-      margin: 0.3rem 0 0;
-      padding: 0;
-      list-style: none;
-    }
-
-    .tool-list > li {
-      display: grid;
-      gap: 0.2rem;
-    }
-
-    .tool-meta {
+    .running-tool {
       display: flex;
-      gap: 0.4rem;
       align-items: center;
-      font-size: 0.7rem;
-      color: var(--wa-color-text-quiet);
-    }
-
-    .tool-args {
-      font-family: var(--wa-font-family-code, monospace);
-      font-size: 0.72rem;
-      color: var(--wa-color-text-quiet);
-      white-space: pre-wrap;
-      word-break: break-all;
-      margin: 0;
-    }
-
-    .tool-output {
-      font-family: var(--wa-font-family-code, monospace);
+      gap: 0.4rem;
+      margin: 0.4rem 0 0;
       font-size: 0.74rem;
-      white-space: pre-wrap;
-      margin: 0;
+      color: var(--wa-color-text-quiet);
+    }
+
+    .running-tool wa-spinner {
+      font-size: 0.85rem;
+    }
+
+    .running-tool-name {
+      font-family: var(--wa-font-family-code, monospace);
     }
 
     .error-line {
@@ -274,9 +246,11 @@ export class ChatMessage extends LitElement {
           <div class="${bubbleClasses}">
             ${view.reasoning !== ""
               ? this.#renderReasoning(view.reasoning, view.streaming)
-              : nothing} ${this.#renderContent(view.content)} ${view.toolCalls
-                .length > 0
-              ? this.#renderToolCalls(view.toolCalls)
+              : nothing} ${this.#renderContent(
+                view.content,
+              )} ${view.runningTool !==
+                null
+              ? this.#renderRunningTool(view.runningTool)
               : nothing} ${view.error !== null
               ? html`
                 <p class="error-line">${view.error}</p>
@@ -336,55 +310,19 @@ export class ChatMessage extends LitElement {
     );
   }
 
-  #renderToolCalls(calls: ToolCallView[]) {
-    const anyRunning = calls.some((c) => c.status === "running");
-    const title = `${calls.length} ${
-      calls.length === 1 ? "TOOL" : "TOOLS"
-    } USED`;
-    const body = html`
-      <ul class="tool-list">
-        ${calls.map((call) =>
-          html`
-            <li>
-              <div class="tool-meta">
-                <strong>${call.tool}</strong>
-                ${this.#renderToolStatus(call.status)} ${call.durationMs !==
-                    null
-                  ? html`
-                    <span>${call.durationMs} ms</span>
-                  `
-                  : nothing}
-              </div>
-              ${call.argsPreview !== ""
-                ? html`
-                  <pre class="tool-args">${call.argsPreview}</pre>
-                `
-                : nothing} ${call.outputPreview !== null
-                ? html`
-                  <pre class="tool-output">${call.outputPreview}</pre>
-                `
-                : nothing}
-            </li>
-          `
-        )}
-      </ul>
-    `;
-    return this.#renderCollapsible(title, anyRunning, body);
-  }
-
-  #renderToolStatus(status: ToolCallView["status"]) {
-    if (status === "running") {
-      return html`
-        <wa-badge size="small">running</wa-badge>
-      `;
-    }
-    if (status === "ok") {
-      return html`
-        <wa-badge size="small">ok</wa-badge>
-      `;
-    }
+  /**
+   * Compact "running `<tool>`" indicator shown inside the bubble while a
+   * tool call is in flight. Cleared by `draftToolCompleted`. The persisted
+   * inline-note row for the call arrives separately and renders next to
+   * the avatar in the page-level scroll list.
+   */
+  #renderRunningTool(tool: string) {
     return html`
-      <wa-badge size="small">error</wa-badge>
+      <div class="running-tool">
+        <wa-spinner></wa-spinner>
+        <span>running</span>
+        <span class="running-tool-name">${tool}</span>
+      </div>
     `;
   }
 
@@ -405,7 +343,7 @@ interface ChatRowView {
   color: PersonaColor;
   content: string;
   reasoning: string;
-  toolCalls: ToolCallView[];
+  runningTool: string | null;
   streaming: boolean;
   failed: boolean;
   error: string | null;
@@ -418,7 +356,7 @@ function messageView(message: Message): ChatRowView {
     color: resolveAvatarColor(message.kind, message.agent),
     content: message.content,
     reasoning: message.reasoning,
-    toolCalls: message.toolCalls.map(toolRecordToView),
+    runningTool: null,
     streaming: false,
     failed: false,
     error: null,
@@ -432,43 +370,11 @@ function draftView(draft: Draft): ChatRowView {
     color: resolveAvatarColor(draft.kind, draft.agent),
     content: draft.content,
     reasoning: draft.reasoning,
-    toolCalls: draft.toolCalls.map(draftCallToView),
+    runningTool: draft.runningTool,
     streaming: draft.status === "streaming",
     failed: draft.status === "failed",
     error: draft.error,
   };
-}
-
-function toolRecordToView(record: ToolCallRecord): ToolCallView {
-  return {
-    tool: record.tool,
-    status: record.ok ? "ok" : "error",
-    argsPreview: previewArgsValue(record.args),
-    outputPreview: record.outputPreview,
-    durationMs: record.durationMs,
-  };
-}
-
-function draftCallToView(call: DraftToolCall): ToolCallView {
-  return {
-    tool: call.tool,
-    status: call.status,
-    argsPreview: call.argsPreview,
-    outputPreview: call.outputPreview,
-    durationMs: call.durationMs,
-  };
-}
-
-function previewArgsValue(value: unknown): string {
-  try {
-    const text = JSON.stringify(value);
-    if (text === undefined) {
-      return "";
-    }
-    return text.length > 240 ? `${text.slice(0, 240)}...` : text;
-  } catch {
-    return "";
-  }
 }
 
 function renderMarkdown(content: string) {

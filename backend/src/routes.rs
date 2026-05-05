@@ -604,7 +604,6 @@ async fn post_user_message(
     content,
     reasoning: String::new(),
     detail: String::new(),
-    tool_calls: Vec::new(),
     timestamp: Utc::now(),
   };
 

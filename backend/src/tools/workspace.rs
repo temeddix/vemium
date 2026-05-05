@@ -13,6 +13,7 @@
 //! All paths are routed through [`crate::workspace::RoomWorkspace::resolve`],
 //! which rejects anything that escapes the room's directory.
 
+use crate::tools::InlineNote;
 use crate::workspace::RoomWorkspace;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -20,6 +21,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
 use thiserror::Error;
+
+/// Markdown preview cap for `read_file` inline-note `detail`. Avoids
+/// dumping the full 64 KiB read limit into the click-to-reveal dialog.
+const READ_PREVIEW_CHARS: usize = 2_000;
 
 #[derive(Debug, Error)]
 #[error("{0}")]
@@ -33,7 +38,9 @@ impl WorkspaceToolError {
 
 // -- list_subject_folders --------------------------------------------------
 
-const LIST_FOLDERS_NAME: &str = "list_subject_folders";
+pub const LIST_FOLDERS_NAME: &str = "list_subject_folders";
+pub const LIST_FOLDERS_NOTE_TEXT: &str = "Listed subject folders";
+pub const LIST_FOLDERS_NOTE_FAIL_TEXT: &str = "Subject folder listing failed";
 
 #[derive(Debug, Clone)]
 pub struct ListSubjectFoldersTool {
@@ -46,15 +53,15 @@ impl ListSubjectFoldersTool {
   }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ListSubjectFoldersArgs {}
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ListSubjectFoldersOutput {
   pub folders: Vec<SubjectFolderEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SubjectFolderEntry {
   pub name: String,
   /// `true` if the folder follows the canonical `<datetime> (<subject>)`
@@ -106,7 +113,8 @@ impl Tool for ListSubjectFoldersTool {
 
 // -- create_subject_folder -------------------------------------------------
 
-const CREATE_FOLDER_NAME: &str = "create_subject_folder";
+pub const CREATE_FOLDER_NAME: &str = "create_subject_folder";
+pub const CREATE_FOLDER_NOTE_FAIL_TEXT: &str = "Subject folder creation failed";
 
 #[derive(Debug, Clone)]
 pub struct CreateSubjectFolderTool {
@@ -119,13 +127,13 @@ impl CreateSubjectFolderTool {
   }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CreateSubjectFolderArgs {
   /// Short human-readable phrase describing the folder's purpose.
   pub subject: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSubjectFolderOutput {
   /// Resulting folder name on disk, e.g.
   /// `2026-05-03_14-23-05 (CPI categories)`.
@@ -173,7 +181,8 @@ impl Tool for CreateSubjectFolderTool {
 
 // -- list_files ------------------------------------------------------------
 
-const LIST_FILES_NAME: &str = "list_files";
+pub const LIST_FILES_NAME: &str = "list_files";
+pub const LIST_FILES_NOTE_FAIL_TEXT: &str = "File listing failed";
 
 #[derive(Debug, Clone)]
 pub struct ListFilesTool {
@@ -186,19 +195,19 @@ impl ListFilesTool {
   }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ListFilesArgs {
   /// Workspace-relative directory; `None` (or `""`) means the room root.
   #[serde(default)]
   pub path: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ListFilesOutput {
   pub files: Vec<WorkspaceFileEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WorkspaceFileEntry {
   pub path: String,
   pub size_bytes: u64,
@@ -258,7 +267,8 @@ impl Tool for ListFilesTool {
 
 // -- read_file -------------------------------------------------------------
 
-const READ_FILE_NAME: &str = "read_file";
+pub const READ_FILE_NAME: &str = "read_file";
+pub const READ_FILE_NOTE_FAIL_TEXT: &str = "File read failed";
 
 #[derive(Debug, Clone)]
 pub struct ReadFileTool {
@@ -271,12 +281,12 @@ impl ReadFileTool {
   }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ReadFileArgs {
   pub path: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReadFileOutput {
   pub path: String,
   pub contents: String,
@@ -323,7 +333,8 @@ impl Tool for ReadFileTool {
 
 // -- write_file ------------------------------------------------------------
 
-const WRITE_FILE_NAME: &str = "write_file";
+pub const WRITE_FILE_NAME: &str = "write_file";
+pub const WRITE_FILE_NOTE_FAIL_TEXT: &str = "File write failed";
 
 #[derive(Debug, Clone)]
 pub struct WriteFileTool {
@@ -336,13 +347,13 @@ impl WriteFileTool {
   }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct WriteFileArgs {
   pub path: String,
   pub contents: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WriteFileOutput {
   pub path: String,
   pub bytes_written: usize,
@@ -393,4 +404,205 @@ impl Tool for WriteFileTool {
       bytes_written,
     })
   }
+}
+
+// -- inline-note formatters ------------------------------------------------
+
+/// Inline-note for `list_subject_folders`. The detail surfaces the folder
+/// names so the breadcrumb is a one-click stand-in for re-running the
+/// listing.
+pub fn format_list_subject_folders_inline_note(
+  _args: &str,
+  result: &str,
+  ok: bool,
+) -> InlineNote {
+  if !ok {
+    return InlineNote {
+      text: LIST_FOLDERS_NOTE_FAIL_TEXT.to_string(),
+      detail: result.to_string(),
+    };
+  }
+  let detail = match serde_json::from_str::<ListSubjectFoldersOutput>(result) {
+    Ok(parsed) => {
+      if parsed.folders.is_empty() {
+        "(none)".to_string()
+      } else {
+        parsed
+          .folders
+          .iter()
+          .map(|f| {
+            if f.structured {
+              format!("- {}", f.name)
+            } else {
+              format!("- {} (off-format)", f.name)
+            }
+          })
+          .collect::<Vec<_>>()
+          .join("\n")
+      }
+    }
+    Err(_) => result.to_string(),
+  };
+  InlineNote {
+    text: LIST_FOLDERS_NOTE_TEXT.to_string(),
+    detail,
+  }
+}
+
+/// Inline-note for `create_subject_folder`. The label embeds the resulting
+/// folder name (workspace-relative) so the user can read it from the
+/// timeline without opening the detail dialog.
+pub fn format_create_subject_folder_inline_note(
+  args: &str,
+  result: &str,
+  ok: bool,
+) -> InlineNote {
+  if !ok {
+    let subject = serde_json::from_str::<CreateSubjectFolderArgs>(args)
+      .map(|a| a.subject)
+      .unwrap_or_default();
+    let detail = if subject.is_empty() {
+      result.to_string()
+    } else {
+      format!("Subject: {subject}\n\n{result}")
+    };
+    return InlineNote {
+      text: CREATE_FOLDER_NOTE_FAIL_TEXT.to_string(),
+      detail,
+    };
+  }
+  match serde_json::from_str::<CreateSubjectFolderOutput>(result) {
+    Ok(parsed) => InlineNote {
+      text: format!("Created subject folder {}", parsed.folder),
+      detail: String::new(),
+    },
+    Err(_) => InlineNote {
+      text: "Created subject folder".to_string(),
+      detail: result.to_string(),
+    },
+  }
+}
+
+/// Inline-note for `list_files`. The label includes the listed directory
+/// (workspace-relative, root rendered as `.`); the detail dumps the full
+/// path/size table.
+pub fn format_list_files_inline_note(
+  args: &str,
+  result: &str,
+  ok: bool,
+) -> InlineNote {
+  let dir_label = match serde_json::from_str::<ListFilesArgs>(args)
+    .map(|a| a.path.unwrap_or_default())
+  {
+    Ok(path) if !path.is_empty() => path,
+    _ => ".".to_string(),
+  };
+  if !ok {
+    return InlineNote {
+      text: LIST_FILES_NOTE_FAIL_TEXT.to_string(),
+      detail: format!("Directory: {dir_label}\n\n{result}"),
+    };
+  }
+  let detail = match serde_json::from_str::<ListFilesOutput>(result) {
+    Ok(parsed) => {
+      if parsed.files.is_empty() {
+        "(empty)".to_string()
+      } else {
+        parsed
+          .files
+          .iter()
+          .map(|f| format!("- {} ({} bytes)", f.path, f.size_bytes))
+          .collect::<Vec<_>>()
+          .join("\n")
+      }
+    }
+    Err(_) => result.to_string(),
+  };
+  InlineNote {
+    text: format!("Listed files in {dir_label}"),
+    detail,
+  }
+}
+
+/// Inline-note for `read_file`. The label embeds the file path
+/// (workspace-relative); the detail carries a leading-chunk preview rather
+/// than the full contents to keep the click-to-reveal dialog manageable.
+pub fn format_read_file_inline_note(
+  args: &str,
+  result: &str,
+  ok: bool,
+) -> InlineNote {
+  let path = serde_json::from_str::<ReadFileArgs>(args)
+    .map(|a| a.path)
+    .unwrap_or_default();
+  if !ok {
+    let detail = if path.is_empty() {
+      result.to_string()
+    } else {
+      format!("Path: {path}\n\n{result}")
+    };
+    return InlineNote {
+      text: READ_FILE_NOTE_FAIL_TEXT.to_string(),
+      detail,
+    };
+  }
+  let label = if path.is_empty() {
+    "Read file".to_string()
+  } else {
+    format!("Read file {path}")
+  };
+  let detail = match serde_json::from_str::<ReadFileOutput>(result) {
+    Ok(parsed) => preview(&parsed.contents),
+    Err(_) => preview(result),
+  };
+  InlineNote {
+    text: label,
+    detail,
+  }
+}
+
+/// Inline-note for `write_file`. The label embeds the file path
+/// (workspace-relative); the detail just records the byte count, since
+/// echoing the full payload back would duplicate what is already on disk.
+pub fn format_write_file_inline_note(
+  args: &str,
+  result: &str,
+  ok: bool,
+) -> InlineNote {
+  let path = serde_json::from_str::<WriteFileArgs>(args)
+    .map(|a| a.path)
+    .unwrap_or_default();
+  if !ok {
+    let detail = if path.is_empty() {
+      result.to_string()
+    } else {
+      format!("Path: {path}\n\n{result}")
+    };
+    return InlineNote {
+      text: WRITE_FILE_NOTE_FAIL_TEXT.to_string(),
+      detail,
+    };
+  }
+  let label = if path.is_empty() {
+    "Wrote file".to_string()
+  } else {
+    format!("Wrote file {path}")
+  };
+  let detail = match serde_json::from_str::<WriteFileOutput>(result) {
+    Ok(parsed) => format!("{} bytes written", parsed.bytes_written),
+    Err(_) => String::new(),
+  };
+  InlineNote {
+    text: label,
+    detail,
+  }
+}
+
+fn preview(text: &str) -> String {
+  if text.chars().count() <= READ_PREVIEW_CHARS {
+    return text.to_string();
+  }
+  let mut out: String = text.chars().take(READ_PREVIEW_CHARS).collect();
+  out.push_str("\n\n... (truncated)");
+  out
 }

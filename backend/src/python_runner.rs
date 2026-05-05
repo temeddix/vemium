@@ -38,7 +38,7 @@ const MAX_CAPTURED_BYTES: usize = 16 * 1024;
 const DEFAULT_PYPROJECT: &str = include_str!("python_workspace_template.toml");
 
 /// Stages of the [`PythonRunner::run`] pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PythonStage {
   RuffFormat,
@@ -59,7 +59,7 @@ impl PythonStage {
 }
 
 /// Outcome of one stage.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StageResult {
   pub stage: PythonStage,
@@ -74,7 +74,7 @@ pub struct StageResult {
 
 /// Aggregated outcome of [`PythonRunner::run`]. `overall_ok` is `true` only
 /// when every executed stage passed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PythonRunResult {
   pub stages: Vec<StageResult>,

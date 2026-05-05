@@ -329,12 +329,15 @@ impl RoomEventKind {
   }
 }
 
-/// One finalized row in `room_events`. For chat-bubble kinds, `content`
-/// is the message text, `reasoning` is the model's chain-of-thought, and
-/// `tool_calls` is every tool invocation from the turn (no separate
-/// `tool_call` rows). For [`RoomEventKind::InlineNote`], `content` is the
-/// short label and `detail` is the click-to-reveal expansion; the other
-/// payload fields are empty.
+/// One finalized row in `room_events`. For chat-bubble kinds (`AgentChat`,
+/// `LeaderNote`, `UserChat`), `content` is the message text and
+/// `reasoning` is the model's chain-of-thought. For
+/// [`RoomEventKind::InlineNote`], `content` is the short label and
+/// `detail` is the click-to-reveal expansion; `reasoning` is empty.
+///
+/// Tool invocations live on their own `inline_note` rows now — they no
+/// longer ride along on the assistant message that triggered them. See
+/// migration `0014` for the schema change.
 ///
 /// `id` is `None` for in-memory events that have not yet been persisted;
 /// the database assigns the actual primary key on insert.
@@ -353,17 +356,14 @@ pub struct RoomEvent {
   pub agent: Option<String>,
   pub content: String,
   /// Model's chain-of-thought for this turn. Empty when the model emitted
-  /// none, or when the provider doesn't expose reasoning separately.
+  /// none, when the provider doesn't expose reasoning separately, or for
+  /// `inline_note` rows.
   #[serde(default)]
   pub reasoning: String,
   /// Click-to-reveal expansion for [`RoomEventKind::InlineNote`] rows.
   /// Empty for every other kind.
   #[serde(default)]
   pub detail: String,
-  /// Tools invoked during this turn, in invocation order. Empty when the
-  /// turn called no tools.
-  #[serde(default)]
-  pub tool_calls: Vec<ToolCallRecord>,
   pub timestamp: DateTime<Utc>,
 }
 
@@ -410,20 +410,6 @@ pub struct RoomReport {
   pub started_at: DateTime<Utc>,
   pub completed_at: Option<DateTime<Utc>>,
   pub status: ReportStatus,
-}
-
-/// One tool invocation that happened during a debater turn. Embedded inline
-/// in [`RoomEvent::tool_calls`] so the message and its tool calls travel
-/// together. Both the input arguments and the (truncated) output are kept
-/// so the UI can render a useful debug view without re-running the tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolCallRecord {
-  pub tool: String,
-  pub args: serde_json::Value,
-  pub ok: bool,
-  pub output_preview: String,
-  pub duration_ms: u64,
 }
 
 // -- Request DTOs ----------------------------------------------------------
