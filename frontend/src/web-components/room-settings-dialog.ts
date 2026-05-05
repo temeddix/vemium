@@ -319,6 +319,28 @@ export class RoomSettingsDialog extends LitElement {
     `;
   }
 
+  #renderPasswordField(
+    key: string,
+    label: string,
+    value: string,
+    onChange: (value: string) => void,
+    tooltip?: string,
+  ) {
+    return html`
+      <label class="form-field">
+        ${this.#renderLabel(key, label, tooltip)}
+        <wa-input
+          type="password"
+          size="small"
+          password-toggle
+          .value="${value}"
+          @input="${(e: InputEvent): void =>
+            onChange(readInputValue(e.target))}"
+        ></wa-input>
+      </label>
+    `;
+  }
+
   #renderTextArea(
     key: string,
     label: string,
@@ -528,13 +550,13 @@ export class RoomSettingsDialog extends LitElement {
             (model) => onChange({ ...config, model }),
             "Exact model identifier accepted by the provider, e.g. qwen3:14b or anthropic/claude-sonnet-4-6.",
           )} ${apiType === "openRouter"
-          ? this.#renderTextField(
+          ? this.#renderPasswordField(
             `${keyPrefix}-api-key`,
             "API key",
             config.apiKey ?? "",
             (value) =>
               onChange({ ...config, apiKey: value === "" ? null : value }),
-            "Required for OpenRouter; leave blank for self-hosted endpoints (Ollama / llama.cpp / vLLM). Stored plaintext locally and redacted in API responses.",
+            "Required for OpenRouter. Leave it as-is (***) to keep the stored key, or type a new value to replace.",
           )
           : nothing}
       </fieldset>

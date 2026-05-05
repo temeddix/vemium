@@ -98,8 +98,10 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
-  /// Returns a copy with `api_key` replaced by a short masked preview, suitable
-  /// for embedding in API responses.
+  /// Returns a copy with `api_key` replaced by a fixed sentinel (`***`) when a
+  /// key is stored, suitable for embedding in API responses. The sentinel
+  /// signals "a key is set" without leaking any portion of it; if the client
+  /// echoes it back unchanged the update path treats it as "keep existing".
   pub fn redacted(&self) -> Self {
     Self {
       model: self.model.clone(),
@@ -111,14 +113,15 @@ impl ProviderConfig {
 }
 
 fn redact_secret(secret: &str) -> String {
-  let trimmed = secret.trim();
-  if trimmed.is_empty() {
+  if secret.trim().is_empty() {
     return String::new();
   }
-  let visible = trimmed.chars().rev().take(4).collect::<String>();
-  let visible = visible.chars().rev().collect::<String>();
-  format!("***{visible}")
+  REDACTED_API_KEY_SENTINEL.to_string()
 }
+
+/// Sentinel value returned in place of a stored API key. See
+/// [`ProviderConfig::redacted`].
+pub const REDACTED_API_KEY_SENTINEL: &str = "***";
 
 /// Canonical record of a debate subject.
 ///

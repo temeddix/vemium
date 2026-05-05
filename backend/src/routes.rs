@@ -26,8 +26,9 @@ use crate::config::room_defaults;
 use crate::db;
 use crate::error::ReportError;
 use crate::models::{
-  CreateMessageRequest, CreateRoomRequest, ProviderConfig, Room, RoomEvent,
-  RoomEventKind, RoomStatus, UpdateRoomRequest,
+  CreateMessageRequest, CreateRoomRequest, ProviderConfig,
+  REDACTED_API_KEY_SENTINEL, Room, RoomEvent, RoomEventKind, RoomStatus,
+  UpdateRoomRequest,
 };
 use crate::runtime;
 use crate::streaming::{RoomReceiver, WsEvent, new_turn_id};
@@ -277,10 +278,12 @@ async fn update_room(
       updated.resume_schedule_label = trimmed.to_string();
     }
   }
-  if let Some(value) = payload.low {
+  if let Some(mut value) = payload.low {
+    preserve_existing_api_key_if_redacted(&mut value, &updated.low);
     updated.low = value;
   }
-  if let Some(value) = payload.high {
+  if let Some(mut value) = payload.high {
+    preserve_existing_api_key_if_redacted(&mut value, &updated.high);
     updated.high = value;
   }
   updated.updated_at = Utc::now();
@@ -553,6 +556,19 @@ async fn send_event(socket: &mut WebSocket, event: &WsEvent) -> bool {
 }
 
 // -- Helpers ---------------------------------------------------------------
+
+/// API responses redact `api_key` to the fixed sentinel
+/// [`REDACTED_API_KEY_SENTINEL`]. If a settings update echoes that sentinel
+/// back, the user did not retype the key — preserve the stored plaintext
+/// instead of overwriting it with the sentinel.
+fn preserve_existing_api_key_if_redacted(
+  incoming: &mut ProviderConfig,
+  existing: &ProviderConfig,
+) {
+  if incoming.api_key.as_deref() == Some(REDACTED_API_KEY_SENTINEL) {
+    incoming.api_key = existing.api_key.clone();
+  }
+}
 
 fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
   if config.model.trim().is_empty() {
