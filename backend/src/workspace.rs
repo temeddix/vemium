@@ -23,8 +23,11 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
+use std::io::{BufReader, Cursor};
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
+use zip::CompressionMethod;
+use zip::write::{SimpleFileOptions, ZipWriter};
 
 /// Subject-folder timestamp prefix format: `YYYY-MM-DD_HH-MM-SS`. Filesystem
 /// safe on every supported platform (no `:` or spaces in the timestamp).
@@ -200,6 +203,50 @@ impl RoomWorkspace {
       .with_context(|| format!("failed to read {}", path.display()))?;
     let text = String::from_utf8_lossy(&raw).into_owned();
     Ok(truncate_to_chars(&text, MAX_READ_BYTES))
+  }
+
+  /// Reads a file as raw bytes, with no size cap. Used by the HTTP layer
+  /// when serving workspace artifacts to the browser; binary formats (CSV,
+  /// PNG, etc.) must round-trip without UTF-8 mangling.
+  pub async fn read_file_raw(&self, relative: &Path) -> Result<Vec<u8>> {
+    let path = self.resolve(relative)?;
+    fs::read(&path)
+      .await
+      .with_context(|| format!("failed to read {}", path.display()))
+  }
+
+  /// Builds a deflate-compressed zip archive of the entire workspace,
+  /// honouring the same dotfile skip rule as [`Self::list_files`] so the
+  /// `.venv` and any other hidden state stay out. The walk runs on a
+  /// blocking pool so the synchronous `zip` writer does not stall the
+  /// runtime.
+  pub async fn archive_to_zip(&self) -> Result<Vec<u8>> {
+    let entries = self.list_files(Path::new("")).await?;
+    let root = self.root.clone();
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+      let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+      let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated);
+      for entry in entries {
+        let absolute = root.join(&entry.relative_path);
+        writer
+          .start_file(&entry.relative_path, options)
+          .with_context(|| {
+            format!("failed to start zip entry {}", entry.relative_path)
+          })?;
+        let file = std::fs::File::open(&absolute)
+          .with_context(|| format!("failed to open {}", absolute.display()))?;
+        let mut reader = BufReader::new(file);
+        std::io::copy(&mut reader, &mut writer).with_context(|| {
+          format!("failed to copy {} into zip", absolute.display())
+        })?;
+      }
+      let cursor = writer.finish().context("failed to finalize zip")?;
+      Ok(cursor.into_inner())
+    })
+    .await
+    .context("zip writer task panicked")??;
+    Ok(bytes)
   }
 
   /// Writes (or overwrites) a UTF-8 text file, creating any missing parent

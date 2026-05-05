@@ -324,3 +324,17 @@ export interface ReportsListResponse {
 export interface SettingsEnvelope {
   settings: AppSettings;
 }
+
+/**
+ * One regular file inside a room's workspace, returned by the
+ * `/v1/rooms/:code/files` listing. Paths are forward-slash relative to the
+ * room root regardless of platform.
+ */
+export interface WorkspaceFile {
+  path: string;
+  sizeBytes: number;
+}
+
+export interface WorkspaceFilesResponse {
+  files: WorkspaceFile[];
+}

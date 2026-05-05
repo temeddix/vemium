@@ -22,6 +22,9 @@
 //! POST   /v1/rooms/:code/messages
 //! GET    /v1/rooms/:code/reports
 //! GET    /v1/rooms/:code/reports/:seq
+//! GET    /v1/rooms/:code/files
+//! GET    /v1/rooms/:code/files/raw?path=...
+//! GET    /v1/rooms/:code/files/download
 //! GET    /v1/rooms/:code/stream    (WebSocket)
 //! ```
 
@@ -36,17 +39,20 @@ use crate::models::{
 };
 use crate::runtime;
 use crate::streaming::{RoomReceiver, WsEvent, new_turn_id};
+use crate::workspace::DebateRoot;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use cron::Schedule;
 use rand::Rng;
+use serde::Deserialize;
 use serde_json::json;
+use std::path::PathBuf;
 use std::str::FromStr;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -71,6 +77,9 @@ pub fn create_router(state: AppState) -> Router {
     .route("/v1/rooms/:code/messages", post(post_user_message))
     .route("/v1/rooms/:code/reports", get(list_reports))
     .route("/v1/rooms/:code/reports/:sequence", get(get_report))
+    .route("/v1/rooms/:code/files", get(list_room_files))
+    .route("/v1/rooms/:code/files/raw", get(get_room_file))
+    .route("/v1/rooms/:code/files/download", get(download_room_files))
     .route("/v1/rooms/:code/stream", get(stream_room_events))
     .fallback_service(
       ServeDir::new("dist")
@@ -567,6 +576,149 @@ async fn get_report(
       tracing::warn!(%error, "failed to load report");
       internal("failed to load report")
     }
+  }
+}
+
+// -- Workspace files -------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct FilePathQuery {
+  path: String,
+}
+
+/// Lists every regular file under the room workspace (recursive). Hidden
+/// entries like `.venv` are filtered upstream by [`crate::workspace`].
+async fn list_room_files(
+  Path(code): Path<String>,
+  State(state): State<AppState>,
+) -> impl IntoResponse {
+  if !state.rooms.read().await.contains_key(&code) {
+    return not_found("room");
+  }
+  let workspace =
+    match DebateRoot::new(&state.data_root).workspace_for(&code).await {
+      Ok(value) => value,
+      Err(error) => {
+        tracing::warn!(%error, %code, "failed to open room workspace");
+        return internal("failed to open room workspace");
+      }
+    };
+  let entries = match workspace.list_files(std::path::Path::new("")).await {
+    Ok(value) => value,
+    Err(error) => {
+      tracing::warn!(%error, %code, "failed to list workspace files");
+      return internal("failed to list workspace files");
+    }
+  };
+  let files: Vec<_> = entries
+    .into_iter()
+    .map(|entry| {
+      json!({
+        "path": entry.relative_path,
+        "sizeBytes": entry.size_bytes,
+      })
+    })
+    .collect();
+  (StatusCode::OK, Json(json!({ "files": files }))).into_response()
+}
+
+/// Streams a single workspace file back to the browser. The path comes in as
+/// a forward-slash relative string and is fed through
+/// [`crate::workspace::RoomWorkspace::resolve`] for sandbox enforcement.
+async fn get_room_file(
+  Path(code): Path<String>,
+  Query(params): Query<FilePathQuery>,
+  State(state): State<AppState>,
+) -> impl IntoResponse {
+  if !state.rooms.read().await.contains_key(&code) {
+    return not_found("room");
+  }
+  let workspace =
+    match DebateRoot::new(&state.data_root).workspace_for(&code).await {
+      Ok(value) => value,
+      Err(error) => {
+        tracing::warn!(%error, %code, "failed to open room workspace");
+        return internal("failed to open room workspace");
+      }
+    };
+  let relative = PathBuf::from(&params.path);
+  let bytes = match workspace.read_file_raw(&relative).await {
+    Ok(value) => value,
+    Err(error) => {
+      tracing::warn!(%error, %code, path = %params.path, "failed to read file");
+      return not_found("file");
+    }
+  };
+  let mime = guess_mime(&relative);
+  (
+    StatusCode::OK,
+    [
+      (header::CONTENT_TYPE, mime.to_string()),
+      (header::CONTENT_DISPOSITION, "inline".to_string()),
+    ],
+    bytes,
+  )
+    .into_response()
+}
+
+/// Builds a zip archive of the entire workspace and streams it as a file
+/// download named `<room-code>.zip`.
+async fn download_room_files(
+  Path(code): Path<String>,
+  State(state): State<AppState>,
+) -> impl IntoResponse {
+  if !state.rooms.read().await.contains_key(&code) {
+    return not_found("room");
+  }
+  let workspace =
+    match DebateRoot::new(&state.data_root).workspace_for(&code).await {
+      Ok(value) => value,
+      Err(error) => {
+        tracing::warn!(%error, %code, "failed to open room workspace");
+        return internal("failed to open room workspace");
+      }
+    };
+  let bytes = match workspace.archive_to_zip().await {
+    Ok(value) => value,
+    Err(error) => {
+      tracing::warn!(%error, %code, "failed to archive workspace");
+      return internal("failed to archive workspace");
+    }
+  };
+  let disposition = format!("attachment; filename=\"{code}.zip\"");
+  (
+    StatusCode::OK,
+    [
+      (header::CONTENT_TYPE, "application/zip".to_string()),
+      (header::CONTENT_DISPOSITION, disposition),
+    ],
+    bytes,
+  )
+    .into_response()
+}
+
+/// Best-effort content type for a workspace file. Covers the formats the
+/// agents actually emit (Python source, CSV/JSON data, common images);
+/// everything else falls back to `application/octet-stream` so the browser
+/// triggers a download instead of trying to render bytes inline.
+fn guess_mime(path: &std::path::Path) -> &'static str {
+  let extension = path
+    .extension()
+    .and_then(|e| e.to_str())
+    .map(str::to_ascii_lowercase);
+  match extension.as_deref() {
+    Some("html" | "htm") => "text/html; charset=utf-8",
+    Some(
+      "txt" | "md" | "py" | "ts" | "tsx" | "js" | "jsx" | "rs" | "toml"
+      | "json" | "yaml" | "yml" | "csv" | "tsv" | "log" | "ini" | "xml" | "sh",
+    ) => "text/plain; charset=utf-8",
+    Some("png") => "image/png",
+    Some("jpg" | "jpeg") => "image/jpeg",
+    Some("gif") => "image/gif",
+    Some("svg") => "image/svg+xml",
+    Some("webp") => "image/webp",
+    Some("pdf") => "application/pdf",
+    _ => "application/octet-stream",
   }
 }
 

@@ -17,6 +17,8 @@ import type {
   TurnKind,
   UpdateAppSettingsRequest,
   UpdateRoomRequest,
+  WorkspaceFile,
+  WorkspaceFilesResponse,
   WsEvent,
 } from "@/app/types";
 import { RoomClient } from "./room-client.ts";
@@ -322,6 +324,42 @@ export class DashboardStore {
     } catch {
       this.#patch({ errorMessage: "Network error while sending message." });
     }
+  }
+
+  /**
+   * Fetches the flat list of files inside the given room's workspace. The
+   * dialog turns this into a tree client-side. Hidden directories like
+   * `.venv` are filtered server-side, so the response is safe to render
+   * verbatim.
+   */
+  async loadWorkspaceFiles(roomCode: string): Promise<WorkspaceFile[] | null> {
+    try {
+      const response = await fetch(
+        `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files`,
+      );
+      if (!response.ok) {
+        this.#patch({ errorMessage: "Failed to load workspace files." });
+        return null;
+      }
+      const payload = (await response.json()) as WorkspaceFilesResponse;
+      return payload.files;
+    } catch {
+      this.#patch({
+        errorMessage: "Network error while loading workspace files.",
+      });
+      return null;
+    }
+  }
+
+  /** URL the browser should `window.open` to view a single workspace file. */
+  workspaceFileUrl(roomCode: string, path: string): string {
+    const params = new URLSearchParams({ path });
+    return `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files/raw?${params.toString()}`;
+  }
+
+  /** URL of the workspace zip download for the given room. */
+  workspaceDownloadUrl(roomCode: string): string {
+    return `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files/download`;
   }
 
   async pauseRoom(roomCode: string): Promise<void> {
