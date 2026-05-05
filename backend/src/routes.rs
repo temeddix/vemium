@@ -249,7 +249,7 @@ async fn create_room(
       .instruction
       .map(|s| s.trim().to_string())
       .filter(|s| !s.is_empty()),
-    room_state: RoomState::Active,
+    room_state: RoomState::Deactivated,
     debate_state: DebateState::Running,
     chat_interval_seconds: payload
       .chat_interval_seconds
@@ -443,7 +443,7 @@ async fn clone_room(
     topic: source.topic.clone(),
     goal: source.goal.clone(),
     instruction: source.instruction.clone(),
-    room_state: RoomState::Active,
+    room_state: RoomState::Deactivated,
     debate_state: DebateState::Running,
     chat_interval_seconds: source.chat_interval_seconds,
     steering_interval_seconds: source.steering_interval_seconds,

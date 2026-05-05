@@ -442,7 +442,8 @@ pub struct CreateMessageRequest {
 }
 
 /// Input for `POST /v1/rooms/:code/clone`. The new room copies every
-/// per-room setting (topic, goal, schedules, etc.) but always starts active
+/// per-room setting (topic, goal, schedules, etc.) but always starts
+/// deactivated
 /// with fresh timestamps. When `include_history` is true the source room's
 /// chat events are duplicated into the clone; reports and workspace
 /// artifacts are never carried over.

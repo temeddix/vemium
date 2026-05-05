@@ -100,6 +100,8 @@ const INLINE_NOTE_TOOL_HINT: &str = "Inline-note breadcrumbs in the \
 /// particular bubble is the periodic nudge rather than a debater request
 /// or a gate decision.
 const STEERING_INLINE_NOTE: &str = "Appeared for steering";
+const KICKOFF_INLINE_NOTE: &str = "Opened with plan";
+const LEADER_KICKOFF_PROMPT: &str = include_str!("prompts/leader_kickoff.md");
 const LEADER_STEERING_PROMPT: &str = include_str!("prompts/leader_steering.md");
 const LEADER_REPORT_PROMPT: &str = include_str!("prompts/leader_report.md");
 const LEADER_PAUSE_GATE_PROMPT: &str =
@@ -205,6 +207,35 @@ async fn run_debate_loop(
       return;
     };
 
+    let history = match db::load_room_events(&state.db, &room_code).await {
+      Ok(value) => value,
+      Err(error) => {
+        tracing::warn!(%room_code, %error, "failed to load room history");
+        tokio::select! {
+          _ = sleep(Duration::from_secs(1)) => {}
+          _ = handle.stop_notify.notified() => return,
+          _ = handle.config_notify.notified() => continue,
+        }
+        continue;
+      }
+    };
+
+    if needs_leader_kickoff(&history) {
+      if let Err(error) =
+        run_leader_kickoff(&state, &handle, &snapshot, &history).await
+      {
+        tracing::warn!(%room_code, %error, "leader kickoff failed");
+      }
+
+      let interval = snapshot.chat_interval_seconds.max(1);
+      tokio::select! {
+        _ = sleep(Duration::from_secs(interval)) => {}
+        _ = handle.stop_notify.notified() => return,
+        _ = handle.config_notify.notified() => continue,
+      }
+      continue;
+    }
+
     let persona = DEBATE_PERSONAS[persona_index % DEBATE_PERSONAS.len()];
     persona_index = persona_index.wrapping_add(1);
 
@@ -244,6 +275,15 @@ async fn run_debate_loop(
       _ = handle.config_notify.notified() => continue,
     }
   }
+}
+
+fn needs_leader_kickoff(history: &[RoomEvent]) -> bool {
+  !history.iter().any(|event| {
+    matches!(
+      event.kind,
+      RoomEventKind::AgentChat | RoomEventKind::LeaderNote
+    )
+  })
 }
 
 struct ChatTurnOutcome {
@@ -947,6 +987,117 @@ async fn run_leader_steering(
   Ok(())
 }
 
+async fn run_leader_kickoff(
+  state: &AppState,
+  handle: &RoomHandle,
+  room: &Room,
+  history: &[RoomEvent],
+) -> Result<()> {
+  let preamble = build_room_preamble(room);
+  let system =
+    format!("{LEADER_KICKOFF_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}");
+  let transcript = render_transcript_text(history);
+  let user = if transcript.trim().is_empty() {
+    "Start the room with an opening traffic-control note and a concrete plan for the next debate turns."
+      .to_string()
+  } else {
+    format!(
+      "The room already has user input before kickoff:\n\n{transcript}\n\nStart with an opening traffic-control note and concrete plan aligned to that input."
+    )
+  };
+
+  let stream = state.ensure_room_stream(&room.code).await;
+  let turn_id = new_turn_id();
+
+  stream.send(WsEvent::DraftStarted {
+    turn_id: turn_id.clone(),
+    agent: LEADER_AGENT.to_string(),
+    kind: TurnKind::LeaderNote,
+  });
+
+  let hook = DebateHook::for_draft(
+    turn_id.clone(),
+    stream.clone(),
+    state.clone(),
+    room.code.clone(),
+    LEADER_AGENT.to_string(),
+  );
+  let recorder = hook.recorder();
+  let inline_note_tool =
+    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
+
+  let (_low, high) = current_provider_configs(state).await;
+  let client =
+    build_chat_client(&high).context("failed to construct high-tier client")?;
+  let final_text = client
+    .run_steering_turn(SteeringTurnInputs {
+      system_prompt: system,
+      user_prompt: user,
+      hook,
+      inline_note_tool,
+    })
+    .await
+    .inspect_err(|error| {
+      stream.send(WsEvent::DraftFailed {
+        turn_id: turn_id.clone(),
+        error: error.to_string(),
+      });
+    })?;
+
+  let trimmed = final_text.trim().to_string();
+  if trimmed.is_empty() {
+    stream.send(WsEvent::DraftFailed {
+      turn_id,
+      error: "leader produced no kickoff text".to_string(),
+    });
+    return Ok(());
+  }
+
+  let timestamp = Utc::now();
+  let inline_draft = RoomEvent {
+    id: None,
+    room_code: room.code.clone(),
+    sequence: handle.allocate_event_sequence(),
+    kind: RoomEventKind::InlineNote,
+    agent: Some(LEADER_AGENT.to_string()),
+    content: KICKOFF_INLINE_NOTE.to_string(),
+    reasoning: String::new(),
+    detail: String::new(),
+    timestamp,
+  };
+  let inline_event = db::insert_event(&state.db, &inline_draft)
+    .await
+    .report()
+    .unwrap_or_else(|| inline_draft.clone());
+  stream.send(WsEvent::MessageAdded {
+    turn_id: new_turn_id(),
+    message: inline_event,
+  });
+
+  let (reasoning, _do_nothing_called) = recorder.snapshot().await;
+  let bubble_draft = RoomEvent {
+    id: None,
+    room_code: room.code.clone(),
+    sequence: handle.allocate_event_sequence(),
+    kind: RoomEventKind::LeaderNote,
+    agent: Some(LEADER_AGENT.to_string()),
+    content: trimmed,
+    reasoning,
+    detail: String::new(),
+    timestamp,
+  };
+  let bubble_event = db::insert_event(&state.db, &bubble_draft)
+    .await
+    .report()
+    .unwrap_or_else(|| bubble_draft.clone());
+
+  stream.send(WsEvent::MessageAdded {
+    turn_id,
+    message: bubble_event,
+  });
+  Ok(())
+}
+
 // -- Leader report ---------------------------------------------------------
 
 /// The report loop fires on every cron tick of `report_schedule_cron`. We
@@ -1218,6 +1369,9 @@ pub(crate) fn build_room_preamble(room: &Room) -> String {
   {
     out.push_str("\nInstruction: ");
     out.push_str(instruction);
+    out.push_str(
+      "\nLanguage policy: The Instruction field is authoritative. If it specifies a response language, always use that language in every user-facing message.",
+    );
   }
   out.push_str("\nCurrent time: ");
   out.push_str(&format_transcript_timestamp(Utc::now()));
