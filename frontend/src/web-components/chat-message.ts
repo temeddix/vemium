@@ -1,6 +1,6 @@
 import { type PersonaColor, resolveAvatarColor } from "@/app/chat";
 import type { Draft, Message, TurnKind } from "@/app/types";
-import { css, html, LitElement, nothing } from "lit";
+import { css, html, LitElement, nothing, type PropertyValues } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { ref } from "lit/directives/ref.js";
 
@@ -26,6 +26,8 @@ declare global {
  */
 @customElement("te-chat-message")
 export class ChatMessage extends LitElement {
+  #shouldStickReasoningToBottom = false;
+
   @property({ attribute: false })
   accessor message: Message | null = null;
 
@@ -218,6 +220,23 @@ export class ChatMessage extends LitElement {
     }
   `;
 
+  override willUpdate(_changedProperties: PropertyValues<this>) {
+    const reasoningEl = this.#reasoningElement();
+    this.#shouldStickReasoningToBottom = reasoningEl !== null &&
+      this.#isScrolledToBottom(reasoningEl);
+  }
+
+  override updated(_changedProperties: PropertyValues<this>) {
+    if (!this.#shouldStickReasoningToBottom) {
+      return;
+    }
+    const reasoningEl = this.#reasoningElement();
+    if (reasoningEl === null) {
+      return;
+    }
+    reasoningEl.scrollTop = reasoningEl.scrollHeight;
+  }
+
   override render() {
     const view = this.#view();
     if (view === null) {
@@ -334,6 +353,16 @@ export class ChatMessage extends LitElement {
       return draftView(this.draft);
     }
     return null;
+  }
+
+  #reasoningElement(): HTMLPreElement | null {
+    return this.renderRoot.querySelector<HTMLPreElement>(".reasoning-text");
+  }
+
+  #isScrolledToBottom(element: HTMLElement): boolean {
+    const remaining = element.scrollHeight - element.scrollTop -
+      element.clientHeight;
+    return remaining <= 2;
   }
 }
 
