@@ -20,9 +20,27 @@ interface CreateRoomForm {
   goal: string;
   instruction: string;
   background: string;
+  autoPauseWhenConverged: boolean;
+  resumeScheduleCron: string;
+  resumeScheduleLabel: string;
   low: ProviderConfig;
   high: ProviderConfig;
 }
+
+interface ResumeScheduleOption {
+  label: string;
+  cron: string;
+}
+
+const RESUME_SCHEDULE_OPTIONS: ResumeScheduleOption[] = [
+  { label: "Every 15 minutes", cron: "*/15 * * * *" },
+  { label: "Every 30 minutes", cron: "*/30 * * * *" },
+  { label: "Every hour", cron: "0 * * * *" },
+  { label: "Every 3 hours", cron: "0 */3 * * *" },
+  { label: "Every 6 hours", cron: "0 */6 * * *" },
+  { label: "Daily at 09:00 UTC", cron: "0 9 * * *" },
+  { label: "Daily at 18:00 UTC", cron: "0 18 * * *" },
+];
 
 const EMPTY_PROVIDER: ProviderConfig = {
   model: "",
@@ -37,6 +55,9 @@ const EMPTY_FORM: CreateRoomForm = {
   goal: "",
   instruction: "",
   background: "",
+  autoPauseWhenConverged: false,
+  resumeScheduleCron: "0 * * * *",
+  resumeScheduleLabel: "Every hour",
   low: { ...EMPTY_PROVIDER },
   high: { ...EMPTY_PROVIDER },
 };
@@ -88,6 +109,9 @@ export class CreateRoomDialog extends LitElement {
     }
 
     .form-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
       font-size: 0.72rem;
       font-weight: 600;
       letter-spacing: 0.05em;
@@ -95,11 +119,25 @@ export class CreateRoomDialog extends LitElement {
       color: var(--wa-color-text-quiet);
     }
 
-    .form-hint {
-      font-size: 0.72rem;
+    .help-icon {
       color: var(--wa-color-text-quiet);
-      margin: 0 0 0.2rem;
-      line-height: 1.3;
+      cursor: help;
+      font-size: 0.85rem;
+    }
+
+    .input-affix {
+      color: var(--wa-color-text-quiet);
+      font-size: 0.78rem;
+      padding: 0 0.3rem;
+    }
+
+    wa-input,
+    wa-textarea,
+    wa-select {
+      display: block;
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
     }
 
     .provider-grid {
@@ -108,18 +146,27 @@ export class CreateRoomDialog extends LitElement {
       gap: 0.6rem;
     }
 
+    .schedule-grid {
+      display: grid;
+      gap: 0.6rem;
+    }
+
     fieldset.tier {
-      border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
-      border-radius: 0.5rem;
-      padding: 0.6rem;
+      border: 0;
+      padding: 0;
+      margin: 0;
       display: grid;
       gap: 0.4rem;
     }
 
     fieldset.tier legend {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
       font-size: 0.78rem;
       font-weight: 600;
-      padding: 0 0.3rem;
+      padding: 0;
+      margin-bottom: 0.2rem;
     }
 
     .footer-row {
@@ -177,32 +224,53 @@ export class CreateRoomDialog extends LitElement {
           : nothing}
         <div class="form-grid">
           ${this.#renderTextField(
+            "name",
             "Name",
             form.name,
             (v) => this.#patchForm({ name: v }),
+            "Display name shown in the rooms list. Also seeds the URL slug.",
           )} ${this.#renderTextField(
+            "topic",
             "Topic",
             form.topic,
             (v) => this.#patchForm({ topic: v }),
+            "Short subject the debaters argue about. Shown to every persona at the top of every turn.",
           )} ${this.#renderTextField(
+            "goal",
             "Goal",
             form.goal,
             (v) => this.#patchForm({ goal: v }),
+            "What you want the room to produce. Used by the leader to judge whether the discussion is on track.",
           )} ${this.#renderTextArea(
-            "Instruction (optional)",
+            "instruction",
+            "Instruction",
             form.instruction,
             (v) => this.#patchForm({ instruction: v }),
+            "Optional. Rules personas must follow (e.g. tone, scope). Appended to every persona prompt.",
           )} ${this.#renderTextArea(
-            "Background (optional)",
+            "background",
+            "Background",
             form.background,
             (v) => this.#patchForm({ background: v }),
+            "Optional. Context personas should treat as already-known facts. Useful for proprietary data the model cannot search.",
           )}
+          <div class="schedule-grid">
+            ${this.#renderBooleanSelect(
+              "auto-pause",
+              "Auto-pause after convergence",
+              form.autoPauseWhenConverged,
+              (value) => this.#patchForm({ autoPauseWhenConverged: value }),
+              "When every persona signals they have nothing to add, ask the leader whether to pause until the next wake check.",
+            )} ${this.#renderScheduleSelect(form)}
+          </div>
           <div class="provider-grid">
             ${this.#renderProvider(
+              "low",
               "Low tier",
               form.low,
               (next) => this.#patchForm({ low: next }),
             )} ${this.#renderProvider(
+              "high",
               "High tier",
               form.high,
               (next) => this.#patchForm({ high: next }),
@@ -230,28 +298,57 @@ export class CreateRoomDialog extends LitElement {
   }
 
   #renderTextField(
+    key: string,
     label: string,
     value: string,
     onChange: (value: string) => void,
+    tooltip?: string,
   ) {
     return html`
       <label class="form-field">
-        <span class="form-label">${label}</span>
-        <wa-input size="small" .value="${value}" @input="${(
-          e: InputEvent,
-        ): void => onChange(readInputValue(e.target))}"></wa-input>
+        ${this.#renderLabel(key, label, tooltip)}
+        <wa-input
+          size="small"
+          .value="${value}"
+          @input="${(e: InputEvent): void =>
+            onChange(readInputValue(e.target))}"
+        ></wa-input>
+      </label>
+    `;
+  }
+
+  #renderPasswordField(
+    key: string,
+    label: string,
+    value: string,
+    onChange: (value: string) => void,
+    tooltip?: string,
+  ) {
+    return html`
+      <label class="form-field">
+        ${this.#renderLabel(key, label, tooltip)}
+        <wa-input
+          type="password"
+          size="small"
+          password-toggle
+          .value="${value}"
+          @input="${(e: InputEvent): void =>
+            onChange(readInputValue(e.target))}"
+        ></wa-input>
       </label>
     `;
   }
 
   #renderTextArea(
+    key: string,
     label: string,
     value: string,
     onChange: (value: string) => void,
+    tooltip?: string,
   ) {
     return html`
       <label class="form-field">
-        <span class="form-label">${label}</span>
+        ${this.#renderLabel(key, label, tooltip)}
         <wa-textarea
           size="small"
           rows="3"
@@ -263,56 +360,161 @@ export class CreateRoomDialog extends LitElement {
     `;
   }
 
+  #renderLabel(key: string, label: string, tooltip?: string) {
+    if (tooltip === undefined || tooltip === "") {
+      return html`
+        <span class="form-label">${label}</span>
+      `;
+    }
+    const anchorId = `tip-${key}`;
+    return html`
+      <span class="form-label">
+        <span>${label}</span>
+        <wa-icon
+          id="${anchorId}"
+          class="help-icon"
+          name="circle-question"
+          tabindex="0"
+        ></wa-icon>
+      </span>
+      <wa-tooltip for="${anchorId}" placement="top">${tooltip}</wa-tooltip>
+    `;
+  }
+
   #renderProvider(
+    keyPrefix: string,
     label: string,
     config: ProviderConfig,
     onChange: (config: ProviderConfig) => void,
   ) {
     const apiType: ApiType = config.apiType ?? "ollama";
+    const tierTooltip = label === "Low tier"
+      ? "Cheaper / faster model used for every debater turn."
+      : "Higher-quality model used for steering nudges, halt/proceed gates, and reports.";
+    const legendAnchor = `tip-${keyPrefix}-tier`;
     return html`
       <fieldset class="tier">
-        <legend>${label}</legend>
-        <p class="form-hint">
-          Only OpenRouter requires an API key; Ollama / llama.cpp / vLLM and other
-          self-hosted endpoints leave it blank.
-        </p>
+        <legend>
+          <span>${label}</span>
+          <wa-icon
+            id="${legendAnchor}"
+            class="help-icon"
+            name="circle-question"
+            tabindex="0"
+          ></wa-icon>
+        </legend>
+        <wa-tooltip for="${legendAnchor}" placement="top">
+          ${tierTooltip}
+        </wa-tooltip>
         <label class="form-field">
-          <span class="form-label">API type</span>
-          <wa-select size="small" .value="${apiType}" @change="${(
-            e: Event,
-          ): void => {
-            const value = readInputValue(e.target);
-            if (value === "ollama" || value === "openRouter") {
-              const patch: Partial<ProviderConfig> = { apiType: value };
-              if (value === "openRouter") {
-                patch.baseUrl = "https://openrouter.ai/api/v1";
+          ${this.#renderLabel(
+            `${keyPrefix}-api-type`,
+            "API type",
+            "Pick OpenRouter for any OpenAI-compatible endpoint (cloud or proxied) or Ollama for the native /api/chat protocol.",
+          )}
+          <wa-select
+            size="small"
+            .value="${apiType}"
+            @change="${(e: Event): void => {
+              const value = readInputValue(e.target);
+              if (value === "ollama" || value === "openRouter") {
+                const patch: Partial<ProviderConfig> = { apiType: value };
+                if (value === "openRouter") {
+                  patch.baseUrl = "https://openrouter.ai/api/v1";
+                }
+                onChange({ ...config, ...patch });
               }
-              onChange({ ...config, ...patch });
-            }
-          }}">
+            }}"
+          >
             <wa-option value="ollama">Ollama</wa-option>
             <wa-option value="openRouter">OpenRouter</wa-option>
           </wa-select>
         </label>
         ${apiType === "ollama"
           ? this.#renderTextField(
-            "Base URL (e.g. http://localhost:11434)",
+            `${keyPrefix}-base-url`,
+            "Base URL",
             config.baseUrl,
             (value) => onChange({ ...config, baseUrl: value }),
+            "Server root, e.g. http://localhost:11434. Do not include /v1.",
           )
           : nothing} ${this.#renderTextField(
+            `${keyPrefix}-model`,
             "Model",
             config.model,
             (model) => onChange({ ...config, model }),
+            "Exact model identifier accepted by the provider, e.g. qwen3:14b or anthropic/claude-sonnet-4-6.",
           )} ${apiType === "openRouter"
-          ? this.#renderTextField(
-            "API key (required for OpenRouter)",
+          ? this.#renderPasswordField(
+            `${keyPrefix}-api-key`,
+            "API key",
             config.apiKey ?? "",
             (value) =>
               onChange({ ...config, apiKey: value === "" ? null : value }),
+            "Required for OpenRouter; leave blank for self-hosted endpoints (Ollama / llama.cpp / vLLM). Stored plaintext locally and redacted in API responses.",
           )
           : nothing}
       </fieldset>
+    `;
+  }
+
+  #renderBooleanSelect(
+    key: string,
+    label: string,
+    value: boolean,
+    onChange: (value: boolean) => void,
+    tooltip?: string,
+  ) {
+    return html`
+      <label class="form-field">
+        ${this.#renderLabel(key, label, tooltip)}
+        <wa-select
+          size="small"
+          .value="${value ? "enabled" : "disabled"}"
+          @change="${(e: Event): void => {
+            const selected = readInputValue(e.target);
+            onChange(selected === "enabled");
+          }}"
+        >
+          <wa-option value="enabled">Enabled</wa-option>
+          <wa-option value="disabled">Disabled</wa-option>
+        </wa-select>
+      </label>
+    `;
+  }
+
+  #renderScheduleSelect(form: CreateRoomForm) {
+    return html`
+      <label class="form-field">
+        ${this.#renderLabel(
+          "wake-check",
+          "Wake-check schedule",
+          "Times are interpreted in UTC. When auto-paused, the leader checks at this cadence whether to resume the debate.",
+        )}
+        <wa-select
+          size="small"
+          .value="${form.resumeScheduleCron}"
+          @change="${(e: Event): void => {
+            const selected = readInputValue(e.target);
+            const option = RESUME_SCHEDULE_OPTIONS.find((item) =>
+              item.cron === selected
+            );
+            if (option === undefined) {
+              return;
+            }
+            this.#patchForm({
+              resumeScheduleCron: option.cron,
+              resumeScheduleLabel: option.label,
+            });
+          }}"
+        >
+          ${RESUME_SCHEDULE_OPTIONS.map((option) =>
+            html`
+              <wa-option value="${option.cron}">${option.label}</wa-option>
+            `
+          )}
+        </wa-select>
+      </label>
     `;
   }
 
@@ -331,6 +533,9 @@ export class CreateRoomDialog extends LitElement {
       background: this.formState.background === ""
         ? null
         : this.formState.background,
+      autoPauseWhenConverged: this.formState.autoPauseWhenConverged,
+      resumeScheduleCron: this.formState.resumeScheduleCron,
+      resumeScheduleLabel: this.formState.resumeScheduleLabel,
       low: this.formState.low,
       high: this.formState.high,
     };

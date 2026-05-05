@@ -15,8 +15,15 @@
 //!   sandboxed under the room's directory.
 //! - [`leader`]: agents call this to request a high-model decision when an
 //!   important judgment is needed.
+//! - [`do_nothing`]: a shared opt-out tool used by personas and the leader
+//!   gates to record an inline note instead of producing a chat bubble.
+//! - [`halt_room`] / [`proceed_room`]: leader gate tools that pause or
+//!   resume the room and persist a `leader_note` bubble explaining why.
 
+pub mod do_nothing;
+pub mod halt_room;
 pub mod leader;
+pub mod proceed_room;
 pub mod python;
 pub mod web_fetch;
 pub mod workspace;

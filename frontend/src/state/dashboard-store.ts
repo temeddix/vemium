@@ -181,7 +181,7 @@ export class DashboardStore {
   async updateRoom(
     roomId: string,
     request: UpdateRoomRequest,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomId}`, {
         method: "PATCH",
@@ -191,12 +191,14 @@ export class DashboardStore {
       if (!response.ok) {
         const text = await response.text();
         this.#patch({ errorMessage: `Update failed: ${text}` });
-        return;
+        return false;
       }
       const payload = (await response.json()) as { room: Room };
       this.#mergeRoom(payload.room);
+      return true;
     } catch {
       this.#patch({ errorMessage: "Network error while updating room." });
+      return false;
     }
   }
 
@@ -286,6 +288,17 @@ export class DashboardStore {
         break;
       case "roomStatus":
         this.#patchCurrentRoom((room) => ({ ...room, status: event.status }));
+        break;
+      case "inlineNote":
+        this.#mutateView((view) => ({
+          ...view,
+          inlineNotes: [...view.inlineNotes, {
+            author: event.author,
+            text: event.text,
+            reason: event.reason,
+            timestamp: event.timestamp,
+          }],
+        }));
         break;
       case "draftStarted":
         this.#mutateView((view) =>
@@ -402,6 +415,7 @@ export class DashboardStore {
       messages,
       drafts: [],
       reports: reports.map(toReportBuffer),
+      inlineNotes: [],
     };
     this.#patch({
       views: { ...this.#state.views, [room.id]: view },

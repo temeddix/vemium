@@ -34,7 +34,10 @@ use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
 use crate::runtime::{DebateHook, ReportHook, TurnRecorder};
 use crate::streaming::{RoomStream, TurnId, WsEvent};
+use crate::tools::do_nothing::DoNothingTool;
+use crate::tools::halt_room::HaltRoomTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
+use crate::tools::proceed_room::ProceedRoomTool;
 use crate::tools::python::RunPythonTool;
 use crate::tools::web_fetch::WebFetchTool;
 use crate::tools::workspace::{
@@ -74,7 +77,28 @@ pub struct DebateTurnInputs {
   pub workspace: RoomWorkspace,
   pub runner: PythonRunner,
   pub leader_tool: RequestLeaderDecisionTool,
+  pub do_nothing_tool: DoNothingTool,
   pub hook: DebateHook,
+}
+
+/// Inputs for the halt-gate tool loop. The model must call exactly one of
+/// the two tools — either `halt_room` (pause + leader bubble) or
+/// `do_nothing` (no-op + inline note). The gate never streams tokens to
+/// the UI; tool calls carry the entire decision.
+pub struct HaltGateInputs {
+  pub system_prompt: String,
+  pub user_prompt: String,
+  pub halt_tool: HaltRoomTool,
+  pub do_nothing_tool: DoNothingTool,
+}
+
+/// Inputs for the proceed-gate tool loop. Mirror of [`HaltGateInputs`] for
+/// the wake-on-cron decision; choices are `proceed_room` or `do_nothing`.
+pub struct ProceedGateInputs {
+  pub system_prompt: String,
+  pub user_prompt: String,
+  pub proceed_tool: ProceedRoomTool,
+  pub do_nothing_tool: DoNothingTool,
 }
 
 /// Inputs for a no-tool streaming turn (leader evaluation / report). The
@@ -96,12 +120,27 @@ pub trait ChatClient: Send + Sync {
   /// streams; the returned String is the final assistant message.
   async fn run_debate_turn(&self, inputs: DebateTurnInputs) -> Result<String>;
 
-  /// Streaming no-tool turn used for the periodic leader evaluation. The
-  /// hook receives token / reasoning deltas; the result is the final text.
-  async fn run_evaluation_turn(
+  /// Streaming no-tool turn used for the periodic leader steering nudge.
+  /// The hook receives token / reasoning deltas; the result is the final
+  /// text.
+  async fn run_steering_turn(
     &self,
     inputs: NoToolTurnInputs<DebateHook>,
   ) -> Result<String>;
+
+  /// Non-streaming gate turn for the convergence halt decision. The model
+  /// is expected to call exactly one of `halt_room` / `do_nothing`; both
+  /// tools own their side effects, so the assistant's text reply is
+  /// discarded.
+  async fn run_halt_gate_turn(&self, inputs: HaltGateInputs) -> Result<()>;
+
+  /// Non-streaming gate turn for the scheduled wake decision. Mirrors
+  /// [`Self::run_halt_gate_turn`] but with `proceed_room` instead of
+  /// `halt_room`.
+  async fn run_proceed_gate_turn(
+    &self,
+    inputs: ProceedGateInputs,
+  ) -> Result<()>;
 
   /// Streaming no-tool turn used for the periodic leader report. Like
   /// [`Self::run_evaluation_turn`], but the hook is a [`ReportHook`] that
@@ -183,7 +222,7 @@ impl ChatClient for OllamaChatClient {
     run_chat_turn_with_builder(builder, inputs).await
   }
 
-  async fn run_evaluation_turn(
+  async fn run_steering_turn(
     &self,
     inputs: NoToolTurnInputs<DebateHook>,
   ) -> Result<String> {
@@ -192,6 +231,25 @@ impl ChatClient for OllamaChatClient {
       .agent(&self.model)
       .additional_params(ollama_extra_params());
     run_no_tool_stream(builder, inputs).await
+  }
+
+  async fn run_halt_gate_turn(&self, inputs: HaltGateInputs) -> Result<()> {
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(ollama_extra_params());
+    run_halt_gate_with_builder(builder, inputs).await
+  }
+
+  async fn run_proceed_gate_turn(
+    &self,
+    inputs: ProceedGateInputs,
+  ) -> Result<()> {
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(ollama_extra_params());
+    run_proceed_gate_with_builder(builder, inputs).await
   }
 
   async fn run_report_turn(
@@ -266,7 +324,7 @@ impl ChatClient for OpenRouterChatClient {
     run_chat_turn_with_builder(builder, inputs).await
   }
 
-  async fn run_evaluation_turn(
+  async fn run_steering_turn(
     &self,
     inputs: NoToolTurnInputs<DebateHook>,
   ) -> Result<String> {
@@ -275,6 +333,25 @@ impl ChatClient for OpenRouterChatClient {
       .agent(&self.model)
       .additional_params(openrouter_extra_params());
     run_no_tool_stream(builder, inputs).await
+  }
+
+  async fn run_halt_gate_turn(&self, inputs: HaltGateInputs) -> Result<()> {
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(openrouter_extra_params());
+    run_halt_gate_with_builder(builder, inputs).await
+  }
+
+  async fn run_proceed_gate_turn(
+    &self,
+    inputs: ProceedGateInputs,
+  ) -> Result<()> {
+    let builder = self
+      .client
+      .agent(&self.model)
+      .additional_params(openrouter_extra_params());
+    run_proceed_gate_with_builder(builder, inputs).await
   }
 
   async fn run_report_turn(
@@ -326,6 +403,7 @@ where
     .tool(ReadFileTool::new(inputs.workspace.clone()))
     .tool(WriteFileTool::new(inputs.workspace))
     .tool(inputs.leader_tool)
+    .tool(inputs.do_nothing_tool)
     .build();
 
   let reasoning_stream = inputs.hook.stream().clone();
@@ -399,6 +477,51 @@ where
     }
   }
   Ok(final_text)
+}
+
+/// Runs the halt-gate tool loop: build the agent with `halt_room` +
+/// `do_nothing` and let the model pick exactly one. The tools own their
+/// side effects (bubble + status flip for halt; inline note for nothing),
+/// so we discard the assistant's text reply.
+async fn run_halt_gate_with_builder<M>(
+  builder: AgentBuilder<M>,
+  inputs: HaltGateInputs,
+) -> Result<()>
+where
+  M: CompletionModel + 'static,
+{
+  let agent = builder
+    .preamble(&inputs.system_prompt)
+    .tool(inputs.halt_tool)
+    .tool(inputs.do_nothing_tool)
+    .build();
+  agent
+    .prompt(inputs.user_prompt)
+    .max_turns(MAX_TOOL_ROUNDS_PER_TURN)
+    .await
+    .map_err(|e| anyhow!(e.to_string()))?;
+  Ok(())
+}
+
+/// Mirror of [`run_halt_gate_with_builder`] for the wake-on-cron decision.
+async fn run_proceed_gate_with_builder<M>(
+  builder: AgentBuilder<M>,
+  inputs: ProceedGateInputs,
+) -> Result<()>
+where
+  M: CompletionModel + 'static,
+{
+  let agent = builder
+    .preamble(&inputs.system_prompt)
+    .tool(inputs.proceed_tool)
+    .tool(inputs.do_nothing_tool)
+    .build();
+  agent
+    .prompt(inputs.user_prompt)
+    .max_turns(MAX_TOOL_ROUNDS_PER_TURN)
+    .await
+    .map_err(|e| anyhow!(e.to_string()))?;
+  Ok(())
 }
 
 /// Streaming no-tool turn used by leader reports. The hook is a

@@ -28,6 +28,10 @@ export class RoomReportsDialog extends LitElement {
   #dialogRef: Ref<DialogElement> = createRef();
 
   static override styles = css`
+    wa-dialog {
+      --width: 60rem;
+    }
+
     .report-list {
       display: grid;
       gap: 0.6rem;

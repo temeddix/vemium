@@ -17,14 +17,20 @@ const DEFAULT_DATA_ROOT: &str = "/data";
 pub mod room_defaults {
   /// One debater turn every 5 seconds.
   pub const CHAT_INTERVAL_SECONDS: u64 = 5;
-  /// Leader emits a `leader_note` once an hour.
-  pub const EVALUATION_INTERVAL_SECONDS: u64 = 3_600;
+  /// Leader emits a steering `leader_note` once an hour.
+  pub const STEERING_INTERVAL_SECONDS: u64 = 3_600;
   /// Leader writes a long-form report once a day.
   pub const REPORT_INTERVAL_SECONDS: u64 = 86_400;
   /// Single Python script run capped at 10 minutes.
   pub const PYTHON_TIMEOUT_SECONDS: u64 = 600;
   /// Every 10 failed Python attempts the runner pings the debate.
   pub const PYTHON_FEEDBACK_EVERY: u32 = 10;
+  /// Whether convergence-based auto-pause is enabled by default.
+  pub const AUTO_PAUSE_WHEN_CONVERGED: bool = false;
+  /// Default wake-check cron (UTC): at minute 0 of every hour.
+  pub const RESUME_SCHEDULE_CRON: &str = "0 * * * *";
+  /// User-facing label for the default wake schedule.
+  pub const RESUME_SCHEDULE_LABEL: &str = "Every hour";
 }
 
 /// Process-level configuration. Construct via [`AppConfig::default`]; the

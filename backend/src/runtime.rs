@@ -1,16 +1,19 @@
 //! Per-room orchestration.
 //!
-//! Starting a room spawns three Tokio tasks:
+//! Starting a room spawns four Tokio tasks:
 //!
 //! 1. **Debate loop** ([`run_debate_loop`]): the heartbeat. Picks the next
 //!    persona, runs one streaming turn through the low-tier model with tool
 //!    support, sleeps `chat_interval_seconds`, and repeats forever.
-//! 2. **Evaluation tick** ([`run_evaluation_loop`]): every
-//!    `evaluation_interval_seconds`, the high model emits a `leader_note`
+//! 2. **Steering tick** ([`run_steering_loop`]): every
+//!    `steering_interval_seconds`, the high model emits a `leader_note`
 //!    that compliments / criticizes / redirects the debate.
 //! 3. **Report tick** ([`run_report_loop`]): every
 //!    `report_interval_seconds`, the high model writes a long-form report
 //!    streamed token-by-token into a `room_reports` row.
+//! 4. **Wake tick** ([`run_resume_schedule_loop`]): while auto-paused,
+//!    waits for the next configured cron time and asks the leader whether
+//!    to resume.
 //!
 //! All three honor the room's `paused` and `stopped` flags. They observe
 //! changes at task-natural boundaries (turn end, timer wake) - nothing is
@@ -27,7 +30,10 @@
 use crate::app_state::{AppState, RoomHandle};
 use crate::db;
 use crate::error::ReportError;
-use crate::llm::{DebateTurnInputs, NoToolTurnInputs, build_chat_client};
+use crate::llm::{
+  DebateTurnInputs, HaltGateInputs, NoToolTurnInputs, ProceedGateInputs,
+  build_chat_client,
+};
 use crate::models::{
   ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind, RoomStatus,
   ToolCallRecord,
@@ -37,10 +43,13 @@ use crate::streaming::{
   ReportId, RoomStream, ToolCallId, TurnId, TurnKind, WsEvent, new_turn_id,
   report_id_for,
 };
+use crate::tools::do_nothing::DoNothingTool;
+use crate::tools::halt_room::{HaltRoomTool, LEADER_HALT_AGENT};
 use crate::tools::leader::RequestLeaderDecisionTool;
+use crate::tools::proceed_room::{LEADER_PROCEED_AGENT, ProceedRoomTool};
 use crate::workspace::{DebateRoot, RoomWorkspace};
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
@@ -79,12 +88,25 @@ const DEBATE_PERSONAS: [DebatePersona; 4] = [
 ];
 
 /// Inline guidance appended to every chat turn's system prompt.
-const CHAT_LENGTH_GUARDRAIL: &str =
-  include_str!("prompts/non_final_word_guidance.md");
+const CHAT_FORMAT_GUARDRAIL: &str =
+  include_str!("prompts/chat_format_guardrail.md");
 
-const LEADER_EVAL_AGENT: &str = "Leader (evaluation)";
-const LEADER_EVAL_PROMPT: &str = include_str!("prompts/leader_evaluation.md");
+const LEADER_STEERING_AGENT: &str = "Leader (steering)";
+const LEADER_STEERING_PROMPT: &str = include_str!("prompts/leader_steering.md");
 const LEADER_REPORT_PROMPT: &str = include_str!("prompts/leader_report.md");
+const LEADER_HALT_GATE_PROMPT: &str =
+  include_str!("prompts/leader_halt_gate.md");
+const LEADER_PROCEED_GATE_PROMPT: &str =
+  include_str!("prompts/leader_proceed_gate.md");
+const LEADER_HALT_GATE_USER_PROMPT: &str =
+  include_str!("prompts/leader_halt_gate_user.md");
+const LEADER_PROCEED_GATE_USER_PROMPT: &str =
+  include_str!("prompts/leader_proceed_gate_user.md");
+
+const DEFAULT_WAKE_LABEL: &str = "Every hour";
+
+/// Tool name personas / leader gates call to opt out of producing a bubble.
+const DO_NOTHING_TOOL_NAME: &str = "do_nothing";
 
 /// Maximum bytes emitted in tool args/output previews to the WebSocket.
 const PREVIEW_MAX_CHARS: usize = 240;
@@ -134,8 +156,9 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
     room_id,
     workspace.clone(),
   ));
-  tokio::spawn(run_evaluation_loop(state.clone(), handle.clone(), room_id));
-  tokio::spawn(run_report_loop(state, handle, room_id));
+  tokio::spawn(run_steering_loop(state.clone(), handle.clone(), room_id));
+  tokio::spawn(run_report_loop(state.clone(), handle.clone(), room_id));
+  tokio::spawn(run_resume_schedule_loop(state, handle, room_id));
 
   Ok(())
 }
@@ -149,6 +172,10 @@ async fn run_debate_loop(
   workspace: RoomWorkspace,
 ) {
   let mut persona_index: usize = 0;
+  let mut no_further_by_persona: HashMap<&'static str, bool> = DEBATE_PERSONAS
+    .iter()
+    .map(|persona| (persona.name, false))
+    .collect();
 
   loop {
     if handle.is_stopped() {
@@ -171,16 +198,42 @@ async fn run_debate_loop(
       run_chat_turn(&state, &handle, &snapshot, persona, workspace.clone())
         .await;
 
-    if let Err(error) = result {
-      tracing::warn!(%room_id, persona = %persona.name, %error, "chat turn failed");
+    match result {
+      Ok(outcome) => {
+        no_further_by_persona.insert(persona.name, outcome.no_further_input);
+
+        if !snapshot.auto_pause_when_converged {
+          no_further_by_persona
+            .values_mut()
+            .for_each(|value| *value = false);
+        }
+
+        let everyone_idle = no_further_by_persona.values().all(|v| *v);
+        if everyone_idle
+          && snapshot.auto_pause_when_converged
+          && let Err(error) =
+            evaluate_and_maybe_auto_pause(&state, &handle, &snapshot).await
+        {
+          tracing::warn!(%room_id, %error, "failed convergence halt gate");
+        }
+      }
+      Err(error) => {
+        no_further_by_persona.insert(persona.name, false);
+        tracing::warn!(%room_id, persona = %persona.name, %error, "chat turn failed");
+      }
     }
 
     let interval = snapshot.chat_interval_seconds.max(1);
     tokio::select! {
       _ = sleep(Duration::from_secs(interval)) => {}
       _ = handle.stop_notify.notified() => return,
+      _ = handle.config_notify.notified() => continue,
     }
   }
+}
+
+struct ChatTurnOutcome {
+  no_further_input: bool,
 }
 
 /// Runs one debater turn end-to-end. Builds the [`ChatClient`] for the
@@ -193,7 +246,7 @@ async fn run_chat_turn(
   room: &Room,
   persona: DebatePersona,
   workspace: RoomWorkspace,
-) -> Result<()> {
+) -> Result<ChatTurnOutcome> {
   let history = db::load_room_events(&state.db, room.id).await?;
   let history_messages = render_transcript_messages(&history);
   let system_prompt = build_chat_system_prompt(room, persona);
@@ -217,6 +270,8 @@ async fn run_chat_turn(
     room.high.clone(),
     preamble,
   );
+  let do_nothing_tool =
+    DoNothingTool::new(state.clone(), room.id, persona.name.to_string());
   let hook = DebateHook::new(turn_id.clone(), stream.clone());
   let recorder = hook.recorder();
 
@@ -231,6 +286,7 @@ async fn run_chat_turn(
       workspace,
       runner,
       leader_tool,
+      do_nothing_tool,
       hook,
     })
     .await;
@@ -246,16 +302,33 @@ async fn run_chat_turn(
     }
   };
 
+  let (reasoning, tool_calls) = recorder.snapshot().await;
+  let no_further_input = tool_calls
+    .iter()
+    .any(|call| call.tool == DO_NOTHING_TOOL_NAME && call.ok);
+
+  // When `do_nothing` was called we discard any text the model also
+  // produced and retire the draft without persisting a bubble. The tool
+  // already emitted the `InlineNote` itself.
+  if no_further_input {
+    stream.send(WsEvent::DraftFailed {
+      turn_id,
+      error: String::new(),
+    });
+    return Ok(ChatTurnOutcome { no_further_input });
+  }
+
   let trimmed = final_text.trim().to_string();
   if trimmed.is_empty() {
     stream.send(WsEvent::DraftFailed {
       turn_id,
       error: "model produced no text after tool loop".to_string(),
     });
-    return Ok(());
+    return Ok(ChatTurnOutcome {
+      no_further_input: false,
+    });
   }
 
-  let (reasoning, tool_calls) = recorder.snapshot().await;
   let sequence = handle.allocate_event_sequence();
   let timestamp = Utc::now();
   let event = RoomEvent {
@@ -274,7 +347,7 @@ async fn run_chat_turn(
     turn_id,
     message: event,
   });
-  Ok(())
+  Ok(ChatTurnOutcome { no_further_input })
 }
 
 // -- Hook -----------------------------------------------------------------
@@ -451,22 +524,250 @@ where
   }
 }
 
-// -- Leader evaluation -----------------------------------------------------
+async fn evaluate_and_maybe_auto_pause(
+  state: &AppState,
+  _handle: &RoomHandle,
+  room: &Room,
+) -> Result<()> {
+  let history = db::load_room_events(&state.db, room.id).await?;
+  if history.is_empty() {
+    return Ok(());
+  }
 
-async fn run_evaluation_loop(
+  let label = if room.resume_schedule_label.trim().is_empty() {
+    DEFAULT_WAKE_LABEL.to_string()
+  } else {
+    room.resume_schedule_label.clone()
+  };
+
+  let preamble = build_room_preamble(room);
+  let transcript = render_transcript_text(&history);
+  let user_prompt = render_gate_user_prompt(
+    LEADER_HALT_GATE_USER_PROMPT,
+    &preamble,
+    &label,
+    &transcript,
+  );
+
+  let halt_tool = HaltRoomTool::new(state.clone(), room.id, label.clone());
+  let do_nothing_tool =
+    DoNothingTool::new(state.clone(), room.id, LEADER_HALT_AGENT.to_string());
+
+  let client = build_chat_client(&room.high)
+    .context("failed to construct high-tier client")?;
+  client
+    .run_halt_gate_turn(HaltGateInputs {
+      system_prompt: LEADER_HALT_GATE_PROMPT.to_string(),
+      user_prompt,
+      halt_tool,
+      do_nothing_tool,
+    })
+    .await
+}
+
+async fn run_resume_schedule_loop(
   state: AppState,
   handle: RoomHandle,
   room_id: Uuid,
 ) {
   loop {
+    if handle.is_stopped() {
+      return;
+    }
+
+    let Some(room) = load_room_snapshot(&state, room_id).await else {
+      return;
+    };
+
+    if !room.auto_pause_when_converged {
+      tokio::select! {
+        _ = sleep(Duration::from_secs(30)) => {}
+        _ = handle.stop_notify.notified() => return,
+      }
+      continue;
+    }
+
+    if !handle.is_paused() || !handle.is_auto_paused() {
+      tokio::select! {
+        _ = handle.pause_notify.notified() => {}
+        _ = handle.stop_notify.notified() => return,
+      }
+      continue;
+    }
+
+    let now = Utc::now();
+    let Some(next_tick) =
+      next_supported_cron_tick(&room.resume_schedule_cron, now)
+    else {
+      tracing::warn!(%room_id, cron = %room.resume_schedule_cron, "unsupported resume cron; skipping wake check");
+      tokio::select! {
+        _ = sleep(Duration::from_secs(300)) => {}
+        _ = handle.stop_notify.notified() => return,
+      }
+      continue;
+    };
+
+    let wait = (next_tick - now)
+      .to_std()
+      .unwrap_or_else(|_| Duration::from_secs(1));
+    tokio::select! {
+      _ = sleep(wait) => {}
+      _ = handle.pause_notify.notified() => continue,
+      _ = handle.stop_notify.notified() => return,
+      _ = handle.config_notify.notified() => continue,
+    }
+
+    if handle.is_stopped() || !handle.is_paused() || !handle.is_auto_paused() {
+      continue;
+    }
+
+    let Some(room) = load_room_snapshot(&state, room_id).await else {
+      return;
+    };
+    if let Err(error) = evaluate_scheduled_resume(&state, &handle, &room).await
+    {
+      tracing::warn!(%room_id, %error, "scheduled resume gate failed");
+    }
+  }
+}
+
+async fn evaluate_scheduled_resume(
+  state: &AppState,
+  _handle: &RoomHandle,
+  room: &Room,
+) -> Result<()> {
+  let history = db::load_room_events(&state.db, room.id).await?;
+  if history.is_empty() {
+    return Ok(());
+  }
+
+  let label = if room.resume_schedule_label.trim().is_empty() {
+    DEFAULT_WAKE_LABEL.to_string()
+  } else {
+    room.resume_schedule_label.clone()
+  };
+
+  let preamble = build_room_preamble(room);
+  let transcript = render_transcript_text(&history);
+  let user_prompt = render_gate_user_prompt(
+    LEADER_PROCEED_GATE_USER_PROMPT,
+    &preamble,
+    &label,
+    &transcript,
+  );
+
+  let proceed_tool = ProceedRoomTool::new(state.clone(), room.id);
+  let do_nothing_tool = DoNothingTool::new(
+    state.clone(),
+    room.id,
+    LEADER_PROCEED_AGENT.to_string(),
+  );
+
+  let client = build_chat_client(&room.high)
+    .context("failed to construct high-tier client")?;
+  client
+    .run_proceed_gate_turn(ProceedGateInputs {
+      system_prompt: LEADER_PROCEED_GATE_PROMPT.to_string(),
+      user_prompt,
+      proceed_tool,
+      do_nothing_tool,
+    })
+    .await
+}
+
+fn next_supported_cron_tick(
+  cron: &str,
+  now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+  let trimmed = cron.trim();
+  if trimmed == "*/15 * * * *" {
+    return next_every_n_minutes(now, 15);
+  }
+  if trimmed == "*/30 * * * *" {
+    return next_every_n_minutes(now, 30);
+  }
+  if trimmed == "0 * * * *" {
+    return next_every_n_hours(now, 1);
+  }
+  if trimmed == "0 */3 * * *" {
+    return next_every_n_hours(now, 3);
+  }
+  if trimmed == "0 */6 * * *" {
+    return next_every_n_hours(now, 6);
+  }
+
+  let parts: Vec<&str> = trimmed.split_whitespace().collect();
+  if parts.len() != 5 || parts[2] != "*" || parts[3] != "*" || parts[4] != "*" {
+    return None;
+  }
+  let minute = parts[0].parse::<u32>().ok()?;
+  let hour = parts[1].parse::<u32>().ok()?;
+  if minute > 59 || hour > 23 {
+    return None;
+  }
+  next_daily_utc(now, hour, minute)
+}
+
+fn next_every_n_minutes(
+  now: DateTime<Utc>,
+  step: u32,
+) -> Option<DateTime<Utc>> {
+  if step == 0 {
+    return None;
+  }
+  let mut candidate =
+    now.with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
+  loop {
+    if candidate.minute().is_multiple_of(step) {
+      return Some(candidate);
+    }
+    candidate += ChronoDuration::minutes(1);
+  }
+}
+
+fn next_every_n_hours(now: DateTime<Utc>, step: u32) -> Option<DateTime<Utc>> {
+  if step == 0 {
+    return None;
+  }
+  let mut candidate =
+    now.with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
+  loop {
+    if candidate.minute() == 0 && candidate.hour().is_multiple_of(step) {
+      return Some(candidate);
+    }
+    candidate += ChronoDuration::minutes(1);
+  }
+}
+
+fn next_daily_utc(
+  now: DateTime<Utc>,
+  hour: u32,
+  minute: u32,
+) -> Option<DateTime<Utc>> {
+  let today = now
+    .with_hour(hour)?
+    .with_minute(minute)?
+    .with_second(0)?
+    .with_nanosecond(0)?;
+  if today > now {
+    return Some(today);
+  }
+  Some(today + ChronoDuration::days(1))
+}
+
+// -- Leader steering -------------------------------------------------------
+
+async fn run_steering_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
+  loop {
     let interval = match load_room_snapshot(&state, room_id).await {
-      Some(room) => room.evaluation_interval_seconds.max(60),
+      Some(room) => room.steering_interval_seconds.max(60),
       None => return,
     };
 
     tokio::select! {
       _ = sleep(Duration::from_secs(interval)) => {}
       _ = handle.stop_notify.notified() => return,
+      _ = handle.config_notify.notified() => continue,
     }
     if handle.is_stopped() {
       return;
@@ -479,28 +780,28 @@ async fn run_evaluation_loop(
       return;
     };
 
-    if let Err(error) = run_leader_evaluation(&state, &handle, &room).await {
-      tracing::warn!(%room_id, %error, "leader evaluation failed");
+    if let Err(error) = run_leader_steering(&state, &handle, &room).await {
+      tracing::warn!(%room_id, %error, "leader steering failed");
     }
   }
 }
 
-async fn run_leader_evaluation(
+async fn run_leader_steering(
   state: &AppState,
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
   let history = db::load_room_events(&state.db, room.id).await?;
   if history.is_empty() {
-    return Ok(()); // nothing to evaluate yet
+    return Ok(()); // nothing to steer yet
   }
 
   let preamble = build_room_preamble(room);
-  let system = format!("{LEADER_EVAL_PROMPT}\n\n{preamble}");
+  let system = format!("{LEADER_STEERING_PROMPT}\n\n{preamble}");
   let transcript = render_transcript_text(&history);
   let user = format!(
     "Here is the recent debate transcript:\n\n{transcript}\n\nIssue \
-     your evaluation now."
+     your steering note now."
   );
 
   let stream = state.ensure_room_stream(room.id).await;
@@ -508,14 +809,21 @@ async fn run_leader_evaluation(
 
   stream.send(WsEvent::DraftStarted {
     turn_id: turn_id.clone(),
-    agent: LEADER_EVAL_AGENT.to_string(),
+    agent: LEADER_STEERING_AGENT.to_string(),
     kind: TurnKind::LeaderNote,
   });
 
   let hook = DebateHook::new(turn_id.clone(), stream.clone());
   let recorder = hook.recorder();
 
-  let final_text = stream_leader_completion(&room.high, &system, user, hook)
+  let client = build_chat_client(&room.high)
+    .context("failed to construct high-tier client")?;
+  let final_text = client
+    .run_steering_turn(NoToolTurnInputs {
+      system_prompt: system,
+      user_prompt: user,
+      hook,
+    })
     .await
     .inspect_err(|error| {
       stream.send(WsEvent::DraftFailed {
@@ -540,7 +848,7 @@ async fn run_leader_evaluation(
     room_id: room.id,
     sequence,
     kind: RoomEventKind::LeaderNote,
-    agent: Some(LEADER_EVAL_AGENT.to_string()),
+    agent: Some(LEADER_STEERING_AGENT.to_string()),
     content: trimmed,
     reasoning,
     tool_calls,
@@ -555,23 +863,6 @@ async fn run_leader_evaluation(
   Ok(())
 }
 
-async fn stream_leader_completion(
-  high: &ProviderConfig,
-  system_prompt: &str,
-  user_prompt: String,
-  hook: DebateHook,
-) -> Result<String> {
-  let client =
-    build_chat_client(high).context("failed to construct high-tier client")?;
-  client
-    .run_evaluation_turn(NoToolTurnInputs {
-      system_prompt: system_prompt.to_string(),
-      user_prompt,
-      hook,
-    })
-    .await
-}
-
 // -- Leader report ---------------------------------------------------------
 
 async fn run_report_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
@@ -583,6 +874,7 @@ async fn run_report_loop(state: AppState, handle: RoomHandle, room_id: Uuid) {
     tokio::select! {
       _ = sleep(Duration::from_secs(interval)) => {}
       _ = handle.stop_notify.notified() => return,
+      _ = handle.config_notify.notified() => continue,
     }
     if handle.is_stopped() {
       return;
@@ -740,7 +1032,7 @@ fn build_chat_system_prompt(room: &Room, persona: DebatePersona) -> String {
     "{persona_prompt}\n\n{preamble}\n\n{guardrail}",
     persona_prompt = persona.system_prompt,
     preamble = build_room_preamble(room),
-    guardrail = CHAT_LENGTH_GUARDRAIL,
+    guardrail = CHAT_FORMAT_GUARDRAIL,
   )
 }
 
@@ -807,6 +1099,18 @@ fn render_transcript_text(events: &[RoomEvent]) -> String {
     })
     .collect::<Vec<_>>()
     .join("\n\n")
+}
+
+fn render_gate_user_prompt(
+  template: &str,
+  preamble: &str,
+  schedule_label: &str,
+  transcript: &str,
+) -> String {
+  template
+    .replace("{preamble}", preamble)
+    .replace("{schedule_label}", schedule_label)
+    .replace("{transcript}", transcript)
 }
 
 fn preview(text: &str) -> String {

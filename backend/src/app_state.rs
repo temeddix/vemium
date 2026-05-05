@@ -44,12 +44,18 @@ pub struct RoomHandle {
   /// Signal fired whenever `paused` changes. The orchestrator awaits this
   /// to wake up from a pause.
   pub pause_notify: Arc<Notify>,
+  /// True when the current paused state was initiated by auto-convergence.
+  pub auto_paused: Arc<AtomicBool>,
   /// Permanent stop signal. When `true`, the orchestrator finishes its
   /// current turn (if any) and exits. Used by the delete handler.
   pub stopped: Arc<AtomicBool>,
   /// Signal fired when `stopped` flips. Lets pauses break early on
   /// shutdown rather than blocking forever.
   pub stop_notify: Arc<Notify>,
+  /// Signal fired when room settings change (e.g. interval edits via the
+  /// HTTP API). Lets in-progress sleeps wake early so loops re-read fresh
+  /// config instead of blocking on the previous interval value.
+  pub config_notify: Arc<Notify>,
   /// Monotonic counter for the next event sequence number for this room.
   /// Seeded from the database on orchestrator startup, then owned in
   /// memory.
@@ -63,8 +69,10 @@ impl RoomHandle {
     Self {
       paused: Arc::new(AtomicBool::new(false)),
       pause_notify: Arc::new(Notify::new()),
+      auto_paused: Arc::new(AtomicBool::new(false)),
       stopped: Arc::new(AtomicBool::new(false)),
       stop_notify: Arc::new(Notify::new()),
+      config_notify: Arc::new(Notify::new()),
       next_event_sequence: Arc::new(AtomicU64::new(seed_event_seq + 1)),
       next_report_sequence: Arc::new(AtomicU64::new(seed_report_seq + 1)),
     }
@@ -82,11 +90,19 @@ impl RoomHandle {
 
   pub fn request_pause(&self) {
     self.paused.store(true, Ordering::SeqCst);
+    self.auto_paused.store(false, Ordering::SeqCst);
+    self.pause_notify.notify_waiters();
+  }
+
+  pub fn request_auto_pause(&self) {
+    self.paused.store(true, Ordering::SeqCst);
+    self.auto_paused.store(true, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
   }
 
   pub fn request_resume(&self) {
     self.paused.store(false, Ordering::SeqCst);
+    self.auto_paused.store(false, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
   }
 
@@ -97,12 +113,23 @@ impl RoomHandle {
     self.pause_notify.notify_waiters();
   }
 
+  /// Wakes any loop that is currently sleeping on a per-room interval so it
+  /// reloads the latest config snapshot. Call this after persisting a room
+  /// settings update.
+  pub fn notify_config_changed(&self) {
+    self.config_notify.notify_waiters();
+  }
+
   pub fn is_paused(&self) -> bool {
     self.paused.load(Ordering::SeqCst)
   }
 
   pub fn is_stopped(&self) -> bool {
     self.stopped.load(Ordering::SeqCst)
+  }
+
+  pub fn is_auto_paused(&self) -> bool {
+    self.auto_paused.load(Ordering::SeqCst)
   }
 }
 

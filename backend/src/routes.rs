@@ -26,8 +26,9 @@ use crate::config::room_defaults;
 use crate::db;
 use crate::error::ReportError;
 use crate::models::{
-  CreateMessageRequest, CreateRoomRequest, ProviderConfig, Room, RoomEvent,
-  RoomEventKind, RoomStatus, UpdateRoomRequest,
+  CreateMessageRequest, CreateRoomRequest, ProviderConfig,
+  REDACTED_API_KEY_SENTINEL, Room, RoomEvent, RoomEventKind, RoomStatus,
+  UpdateRoomRequest,
 };
 use crate::runtime;
 use crate::streaming::{RoomReceiver, WsEvent, new_turn_id};
@@ -90,6 +91,11 @@ async fn create_room(
   if let Err(error) = validate_provider_config(&payload.high) {
     return bad_request("high", &error);
   }
+  if let Some(cron) = payload.resume_schedule_cron.as_deref()
+    && let Err(error) = validate_supported_resume_cron(cron)
+  {
+    return bad_request("resumeScheduleCron", &error);
+  }
 
   let name = payload.name.trim();
   if name.is_empty() {
@@ -123,9 +129,9 @@ async fn create_room(
     chat_interval_seconds: payload
       .chat_interval_seconds
       .unwrap_or(room_defaults::CHAT_INTERVAL_SECONDS),
-    evaluation_interval_seconds: payload
-      .evaluation_interval_seconds
-      .unwrap_or(room_defaults::EVALUATION_INTERVAL_SECONDS),
+    steering_interval_seconds: payload
+      .steering_interval_seconds
+      .unwrap_or(room_defaults::STEERING_INTERVAL_SECONDS),
     report_interval_seconds: payload
       .report_interval_seconds
       .unwrap_or(room_defaults::REPORT_INTERVAL_SECONDS),
@@ -135,6 +141,19 @@ async fn create_room(
     python_feedback_every: payload
       .python_feedback_every
       .unwrap_or(room_defaults::PYTHON_FEEDBACK_EVERY),
+    auto_pause_when_converged: payload
+      .auto_pause_when_converged
+      .unwrap_or(room_defaults::AUTO_PAUSE_WHEN_CONVERGED),
+    resume_schedule_cron: payload
+      .resume_schedule_cron
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+      .unwrap_or_else(|| room_defaults::RESUME_SCHEDULE_CRON.to_string()),
+    resume_schedule_label: payload
+      .resume_schedule_label
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+      .unwrap_or_else(|| room_defaults::RESUME_SCHEDULE_LABEL.to_string()),
     low: payload.low,
     high: payload.high,
     created_at: now,
@@ -191,6 +210,11 @@ async fn update_room(
   {
     return bad_request("high", &error);
   }
+  if let Some(value) = payload.resume_schedule_cron.as_deref()
+    && let Err(error) = validate_supported_resume_cron(value)
+  {
+    return bad_request("resumeScheduleCron", &error);
+  }
 
   if let Some(value) = payload.name {
     let trimmed = value.trim();
@@ -227,8 +251,8 @@ async fn update_room(
   if let Some(value) = payload.chat_interval_seconds {
     updated.chat_interval_seconds = value;
   }
-  if let Some(value) = payload.evaluation_interval_seconds {
-    updated.evaluation_interval_seconds = value;
+  if let Some(value) = payload.steering_interval_seconds {
+    updated.steering_interval_seconds = value;
   }
   if let Some(value) = payload.report_interval_seconds {
     updated.report_interval_seconds = value;
@@ -239,10 +263,27 @@ async fn update_room(
   if let Some(value) = payload.python_feedback_every {
     updated.python_feedback_every = value;
   }
-  if let Some(value) = payload.low {
+  if let Some(value) = payload.auto_pause_when_converged {
+    updated.auto_pause_when_converged = value;
+  }
+  if let Some(value) = payload.resume_schedule_cron {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+      updated.resume_schedule_cron = trimmed.to_string();
+    }
+  }
+  if let Some(value) = payload.resume_schedule_label {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+      updated.resume_schedule_label = trimmed.to_string();
+    }
+  }
+  if let Some(mut value) = payload.low {
+    preserve_existing_api_key_if_redacted(&mut value, &updated.low);
     updated.low = value;
   }
-  if let Some(value) = payload.high {
+  if let Some(mut value) = payload.high {
+    preserve_existing_api_key_if_redacted(&mut value, &updated.high);
     updated.high = value;
   }
   updated.updated_at = Utc::now();
@@ -255,6 +296,9 @@ async fn update_room(
   {
     let mut rooms = state.rooms.write().await;
     rooms.insert(room_id, updated.clone());
+  }
+  if let Some(handle) = state.room_handles.read().await.get(&room_id) {
+    handle.notify_config_changed();
   }
 
   (StatusCode::OK, Json(json!({"room": updated.view()}))).into_response()
@@ -513,6 +557,19 @@ async fn send_event(socket: &mut WebSocket, event: &WsEvent) -> bool {
 
 // -- Helpers ---------------------------------------------------------------
 
+/// API responses redact `api_key` to the fixed sentinel
+/// [`REDACTED_API_KEY_SENTINEL`]. If a settings update echoes that sentinel
+/// back, the user did not retype the key — preserve the stored plaintext
+/// instead of overwriting it with the sentinel.
+fn preserve_existing_api_key_if_redacted(
+  incoming: &mut ProviderConfig,
+  existing: &ProviderConfig,
+) {
+  if incoming.api_key.as_deref() == Some(REDACTED_API_KEY_SENTINEL) {
+    incoming.api_key = existing.api_key.clone();
+  }
+}
+
 fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
   if config.model.trim().is_empty() {
     return Err("model is required".to_string());
@@ -531,6 +588,36 @@ fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
     return Err("api_key is required for OpenRouter".to_string());
   }
   Ok(())
+}
+
+fn validate_supported_resume_cron(cron: &str) -> Result<(), String> {
+  let trimmed = cron.trim();
+  if trimmed.is_empty() {
+    return Err("must not be empty".to_string());
+  }
+  if matches!(trimmed, "*/15 * * * *" | "*/30 * * * *" | "0 * * * *") {
+    return Ok(());
+  }
+  if matches!(trimmed, "0 */3 * * *" | "0 */6 * * *") {
+    return Ok(());
+  }
+  // Also accept strict daily schedule `M H * * *`.
+  let parts: Vec<&str> = trimmed.split_whitespace().collect();
+  if parts.len() != 5 {
+    return Err("unsupported cron expression".to_string());
+  }
+  let minute = parts[0].parse::<u32>().ok();
+  let hour = parts[1].parse::<u32>().ok();
+  if let (Some(m), Some(h)) = (minute, hour)
+    && m < 60
+    && h < 24
+    && parts[2] == "*"
+    && parts[3] == "*"
+    && parts[4] == "*"
+  {
+    return Ok(());
+  }
+  Err("unsupported cron expression".to_string())
 }
 
 async fn unique_slug(

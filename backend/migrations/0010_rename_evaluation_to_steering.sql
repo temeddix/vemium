@@ -1,0 +1,2 @@
+ALTER TABLE rooms
+RENAME COLUMN evaluation_interval_seconds TO steering_interval_seconds;
