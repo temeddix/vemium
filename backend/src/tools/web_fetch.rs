@@ -12,6 +12,7 @@
 //! HTML->Markdown saves dramatic amounts of tokens compared with feeding
 //! raw HTML; in practice 60-90% reduction on real-world articles.
 
+use crate::tools::InlineNote;
 use dom_smoothie::{Config, Readability};
 use reqwest::Client;
 use rig::completion::ToolDefinition;
@@ -21,7 +22,12 @@ use serde_json::json;
 use std::time::Duration;
 use thiserror::Error;
 
-const NAME: &str = "web_fetch";
+pub const NAME: &str = "web_fetch";
+pub const INLINE_NOTE_TEXT: &str = "Fetched URL";
+pub const INLINE_NOTE_FAIL_TEXT: &str = "Web fetch failed";
+/// Markdown preview cap for the inline-note `detail`. Way smaller than
+/// `DEFAULT_MAX_CHARS` so a click-to-reveal doesn't dump a small book.
+const NOTE_PREVIEW_CHARS: usize = 2_000;
 const DEFAULT_MAX_CHARS: usize = 12_000;
 const MIN_MAX_CHARS: usize = 256;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -50,14 +56,14 @@ impl Default for WebFetchTool {
   }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct WebFetchArgs {
   pub url: String,
   #[serde(default)]
   pub max_chars: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebFetchOutput {
   pub url: String,
   pub markdown: String,
@@ -178,4 +184,37 @@ fn truncate_chars(text: &str, max_chars: usize) -> (String, bool) {
   let mut out: String = text.chars().take(max_chars).collect();
   out.push_str("\n\n... (truncated)");
   (out, true)
+}
+
+/// Builds the inline-note attached to a `web_fetch` invocation. The detail
+/// echoes the requested URL and a short markdown preview so a user can
+/// see what came back without firing off the same fetch themselves.
+pub fn format_inline_note(args: &str, result: &str, ok: bool) -> InlineNote {
+  if !ok {
+    let url = serde_json::from_str::<WebFetchArgs>(args)
+      .map(|a| a.url)
+      .unwrap_or_default();
+    let detail = if url.is_empty() {
+      result.to_string()
+    } else {
+      format!("URL: {url}\n\n{result}")
+    };
+    return InlineNote {
+      text: INLINE_NOTE_FAIL_TEXT.to_string(),
+      detail,
+    };
+  }
+  match serde_json::from_str::<WebFetchOutput>(result) {
+    Ok(parsed) => {
+      let (preview, _) = truncate_chars(&parsed.markdown, NOTE_PREVIEW_CHARS);
+      InlineNote {
+        text: INLINE_NOTE_TEXT.to_string(),
+        detail: format!("URL: {}\n\n{preview}", parsed.url),
+      }
+    }
+    Err(_) => InlineNote {
+      text: INLINE_NOTE_TEXT.to_string(),
+      detail: result.to_string(),
+    },
+  }
 }

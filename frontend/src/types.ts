@@ -94,13 +94,14 @@ export interface Room {
 }
 
 /**
- * One finalized message in a room's chat log. Reasoning trace and the list
- * of tool calls invoked during the turn are inline on the same record;
- * there is no separate "tool_call" event type any more.
+ * One finalized event row in a room's chat log. Chat-bubble kinds carry
+ * the assistant's reply in `content` and any chain-of-thought trace in
+ * `reasoning`. For `kind === "inline_note"` rows, `content` is the
+ * always-visible label and `detail` is the click-to-reveal expansion;
+ * `reasoning` is empty.
  *
- * For `kind === "inline_note"` rows, `content` is the always-visible label
- * and `detail` is the click-to-reveal expansion; the rest of the payload
- * (reasoning, toolCalls) is empty.
+ * Tool invocations live on their own `inline_note` rows now - they are
+ * not threaded onto the assistant message that triggered them.
  */
 export interface Message {
   /**
@@ -117,7 +118,6 @@ export interface Message {
   reasoning: string;
   /** Click-to-reveal expansion for `inline_note` rows; empty otherwise. */
   detail: string;
-  toolCalls: ToolCallRecord[];
   timestamp: string;
 }
 
@@ -129,14 +129,6 @@ export interface RoomReport {
   startedAt: string;
   completedAt: string | null;
   status: ReportStatus;
-}
-
-export interface ToolCallRecord {
-  tool: string;
-  args: unknown;
-  ok: boolean;
-  outputPreview: string;
-  durationMs: number;
 }
 
 // -- WebSocket events -----------------------------------------------------
@@ -205,22 +197,27 @@ export interface WsDraftReasoning {
   delta: string;
 }
 
+/**
+ * A tool invocation began as part of this draft. Carries the tool name so
+ * the UI can label the running spinner. Rig dispatches tools serially, so
+ * at most one tool is running per draft at a time - the matching
+ * `draftToolCompleted` clears the indicator.
+ */
 export interface WsDraftToolStarted {
   type: "draftToolStarted";
   turnId: string;
-  callId: string;
   tool: string;
-  argsPreview: string;
 }
 
+/**
+ * The current tool call finished. The persisted inline-note row arrives
+ * separately as a `messageAdded` frame; this only clears the running-tool
+ * indicator on the matching draft.
+ */
 export interface WsDraftToolCompleted {
   type: "draftToolCompleted";
   turnId: string;
-  callId: string;
   tool: string;
-  ok: boolean;
-  outputPreview: string;
-  durationMs: number;
 }
 
 export interface WsDraftFailed {
@@ -317,18 +314,15 @@ export interface Draft {
   kind: DraftKind;
   content: string;
   reasoning: string;
-  toolCalls: DraftToolCall[];
+  /**
+   * Name of the tool currently running on this draft, or `null` when the
+   * model is producing text. Tools dispatch serially, so this is at most
+   * one name; persisted inline-note rows for finished tool calls arrive
+   * separately as `messageAdded` frames.
+   */
+  runningTool: string | null;
   status: "streaming" | "failed";
   error: string | null;
-}
-
-export interface DraftToolCall {
-  callId: string;
-  tool: string;
-  argsPreview: string;
-  status: "running" | "ok" | "error";
-  outputPreview: string | null;
-  durationMs: number | null;
 }
 
 export interface ReportBuffer {

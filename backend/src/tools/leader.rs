@@ -5,7 +5,9 @@
 //! `high` provider via the [`rig::agent::Agent`] API, persists the response
 //! as a `leader_note` event so the user can see it in the chat log, and
 //! returns the same text to the calling agent so it can reference the
-//! leader's verdict in its own reply.
+//! leader's verdict in its own reply. The breadcrumb attributing the bubble
+//! to an on-demand request is written by the orchestrator's hook from this
+//! tool's `format_inline_note`, so the tool itself only owns the bubble.
 
 use crate::app_state::AppState;
 use crate::db;
@@ -13,6 +15,7 @@ use crate::error::ReportError;
 use crate::llm::build_chat_client;
 use crate::models::{ProviderConfig, RoomEvent, RoomEventKind};
 use crate::streaming::{WsEvent, new_turn_id};
+use crate::tools::InlineNote;
 use crate::tools::pause_room::LEADER_AGENT;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
@@ -21,12 +24,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-const NAME: &str = "request_leader_decision";
+pub const NAME: &str = "request_leader_decision";
 /// Inline-note label written before the leader's chat bubble. The leader
 /// always speaks under the plain "Leader" name now; this breadcrumb is
 /// what tells the user this particular bubble was triggered on demand by
 /// a debater rather than by the periodic steering tick.
-const ON_DEMAND_INLINE_NOTE: &str = "Appeared on demand";
+pub const INLINE_NOTE_TEXT: &str = "Appeared on demand";
+pub const INLINE_NOTE_FAIL_TEXT: &str = "Leader request failed";
 
 /// Embeds enough context to invoke the high model, persist the resulting
 /// `leader_note`, and broadcast it to subscribed WS clients.
@@ -164,11 +168,12 @@ impl RequestLeaderDecisionTool {
     user
   }
 
-  /// Best-effort: persist an inline-note breadcrumb attributing the
-  /// upcoming bubble to an on-demand request, then persist the leader's
-  /// reply as a `leader_note` event and emit a WS turn so subscribers see
-  /// it without waiting for a refresh. Failures are logged but do not
-  /// propagate - the calling agent already has the answer in hand.
+  /// Best-effort: persist the leader's reply as a `leader_note` bubble so
+  /// the user sees it in the chat log without waiting for a refresh. The
+  /// "Appeared on demand" breadcrumb that precedes the bubble is written
+  /// by the orchestrator's hook from `format_inline_note`, so we only
+  /// emit the bubble here. Failures are logged but do not propagate -
+  /// the calling agent already has the answer in hand.
   async fn persist_and_broadcast(&self, content: &str) {
     let handle = {
       let handles = self.state.room_handles.read().await;
@@ -179,30 +184,6 @@ impl RequestLeaderDecisionTool {
     };
     let stream = self.state.ensure_room_stream(&self.room_code).await;
 
-    // Inline-note breadcrumb that precedes the leader's bubble. Carries
-    // the same timestamp as the bubble so they sort together.
-    let now = Utc::now();
-    let inline_draft = RoomEvent {
-      id: None,
-      room_code: self.room_code.clone(),
-      sequence: handle.allocate_event_sequence(),
-      kind: RoomEventKind::InlineNote,
-      agent: Some(LEADER_AGENT.to_string()),
-      content: ON_DEMAND_INLINE_NOTE.to_string(),
-      reasoning: String::new(),
-      detail: String::new(),
-      tool_calls: Vec::new(),
-      timestamp: now,
-    };
-    let inline_event = db::insert_event(&self.state.db, &inline_draft)
-      .await
-      .report()
-      .unwrap_or_else(|| inline_draft.clone());
-    stream.send(WsEvent::MessageAdded {
-      turn_id: new_turn_id(),
-      message: inline_event,
-    });
-
     let bubble_draft = RoomEvent {
       id: None,
       room_code: self.room_code.clone(),
@@ -212,8 +193,7 @@ impl RequestLeaderDecisionTool {
       content: content.to_string(),
       reasoning: String::new(),
       detail: String::new(),
-      tool_calls: Vec::new(),
-      timestamp: now,
+      timestamp: Utc::now(),
     };
     let bubble_event = db::insert_event(&self.state.db, &bubble_draft)
       .await
@@ -228,5 +208,35 @@ impl RequestLeaderDecisionTool {
       turn_id: new_turn_id(),
       message: bubble_event,
     });
+  }
+}
+
+/// Builds the inline-note attached to a `request_leader_decision`
+/// invocation. The detail carries the question (and optional caller
+/// context) so the user can see what was asked without scrolling; the
+/// answer lives on the leader-bubble row this tool persists directly.
+pub fn format_inline_note(args: &str, result: &str, ok: bool) -> InlineNote {
+  if !ok {
+    return InlineNote {
+      text: INLINE_NOTE_FAIL_TEXT.to_string(),
+      detail: result.to_string(),
+    };
+  }
+  let detail = match serde_json::from_str::<LeaderDecisionArgs>(args) {
+    Ok(parsed) => {
+      let mut detail = format!("Question: {}", parsed.question.trim());
+      if let Some(extra) = parsed.context.as_deref()
+        && !extra.trim().is_empty()
+      {
+        detail.push_str("\n\nAdditional context:\n");
+        detail.push_str(extra.trim());
+      }
+      detail
+    }
+    Err(_) => String::new(),
+  };
+  InlineNote {
+    text: INLINE_NOTE_TEXT.to_string(),
+    detail,
   }
 }

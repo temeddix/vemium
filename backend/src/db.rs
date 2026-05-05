@@ -305,20 +305,18 @@ pub async fn update_app_settings(
 // -- Events ----------------------------------------------------------------
 
 /// Inserts one finalized event row. The caller is responsible for
-/// populating `reasoning`, `tool_calls`, and `detail` with their per-kind
-/// defaults (empty string / empty Vec) so the schema stays uniform. The
-/// returned [`RoomEvent`] carries the database-assigned `id` so callers
-/// can persist or broadcast it without a follow-up read.
+/// populating `reasoning` and `detail` with their per-kind defaults
+/// (empty string) so the schema stays uniform. The returned [`RoomEvent`]
+/// carries the database-assigned `id` so callers can persist or broadcast
+/// it without a follow-up read.
 pub async fn insert_event(
   pool: &SqlitePool,
   event: &RoomEvent,
 ) -> Result<RoomEvent> {
-  let tool_calls_json = serde_json::to_string(&event.tool_calls)
-    .context("failed to serialize tool_calls")?;
   let result = sqlx::query(
     "INSERT INTO room_events
-        (room_code, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (room_code, sequence, kind, agent, content, reasoning, detail, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(&event.room_code)
   .bind(event.sequence as i64)
@@ -327,7 +325,6 @@ pub async fn insert_event(
   .bind(&event.content)
   .bind(&event.reasoning)
   .bind(&event.detail)
-  .bind(tool_calls_json)
   .bind(event.timestamp.to_rfc3339())
   .execute(pool)
   .await
@@ -342,7 +339,7 @@ pub async fn load_room_events(
   room_code: &str,
 ) -> Result<Vec<RoomEvent>> {
   let rows = sqlx::query(
-    "SELECT id, room_code, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp
+    "SELECT id, room_code, sequence, kind, agent, content, reasoning, detail, timestamp
      FROM room_events
      WHERE room_code = ?
      ORDER BY sequence ASC",
@@ -363,7 +360,7 @@ pub async fn load_inline_note(
   id: i64,
 ) -> Result<Option<RoomEvent>> {
   let row = sqlx::query(
-    "SELECT id, room_code, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp
+    "SELECT id, room_code, sequence, kind, agent, content, reasoning, detail, timestamp
      FROM room_events
      WHERE id = ? AND kind = 'inline_note'",
   )
@@ -375,10 +372,10 @@ pub async fn load_inline_note(
 }
 
 /// Copies every event from `source` into `target`, preserving sequence
-/// numbers, kinds, content, reasoning, tool calls, and timestamps. Used by
-/// the room-clone endpoint when the user opts to carry chat history into
-/// the new room. Run inside a transaction so a partial copy never leaves
-/// the clone with a half-populated transcript.
+/// numbers, kinds, content, reasoning, detail, and timestamps. Used by the
+/// room-clone endpoint when the user opts to carry chat history into the
+/// new room. Run inside a transaction so a partial copy never leaves the
+/// clone with a half-populated transcript.
 pub async fn clone_room_events(
   pool: &SqlitePool,
   source_code: &str,
@@ -387,8 +384,8 @@ pub async fn clone_room_events(
   let mut tx = pool.begin().await.context("failed to begin clone tx")?;
   sqlx::query(
     "INSERT INTO room_events
-        (room_code, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp)
-     SELECT ?, sequence, kind, agent, content, reasoning, detail, tool_calls, timestamp
+        (room_code, sequence, kind, agent, content, reasoning, detail, timestamp)
+     SELECT ?, sequence, kind, agent, content, reasoning, detail, timestamp
      FROM room_events
      WHERE room_code = ?
      ORDER BY sequence ASC",
@@ -429,11 +426,6 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     .context("room_events.sequence missing")?;
   let kind_str: String =
     row.try_get("kind").context("room_events.kind missing")?;
-  let tool_calls_json: String = row
-    .try_get("tool_calls")
-    .context("room_events.tool_calls missing")?;
-  let tool_calls = serde_json::from_str(&tool_calls_json)
-    .context("room_events.tool_calls invalid JSON")?;
 
   Ok(RoomEvent {
     id: Some(id),
@@ -452,7 +444,6 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     detail: row
       .try_get("detail")
       .context("room_events.detail missing")?,
-    tool_calls,
     timestamp: parse_timestamp(&row, "timestamp")?,
   })
 }

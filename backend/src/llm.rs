@@ -30,7 +30,6 @@ use rig::providers::{
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde_json::{Value, json};
 
-use crate::app_state::AppState;
 use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
 use crate::runtime::{DebateHook, ReportHook, TurnRecorder};
@@ -71,7 +70,9 @@ fn openrouter_extra_params() -> Value {
 }
 
 /// Inputs for a debater turn (full tool set). Bundled into a single struct
-/// because the runtime always passes them together.
+/// because the runtime always passes them together. The hook carries the
+/// per-turn `state` / `room_code` / `author` context needed to persist
+/// inline-note breadcrumbs as tools fire.
 pub struct DebateTurnInputs {
   pub system_prompt: String,
   pub history: Vec<Message>,
@@ -82,12 +83,6 @@ pub struct DebateTurnInputs {
   pub do_nothing_tool: DoNothingTool,
   pub inline_note_tool: GetInlineNoteDetailTool,
   pub hook: DebateHook,
-  /// App state passed through so per-turn tools that emit `InlineNote` can
-  /// reach the room's WebSocket stream.
-  pub state: AppState,
-  pub room_code: String,
-  /// Author label embedded into inline notes (the persona's name).
-  pub author: String,
 }
 
 /// Inputs for the pause-gate tool loop. The model must call exactly one of
@@ -95,13 +90,15 @@ pub struct DebateTurnInputs {
 /// bubble) or `do_nothing` (no-op + inline note); `get_inline_note_detail`
 /// is also available so the gate can dig into a breadcrumb (e.g. a
 /// Python-run traceback) before deciding. The gate never streams tokens
-/// to the UI; tool calls carry the entire decision.
+/// to the UI, but the hook still persists one inline-note breadcrumb per
+/// tool call so the timeline reflects what happened.
 pub struct PauseGateInputs {
   pub system_prompt: String,
   pub user_prompt: String,
   pub pause_tool: PauseRoomTool,
   pub do_nothing_tool: DoNothingTool,
   pub inline_note_tool: GetInlineNoteDetailTool,
+  pub hook: DebateHook,
 }
 
 /// Inputs for the resume-gate tool loop. Mirror of [`PauseGateInputs`] for
@@ -113,6 +110,7 @@ pub struct ResumeGateInputs {
   pub resume_tool: ResumeRoomTool,
   pub do_nothing_tool: DoNothingTool,
   pub inline_note_tool: GetInlineNoteDetailTool,
+  pub hook: DebateHook,
 }
 
 /// Inputs for the leader steering turn. Streams tokens via the hook and
@@ -411,13 +409,7 @@ where
   let agent = builder
     .preamble(&inputs.system_prompt)
     .tool(WebFetchTool::new())
-    .tool(RunPythonTool::new(
-      inputs.workspace.clone(),
-      inputs.runner,
-      inputs.state,
-      inputs.room_code,
-      inputs.author,
-    ))
+    .tool(RunPythonTool::new(inputs.workspace.clone(), inputs.runner))
     .tool(ListSubjectFoldersTool::new(inputs.workspace.clone()))
     .tool(CreateSubjectFolderTool::new(inputs.workspace.clone()))
     .tool(ListFilesTool::new(inputs.workspace.clone()))
@@ -429,7 +421,9 @@ where
     .build();
 
   let reasoning_stream = inputs.hook.stream().clone();
-  let reasoning_turn_id = inputs.hook.turn_id().clone();
+  let Some(reasoning_turn_id) = inputs.hook.turn_id().cloned() else {
+    return Err(anyhow!("debate turn hook is missing its draft turn id"));
+  };
   let reasoning_recorder = inputs.hook.recorder();
 
   let mut stream = agent
@@ -478,7 +472,9 @@ where
     .tool(inputs.inline_note_tool)
     .build();
   let reasoning_stream = inputs.hook.stream().clone();
-  let reasoning_turn_id = inputs.hook.turn_id().clone();
+  let Some(reasoning_turn_id) = inputs.hook.turn_id().cloned() else {
+    return Err(anyhow!("steering turn hook is missing its draft turn id"));
+  };
   let reasoning_recorder = inputs.hook.recorder();
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
@@ -511,8 +507,9 @@ where
 /// `do_nothing` and let the model pick exactly one to terminate. The
 /// `get_inline_note_detail` tool is also attached so the gate can dig
 /// into a breadcrumb before deciding. The terminating tools own their
-/// side effects (bubble + debate-state flip for pause; inline note for
-/// nothing), so we discard the assistant's text reply.
+/// side effects (bubble + debate-state flip for pause; nothing more for
+/// `do_nothing`), so we discard the assistant's text reply. The gate hook
+/// persists one inline-note breadcrumb per tool call.
 async fn run_pause_gate_with_builder<M>(
   builder: AgentBuilder<M>,
   inputs: PauseGateInputs,
@@ -528,6 +525,7 @@ where
     .build();
   agent
     .prompt(inputs.user_prompt)
+    .with_hook(inputs.hook)
     .max_turns(MAX_TOOL_ROUNDS_PER_TURN)
     .await
     .map_err(|e| anyhow!(e.to_string()))?;
@@ -550,6 +548,7 @@ where
     .build();
   agent
     .prompt(inputs.user_prompt)
+    .with_hook(inputs.hook)
     .max_turns(MAX_TOOL_ROUNDS_PER_TURN)
     .await
     .map_err(|e| anyhow!(e.to_string()))?;

@@ -12,14 +12,9 @@
 //! - The room's `python_timeout_seconds` governs the actual script run
 //!   only; lint/type stages have a fixed short cap.
 
-use crate::app_state::AppState;
-use crate::db;
-use crate::error::ReportError;
-use crate::models::{RoomEvent, RoomEventKind};
 use crate::python_runner::{PythonRunResult, PythonRunner, StageResult};
-use crate::streaming::{WsEvent, new_turn_id};
+use crate::tools::InlineNote;
 use crate::workspace::RoomWorkspace;
-use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -28,39 +23,22 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use thiserror::Error;
 
-const NAME: &str = "run_python";
-const INLINE_NOTE_SUCCESS: &str = "Python script run success";
-const INLINE_NOTE_FAIL: &str = "Python script run fail";
+pub const NAME: &str = "run_python";
+pub const INLINE_NOTE_SUCCESS: &str = "Python script run success";
+pub const INLINE_NOTE_FAIL: &str = "Python script run fail";
 
 /// Tool that delegates to a [`PythonRunner`]. One instance per room/turn.
-/// On every call the tool also emits an `InlineNote` summarizing the run so
-/// the timeline shows whether the script went green end-to-end (or where it
-/// got stuck), with the per-stage stdout/stderr available in the detail.
+/// The runtime's [`crate::runtime::DebateHook`] formats the inline-note
+/// breadcrumb after the call returns; the tool only owns the actual run.
 #[derive(Clone)]
 pub struct RunPythonTool {
   workspace: RoomWorkspace,
   runner: PythonRunner,
-  state: AppState,
-  room_code: String,
-  /// Author label used for the inline note. Personas pass their own name.
-  author: String,
 }
 
 impl RunPythonTool {
-  pub fn new(
-    workspace: RoomWorkspace,
-    runner: PythonRunner,
-    state: AppState,
-    room_code: String,
-    author: String,
-  ) -> Self {
-    Self {
-      workspace,
-      runner,
-      state,
-      room_code,
-      author,
-    }
+  pub fn new(workspace: RoomWorkspace, runner: PythonRunner) -> Self {
+    Self { workspace, runner }
   }
 }
 
@@ -80,7 +58,7 @@ pub struct RunPythonArgs {
   pub args: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RunPythonOutput {
   pub script_path: String,
   pub result: PythonRunResult,
@@ -162,7 +140,6 @@ impl Tool for RunPythonTool {
       .run(&relative, &args.args)
       .await
       .map_err(RunPythonError::from_anyhow)?;
-    self.emit_inline_note(&result).await;
     Ok(RunPythonOutput {
       script_path: relative.to_string_lossy().replace('\\', "/"),
       result,
@@ -170,42 +147,33 @@ impl Tool for RunPythonTool {
   }
 }
 
-impl RunPythonTool {
-  async fn emit_inline_note(&self, result: &PythonRunResult) {
-    let text = if result.overall_ok {
-      INLINE_NOTE_SUCCESS
-    } else {
-      INLINE_NOTE_FAIL
+/// Builds the inline-note attached to a `run_python` invocation. The label
+/// reflects whether the pipeline went green end-to-end; the detail carries
+/// every stage's stdout/stderr so a user clicking the breadcrumb sees the
+/// same trace the model received.
+pub fn format_inline_note(_args: &str, result: &str, ok: bool) -> InlineNote {
+  if !ok {
+    return InlineNote {
+      text: INLINE_NOTE_FAIL.to_string(),
+      detail: result.to_string(),
     };
-    let handle = {
-      let handles = self.state.room_handles.read().await;
-      handles.get(&self.room_code).cloned()
-    };
-    let Some(handle) = handle else {
-      return;
-    };
-    let draft = RoomEvent {
-      id: None,
-      room_code: self.room_code.clone(),
-      sequence: handle.allocate_event_sequence(),
-      kind: RoomEventKind::InlineNote,
-      agent: Some(self.author.clone()),
-      content: text.to_string(),
-      reasoning: String::new(),
-      detail: format_run_detail(result),
-      tool_calls: Vec::new(),
-      timestamp: Utc::now(),
-    };
-    let event = db::insert_event(&self.state.db, &draft)
-      .await
-      .report()
-      .unwrap_or_else(|| draft.clone());
-
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
-    stream.send(WsEvent::MessageAdded {
-      turn_id: new_turn_id(),
-      message: event,
-    });
+  }
+  match serde_json::from_str::<RunPythonOutput>(result) {
+    Ok(parsed) => {
+      let text = if parsed.result.overall_ok {
+        INLINE_NOTE_SUCCESS
+      } else {
+        INLINE_NOTE_FAIL
+      };
+      InlineNote {
+        text: text.to_string(),
+        detail: format_run_detail(&parsed.result),
+      }
+    }
+    Err(_) => InlineNote {
+      text: INLINE_NOTE_SUCCESS.to_string(),
+      detail: result.to_string(),
+    },
   }
 }
 

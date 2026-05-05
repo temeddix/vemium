@@ -11,6 +11,7 @@ use crate::db;
 use crate::error::ReportError;
 use crate::models::{DebateState, RoomEvent, RoomEventKind};
 use crate::streaming::{WsEvent, new_turn_id};
+use crate::tools::InlineNote;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -18,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-const NAME: &str = "pause_room";
+pub const NAME: &str = "pause_room";
+pub const INLINE_NOTE_TEXT: &str = "Paused debate";
+pub const INLINE_NOTE_FAIL_TEXT: &str = "Pause failed";
 /// Stable agent label written to `room_events.agent`. Always plain
 /// "Leader"; the gate context (steering / on-demand / pause / resume) is
 /// surfaced via a preceding inline note rather than baked into the name.
@@ -124,7 +127,6 @@ impl Tool for PauseRoomTool {
       content: note,
       reasoning: String::new(),
       detail: String::new(),
-      tool_calls: Vec::new(),
       timestamp: Utc::now(),
     };
     let event = db::insert_event(&self.state.db, &draft)
@@ -161,5 +163,22 @@ impl Tool for PauseRoomTool {
     });
 
     Ok(PauseRoomOutput { acknowledged: true })
+  }
+}
+
+/// Builds the inline-note attached to a `pause_room` invocation. The
+/// reasoning lives on the leader-bubble row the tool persisted directly,
+/// so the breadcrumb only carries the action label and (on failure) the
+/// error text.
+pub fn format_inline_note(_args: &str, result: &str, ok: bool) -> InlineNote {
+  if !ok {
+    return InlineNote {
+      text: INLINE_NOTE_FAIL_TEXT.to_string(),
+      detail: result.to_string(),
+    };
+  }
+  InlineNote {
+    text: INLINE_NOTE_TEXT.to_string(),
+    detail: String::new(),
   }
 }

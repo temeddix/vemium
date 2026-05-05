@@ -6,7 +6,6 @@ import type {
   CreateRoomRequest,
   Draft,
   DraftKind,
-  DraftToolCall,
   Message,
   ProviderConfig,
   ProviderModelOption,
@@ -505,32 +504,20 @@ export class DashboardStore {
         this.#mutateView((view) =>
           mapDraft(view, event.turnId, (draft) => ({
             ...draft,
-            toolCalls: [...draft.toolCalls, {
-              callId: event.callId,
-              tool: event.tool,
-              argsPreview: event.argsPreview,
-              status: "running",
-              outputPreview: null,
-              durationMs: null,
-            }],
+            runningTool: event.tool,
           }))
         );
         break;
       case "draftToolCompleted":
         this.#mutateView((view) =>
-          mapDraft(view, event.turnId, (draft) => ({
-            ...draft,
-            toolCalls: draft.toolCalls.map((call) =>
-              call.callId === event.callId
-                ? {
-                  ...call,
-                  status: event.ok ? "ok" : "error",
-                  outputPreview: event.outputPreview,
-                  durationMs: event.durationMs,
-                }
-                : call
-            ),
-          }))
+          mapDraft(
+            view,
+            event.turnId,
+            (draft) =>
+              draft.runningTool === event.tool
+                ? { ...draft, runningTool: null }
+                : draft,
+          )
         );
         break;
       case "draftFailed":
@@ -655,7 +642,7 @@ function emptyDraft(turnId: string, agent: string, kind: DraftKind): Draft {
     kind,
     content: "",
     reasoning: "",
-    toolCalls: [],
+    runningTool: null,
     status: "streaming",
     error: null,
   };
@@ -781,8 +768,3 @@ function toReportBuffer(report: RoomReport): ReportBuffer {
     completedAt: report.completedAt,
   };
 }
-
-// `DraftToolCall` is referenced indirectly through `Draft.toolCalls`. Re-
-// export the alias so consumers (room-detail.ts) can keep their imports
-// minimal even though we never construct one directly here.
-export type { DraftToolCall };

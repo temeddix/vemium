@@ -11,12 +11,12 @@
 //!   card. Drafts are not persisted; if a client reconnects mid-turn, the
 //!   prefix it missed is gone — the draft simply renders cut-off, starting
 //!   from whatever tokens arrive after subscribe.
-//! - **Messages** are authoritative. Once a turn finishes, the orchestrator
-//!   inserts a single `room_events` row containing the final text, the
-//!   reasoning trace, and every tool call from that turn (inline). It then
-//!   emits exactly one [`WsEvent::MessageAdded`] frame. The frontend uses
-//!   that frame to retire the matching draft and append the message to the
-//!   chat list.
+//! - **Messages** are authoritative. The orchestrator inserts one
+//!   `room_events` row per finalized event — the assistant bubble at turn
+//!   end (carrying its reasoning trace inline) plus a separate `inline_note`
+//!   row for every tool invocation as it completes — and emits one
+//!   [`WsEvent::MessageAdded`] frame per row. The frontend uses these to
+//!   retire matching drafts and append the rows to the chat list.
 //!
 //! Sequence numbers live on messages only — they're the unit of truth that
 //! survives reconnects.
@@ -192,11 +192,6 @@ impl RoomStreamInner {
 /// correlate a draft card with the eventual [`WsEvent::MessageAdded`].
 pub type TurnId = String;
 
-/// Identifier of a single tool invocation within a turn. Stable across the
-/// matching `DraftToolStarted` / `DraftToolCompleted` pair so the frontend
-/// can update the right entry in the draft's tool list.
-pub type ToolCallId = String;
-
 /// Identifier of an in-flight report row in the WS stream. While a report
 /// is streaming, we use a stable string so the frontend can attach token
 /// deltas; the value mirrors the database `id` for finalized reports.
@@ -246,31 +241,25 @@ pub enum WsEvent {
   /// One token of the draft's reasoning trace, for models that emit
   /// chain-of-thought separately. Same drop semantics as `DraftText`.
   DraftReasoning { turn_id: TurnId, delta: String },
-  /// A tool invocation began as part of this draft. The frontend appends
-  /// it to the draft card's tool list keyed by `callId`.
-  DraftToolStarted {
-    turn_id: TurnId,
-    call_id: ToolCallId,
-    tool: String,
-    args_preview: String,
-  },
-  /// The matching tool call finished. `ok = false` means it errored; the
-  /// output preview is truncated to keep the WS payload compact.
-  DraftToolCompleted {
-    turn_id: TurnId,
-    call_id: ToolCallId,
-    tool: String,
-    ok: bool,
-    output_preview: String,
-    duration_ms: u64,
-  },
+  /// A tool invocation began as part of this draft. The frontend shows a
+  /// brief "running `<tool>`" indicator next to the draft until the
+  /// matching `DraftToolCompleted` arrives. Rig dispatches tools serially,
+  /// so at most one tool is running per draft at a time.
+  DraftToolStarted { turn_id: TurnId, tool: String },
+  /// The current tool call finished. The persisted inline-note row is
+  /// broadcast separately as `MessageAdded`; this frame just clears the
+  /// running-tool indicator on the matching draft.
+  DraftToolCompleted { turn_id: TurnId, tool: String },
   /// The turn ended in error before producing a finalized message. The
   /// frontend drops the draft and may surface `error` in a toast / log.
   DraftFailed { turn_id: TurnId, error: String },
 
-  /// A finalized message has been persisted. `turnId` identifies the draft
-  /// that produced it (so the frontend can retire that card); `message`
-  /// carries the authoritative content with reasoning + tool calls inline.
+  /// A finalized event row has been persisted. `turnId` identifies the
+  /// draft that produced it (so the frontend can retire that card);
+  /// `message` carries the authoritative content. Used both for chat
+  /// bubbles (the assistant's reply with reasoning) and for `inline_note`
+  /// rows the orchestrator's hook appends as tool calls finish — those
+  /// arrive with an arbitrary `turnId` not tied to any visible draft.
   MessageAdded { turn_id: TurnId, message: RoomEvent },
 
   /// A periodic leader report has begun streaming.

@@ -12,13 +12,15 @@
 
 use crate::app_state::AppState;
 use crate::db;
+use crate::tools::InlineNote;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-const NAME: &str = "get_inline_note_detail";
+pub const NAME: &str = "get_inline_note_detail";
+pub const INLINE_NOTE_FAIL_TEXT: &str = "Note lookup failed";
 
 /// Embeds enough context to load an inline-note row scoped to the calling
 /// room. Constructed fresh per turn; cheap to clone.
@@ -41,7 +43,7 @@ pub struct GetInlineNoteDetailArgs {
   pub id: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GetInlineNoteDetailOutput {
   pub id: i64,
   pub agent: Option<String>,
@@ -104,4 +106,33 @@ impl Tool for GetInlineNoteDetailTool {
       timestamp: event.timestamp.to_rfc3339(),
     })
   }
+}
+
+/// Builds the inline-note attached to a `get_inline_note_detail`
+/// invocation. The label embeds the looked-up note id so a user scanning
+/// the timeline can see what was being researched without clicking; the
+/// detail body shows the full lookup result.
+pub fn format_inline_note(args: &str, result: &str, ok: bool) -> InlineNote {
+  let id = serde_json::from_str::<GetInlineNoteDetailArgs>(args)
+    .map(|a| a.id)
+    .ok();
+  if !ok {
+    let text = match id {
+      Some(id) => format!("Failed to look up note #{id}"),
+      None => INLINE_NOTE_FAIL_TEXT.to_string(),
+    };
+    return InlineNote {
+      text,
+      detail: result.to_string(),
+    };
+  }
+  let text = match id {
+    Some(id) => format!("Looked up note #{id}"),
+    None => "Looked up an inline note".to_string(),
+  };
+  let detail = serde_json::from_str::<GetInlineNoteDetailOutput>(result)
+    .ok()
+    .map(|out| out.detail)
+    .unwrap_or_default();
+  InlineNote { text, detail }
 }
