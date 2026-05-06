@@ -1,10 +1,7 @@
 //! `request_leader_decision` tool: a debater calls this when it wants the
 //! leader to weigh in. The leader runs a fresh sub-turn against the high
 //! model with its own [`TurnSession`], producing its own thinking /
-//! balloon / inline-note rows. The tool wraps the sub-turn in a single
-//! breadcrumb (`Appeared on demand`) so the user can tell which leader
-//! turns were debater-initiated, and returns the leader's final text to
-//! the calling debater.
+//! balloon / inline-note rows.
 
 use crate::app_state::AppState;
 use crate::event_log::EventLog;
@@ -21,7 +18,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub const NAME: &str = "request_leader_decision";
-pub const INLINE_NOTE_TEXT: &str = "Appeared on demand";
+pub const INLINE_NOTE_TEXT: &str = "Requested a decision from the leader";
 pub const INLINE_NOTE_FAIL_TEXT: &str = "Leader request failed";
 
 #[derive(Clone)]
