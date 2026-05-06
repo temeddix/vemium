@@ -16,6 +16,10 @@ declare global {
   }
 }
 
+interface DialogElement extends HTMLElement {
+  open: boolean;
+}
+
 /**
  * Top-level page for `/`. Lists every loaded room and lets the user open
  * one (navigates to `/room/:code`), create a new one (opens the
@@ -38,6 +42,14 @@ export class RoomListPage extends LitElement {
 
   #cloneDialogRef: Ref<HTMLElementTagNameMap["te-clone-room-dialog"]> =
     createRef();
+
+  #deleteDialogRef: Ref<DialogElement> = createRef();
+
+  @state()
+  private accessor pendingDelete: Room | null = null;
+
+  @state()
+  private accessor isDeleting = false;
 
   #unsubscribe: (() => void) | null = null;
 
@@ -166,6 +178,23 @@ export class RoomListPage extends LitElement {
       color: var(--wa-color-text-quiet);
       font-size: 0.95rem;
     }
+
+    .delete-summary {
+      margin: 0;
+      font-size: 0.9rem;
+      line-height: 1.5;
+      color: var(--wa-color-text-normal);
+    }
+
+    .delete-topic {
+      font-weight: 600;
+    }
+
+    .footer-row {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: flex-end;
+    }
   `;
 
   override connectedCallback(): void {
@@ -226,7 +255,43 @@ export class RoomListPage extends LitElement {
           .store="${this.store}"
           @te-cloned="${this.#onRoomCloned}"
         ></te-clone-room-dialog>
+        ${this.#renderDeleteDialog()}
       </div>
+    `;
+  }
+
+  #renderDeleteDialog() {
+    const room = this.pendingDelete;
+    const sourceLabel = room === null
+      ? ""
+      : (room.topic.trim() === "" ? room.code : room.topic);
+    return html`
+      <wa-dialog ${ref(this.#deleteDialogRef)} label="Delete room">
+        ${room === null ? nothing : html`
+          <p class="delete-summary">
+            Permanently delete
+            <span class="delete-topic">${sourceLabel}</span>? Chat history, reports, and
+            workspace files for this room will be removed. This cannot be undone.
+          </p>
+        `}
+        <div slot="footer" class="footer-row">
+          <wa-button
+            size="small"
+            ?disabled="${this.isDeleting}"
+            @click="${this.#onDeleteCancel}"
+          >
+            Cancel
+          </wa-button>
+          <wa-button
+            size="small"
+            variant="danger"
+            ?disabled="${this.isDeleting}"
+            @click="${this.#onDeleteConfirm}"
+          >
+            Delete
+          </wa-button>
+        </div>
+      </wa-dialog>
     `;
   }
 
@@ -269,7 +334,12 @@ export class RoomListPage extends LitElement {
                   <wa-dropdown-item
                     @click="${(): void => this.#openClone(room)}"
                   >
-                    Clone
+                    Duplicate
+                  </wa-dropdown-item>
+                  <wa-dropdown-item
+                    @click="${(): void => this.#openDelete(room)}"
+                  >
+                    Delete
                   </wa-dropdown-item>
                 </wa-dropdown>
               </span>
@@ -322,6 +392,38 @@ export class RoomListPage extends LitElement {
   #onRoomCloned(event: CustomEvent<{ room: Room }>): void {
     this.#navigateToRoom(event.detail.room.code);
   }
+
+  #openDelete(room: Room): void {
+    this.pendingDelete = room;
+    this.isDeleting = false;
+    const dialog = this.#deleteDialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = true;
+    }
+  }
+
+  #onDeleteCancel = (): void => {
+    const dialog = this.#deleteDialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = false;
+    }
+    this.pendingDelete = null;
+  };
+
+  #onDeleteConfirm = async (): Promise<void> => {
+    const room = this.pendingDelete;
+    if (room === null || this.isDeleting) {
+      return;
+    }
+    this.isDeleting = true;
+    await this.store.deleteRoom(room.code);
+    this.isDeleting = false;
+    const dialog = this.#deleteDialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = false;
+    }
+    this.pendingDelete = null;
+  };
 
   #bindStore(): void {
     if (this.#unsubscribe !== null || this.store === undefined) {

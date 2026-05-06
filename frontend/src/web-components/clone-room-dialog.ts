@@ -116,7 +116,7 @@ export class CloneRoomDialog extends LitElement {
   override render() {
     const room = this.room;
     return html`
-      <wa-dialog ${ref(this.#dialogRef)} label="Clone room">
+      <wa-dialog ${ref(this.#dialogRef)} label="Duplicate room">
         ${this.errorText !== null
           ? html`
             <div class="error-banner">${this.errorText}</div>
@@ -135,7 +135,7 @@ export class CloneRoomDialog extends LitElement {
             ?disabled="${this.busy}"
             @click="${this.#onConfirm}"
           >
-            Clone
+            Duplicate
           </wa-button>
         </div>
       </wa-dialog>
@@ -148,8 +148,9 @@ export class CloneRoomDialog extends LitElement {
       <div class="form-grid">
         <p class="summary">
           Create a new room with the same settings as
-          <span class="summary-topic">${sourceLabel}</span>. The clone starts active with
-          a freshly generated code; reports and workspace files are not carried over.
+          <span class="summary-topic">${sourceLabel}</span>. The duplicate starts active
+          with a freshly generated code; reports and workspace files are not carried
+          over.
         </p>
         <label class="form-field">
           <span class="form-label">
@@ -163,8 +164,8 @@ export class CloneRoomDialog extends LitElement {
           </span>
           <wa-tooltip for="tip-clone-history" placement="top">
             When enabled, every persisted message from the source room is copied into
-            the clone so the personas resume from the same transcript. Otherwise the
-            clone starts with an empty log.
+            the duplicate so the personas resume from the same transcript. Otherwise
+            the duplicate starts with an empty log.
           </wa-tooltip>
           <wa-select
             size="small"
@@ -200,7 +201,7 @@ export class CloneRoomDialog extends LitElement {
     });
     this.busy = false;
     if (cloned === null) {
-      this.errorText = "Clone failed. See the error banner for details.";
+      this.errorText = "Duplicate failed. See the error banner for details.";
       return;
     }
     const dialog = this.#dialogRef.value;

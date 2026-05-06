@@ -267,14 +267,14 @@ export class DashboardStore {
       );
       if (!response.ok) {
         const text = await response.text();
-        this.#patch({ errorMessage: `Clone failed: ${text}` });
+        this.#patch({ errorMessage: `Duplicate failed: ${text}` });
         return null;
       }
       const payload = (await response.json()) as { room: Room };
       await this.loadRooms();
       return payload.room;
     } catch {
-      this.#patch({ errorMessage: "Network error while cloning room." });
+      this.#patch({ errorMessage: "Network error while duplicating room." });
       return null;
     }
   }
