@@ -43,6 +43,9 @@ export class ChatMessage extends LitElement {
   static override styles = css`
     :host {
       display: block;
+      --avatar-size: 2rem;
+      --header-gap: 0.5rem;
+      --content-indent: 2.5rem;
     }
 
     .row {
@@ -60,13 +63,14 @@ export class ChatMessage extends LitElement {
     .header {
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: var(--header-gap);
       min-width: 0;
+      max-width: 100%;
     }
 
     .avatar {
-      width: 2rem;
-      height: 2rem;
+      width: var(--avatar-size);
+      height: var(--avatar-size);
       border-radius: 50%;
       display: grid;
       place-items: center;
@@ -84,6 +88,7 @@ export class ChatMessage extends LitElement {
     }
 
     .bubble {
+      margin-left: var(--content-indent);
       padding: 0.3rem 1.2rem;
       border-radius: 1rem;
       background: var(--wa-color-neutral-fill-quiet);
@@ -92,11 +97,13 @@ export class ChatMessage extends LitElement {
       font-size: 0.92rem;
       word-wrap: break-word;
       overflow-wrap: anywhere;
-      max-width: 36rem;
+      max-width: min(36rem, calc(100% - var(--content-indent)));
       min-width: 0;
     }
 
     .row.is-self .bubble {
+      margin-left: 0;
+      max-width: min(36rem, 100%);
       background: var(--wa-color-brand-fill-loud);
       color: var(--wa-color-brand-on-loud);
     }
@@ -148,7 +155,7 @@ export class ChatMessage extends LitElement {
     }
 
     .body {
-      margin: 0 0 0 2.5rem;
+      margin-left: var(--content-indent);
       padding: 0.3rem 0.5rem;
       background: transparent;
       border-left: var(--wa-border-width-s) solid
@@ -157,15 +164,16 @@ export class ChatMessage extends LitElement {
       font-size: 0.74rem;
       line-height: 1.45;
       color: var(--wa-color-text-quiet);
+      max-width: min(36rem, calc(100% - var(--content-indent)));
       max-height: 16rem;
-      overflow-y: auto;
+      overflow: auto;
       white-space: pre-wrap;
       word-wrap: break-word;
       overflow-wrap: anywhere;
     }
 
     .spinner {
-      margin-left: 2.5rem;
+      margin-left: var(--content-indent);
       font-size: 0.85rem;
     }
   `;
