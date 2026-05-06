@@ -6,8 +6,8 @@
 //!    persona, runs one streaming turn through the low-tier model with tool
 //!    support, sleeps `chat_interval_seconds`, and repeats forever.
 //! 2. **Steering tick** ([`run_steering_loop`]): every
-//!    `steering_interval_seconds`, the high model emits a `leader_note`
-//!    that compliments / criticizes / redirects the debate.
+//!    `steering_interval_seconds`, the high model emits a leader turn that
+//!    compliments / criticizes / redirects the debate.
 //! 3. **Report tick** ([`run_report_loop`]): on every firing of
 //!    `report_schedule_cron`, the high model writes a long-form report
 //!    streamed token-by-token into a `room_reports` row.
@@ -15,34 +15,31 @@
 //!    waits for the next configured cron time and asks the leader whether
 //!    to resume.
 //!
-//! All loops honor the room's `paused` and `stopped` flags. They observe
-//! changes at task-natural boundaries (turn end, timer wake) - nothing is
-//! preempted mid-LLM-call.
-//!
-//! Provider configuration is process-global ([`crate::models::AppSettings`]).
-//! The orchestrator snapshots `low`/`high` at the start of each LLM call so
-//! a settings update lands at the next turn rather than mid-stream.
+//! Every row in the room timeline (chat bubbles, thinking bursts, tool
+//! inline notes) flows through [`crate::event_log::EventLog`]. Bubble and
+//! thinking rows are produced by [`TurnSession`] off the rig stream loop;
+//! tool inline notes are produced by each tool from inside its own
+//! `call()`. This keeps the orchestrator a thin segmenter and frees the
+//! protocol from a separate "draft" concept entirely.
 
 use crate::app_state::{AppState, RoomHandle};
 use crate::db;
 use crate::error::ReportError;
+use crate::event_log::{EventLog, RowHandle};
 use crate::llm::{
   DebateTurnInputs, NoToolTurnInputs, ResumeGateInputs, SteeringTurnInputs,
   build_chat_client,
 };
 use crate::models::{
   DebateState, ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind,
-  RoomState,
+  RoomState, RowStatus,
 };
 use crate::python_runner::PythonRunner;
-use crate::streaming::{
-  ReportId, RoomStream, TurnId, TurnKind, WsEvent, new_turn_id, report_id_for,
-};
-use crate::tools::do_nothing::{self, DoNothingTool};
-use crate::tools::format_tool_inline_note;
+use crate::streaming::{ReportId, RoomStream, WsEvent, report_id_for};
+use crate::tools::do_nothing::DoNothingTool;
 use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
-use crate::tools::pause_room::{self, LEADER_AGENT, PauseRoomTool};
+use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
 use crate::tools::resume_room::ResumeRoomTool;
 use crate::workspace::{DebateRoot, RoomWorkspace};
 use anyhow::{Context, Result};
@@ -57,7 +54,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-/// Persona definition for one of the rotating debaters.
 #[derive(Clone, Copy)]
 struct DebatePersona {
   name: &'static str,
@@ -79,25 +75,18 @@ const DEBATE_PERSONAS: [DebatePersona; 3] = [
   },
 ];
 
-/// Inline guidance appended to every chat turn's system prompt.
 const CHAT_FORMAT_GUARDRAIL: &str =
   include_str!("prompts/chat_format_guardrail.md");
 
 /// Reminder injected into every persona system prompt that consumes the
 /// transcript. Explains the inline-note breadcrumb syntax and the
-/// `get_inline_note_detail` lookup tool so personas know how to fetch the
-/// click-to-reveal body of a breadcrumb when its label is not enough.
+/// `get_inline_note_detail` lookup tool.
 const INLINE_NOTE_TOOL_HINT: &str = "Inline-note breadcrumbs in the \
   transcript are tagged `(inline-note #N by Author)`. The visible label is \
   usually enough context, but when you need the full body (e.g. the \
   traceback behind a `Python script run fail` note), call \
   `get_inline_note_detail` with `id=N`.";
 
-/// Inline-note label written before the leader's bubble on a periodic
-/// steering tick. The leader's `agent` field is always plain
-/// [`LEADER_AGENT`] now; this breadcrumb is what tells the user this
-/// particular bubble is the periodic nudge rather than a debater request
-/// or a gate decision.
 const STEERING_INLINE_NOTE: &str = "Appeared for steering";
 const KICKOFF_INLINE_NOTE: &str = "Opened with plan";
 const LEADER_KICKOFF_PROMPT: &str = include_str!("prompts/leader_kickoff.md");
@@ -109,10 +98,8 @@ const LEADER_RESUME_GATE_USER_PROMPT: &str =
   include_str!("prompts/leader_resume_gate_user.md");
 
 const DEFAULT_WAKE_LABEL: &str = "Every hour";
-/// On boot, brings every persisted room back online. Rooms in either
-/// [`RoomState::Deactivated`] or [`DebateState::Paused`] keep that state -
-/// the orchestrator starts but does not advance turns until the matching
-/// gate is flipped back.
+const THINKING_LABEL: &str = "Thinking";
+
 pub async fn restore_rooms(state: AppState) -> Result<()> {
   let rooms = db::load_all_rooms(&state.db).await?;
   for room in rooms {
@@ -121,8 +108,6 @@ pub async fn restore_rooms(state: AppState) -> Result<()> {
   Ok(())
 }
 
-/// Loads (or registers) the room into [`AppState`] and spawns its four
-/// background tasks.
 pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   let room_code = room.code.clone();
   let event_seq = db::max_event_sequence(&state.db, &room_code).await?;
@@ -173,6 +158,165 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   Ok(())
 }
 
+// -- Turn session ----------------------------------------------------------
+
+/// Shared per-turn row state. The orchestrator's stream loop and the rig
+/// hook both call into this to drive the segmentation between thinking
+/// rows and balloon rows. Tool calls cause the active row (if any) to
+/// close before the tool runs; the tool produces its own inline-note row
+/// out of band.
+pub struct TurnSession {
+  log: EventLog,
+  author: String,
+  bubble_kind: RoomEventKind,
+  active: Mutex<Option<ActiveRow>>,
+}
+
+enum ActiveRow {
+  Thinking(RowHandle),
+  Bubble(RowHandle),
+}
+
+impl TurnSession {
+  pub fn new(
+    log: EventLog,
+    author: String,
+    bubble_kind: RoomEventKind,
+  ) -> Self {
+    Self {
+      log,
+      author,
+      bubble_kind,
+      active: Mutex::new(None),
+    }
+  }
+
+  pub fn log(&self) -> &EventLog {
+    &self.log
+  }
+
+  pub fn author(&self) -> &str {
+    &self.author
+  }
+
+  /// Appends to the open thinking row, opening one (and closing any open
+  /// bubble) on first call.
+  pub async fn append_thinking(&self, delta: &str) {
+    if delta.is_empty() {
+      return;
+    }
+    let mut active = self.active.lock().await;
+    if let Some(ActiveRow::Thinking(row)) = active.as_ref() {
+      row.append_detail(delta).await;
+      return;
+    }
+    if let Some(ActiveRow::Bubble(row)) = active.take() {
+      row.finish(RowStatus::Done).await;
+    }
+    let row = self
+      .log
+      .start_row(
+        RoomEventKind::Thinking,
+        Some(self.author.clone()),
+        THINKING_LABEL.to_string(),
+        delta.to_string(),
+      )
+      .await;
+    *active = Some(ActiveRow::Thinking(row));
+  }
+
+  /// Appends to the open bubble row, opening one (and closing any open
+  /// thinking) on first call.
+  pub async fn append_text(&self, delta: &str) {
+    if delta.is_empty() {
+      return;
+    }
+    let mut active = self.active.lock().await;
+    if let Some(ActiveRow::Bubble(row)) = active.as_ref() {
+      row.append_content(delta).await;
+      return;
+    }
+    if let Some(ActiveRow::Thinking(row)) = active.take() {
+      row.finish(RowStatus::Done).await;
+    }
+    let row = self
+      .log
+      .start_row(
+        self.bubble_kind,
+        Some(self.author.clone()),
+        delta.to_string(),
+        String::new(),
+      )
+      .await;
+    *active = Some(ActiveRow::Bubble(row));
+  }
+
+  /// Closes any open row before a tool call begins, so the tool's
+  /// inline-note row appears after the model's pre-tool output.
+  pub async fn close_active(&self) {
+    let mut active = self.active.lock().await;
+    if let Some(row) = active.take() {
+      let handle = match row {
+        ActiveRow::Thinking(row) | ActiveRow::Bubble(row) => row,
+      };
+      handle.finish(RowStatus::Done).await;
+    }
+  }
+
+  /// Closes any open row at turn end. Idempotent; safe to call multiple
+  /// times. `status` applies only to the in-flight row, if any.
+  pub async fn finish(&self, status: RowStatus) {
+    let mut active = self.active.lock().await;
+    if let Some(row) = active.take() {
+      let handle = match row {
+        ActiveRow::Thinking(row) | ActiveRow::Bubble(row) => row,
+      };
+      handle.finish(status).await;
+    }
+  }
+}
+
+// -- Hook -----------------------------------------------------------------
+
+/// Thin bridge between rig's [`PromptHook`] callbacks and the per-turn
+/// row segmenter. Tool calls close the open row before the tool runs;
+/// each tool then owns its own inline-note row.
+#[derive(Clone)]
+pub struct DebateHook {
+  session: Arc<TurnSession>,
+}
+
+impl DebateHook {
+  pub fn new(session: Arc<TurnSession>) -> Self {
+    Self { session }
+  }
+}
+
+impl<M> PromptHook<M> for DebateHook
+where
+  M: CompletionModel + Clone,
+{
+  async fn on_text_delta(
+    &self,
+    text_delta: &str,
+    _aggregated_text: &str,
+  ) -> HookAction {
+    self.session.append_text(text_delta).await;
+    HookAction::cont()
+  }
+
+  async fn on_tool_call(
+    &self,
+    _tool_name: &str,
+    _tool_call_id: Option<String>,
+    _internal_call_id: &str,
+    _args: &str,
+  ) -> ToolCallHookAction {
+    self.session.close_active().await;
+    ToolCallHookAction::cont()
+  }
+}
+
 // -- Debate loop -----------------------------------------------------------
 
 async fn run_debate_loop(
@@ -216,12 +360,9 @@ async fn run_debate_loop(
       {
         tracing::warn!(%room_code, %error, "leader kickoff failed");
       }
-
-      let interval = snapshot.chat_interval_seconds.max(1);
-      tokio::select! {
-        _ = sleep(Duration::from_secs(interval)) => {}
-        _ = handle.stop_notify.notified() => return,
-        _ = handle.config_notify.notified() => continue,
+      sleep_until_next_turn(&handle, snapshot.chat_interval_seconds).await;
+      if handle.is_stopped() {
+        return;
       }
       continue;
     }
@@ -236,19 +377,22 @@ async fn run_debate_loop(
       tracing::warn!(%room_code, persona = %persona.name, %error, "chat turn failed");
     }
 
-    let interval = snapshot.chat_interval_seconds.max(1);
-    tokio::select! {
-      _ = sleep(Duration::from_secs(interval)) => {}
-      _ = handle.stop_notify.notified() => return,
-      _ = handle.config_notify.notified() => continue,
+    sleep_until_next_turn(&handle, snapshot.chat_interval_seconds).await;
+    if handle.is_stopped() {
+      return;
     }
   }
 }
 
-/// True when the room transcript contains no leader or debater turn
-/// yet — i.e. only user-injected messages, if anything. The runtime
-/// runs a one-off leader kickoff in that state so the debate opens with
-/// a traffic-control note instead of jumping straight into Researcher.
+async fn sleep_until_next_turn(handle: &RoomHandle, seconds: u64) {
+  let interval = seconds.max(1);
+  tokio::select! {
+    _ = sleep(Duration::from_secs(interval)) => {}
+    _ = handle.stop_notify.notified() => {}
+    _ = handle.config_notify.notified() => {}
+  }
+}
+
 fn needs_leader_kickoff(history: &[RoomEvent]) -> bool {
   !history.iter().any(|event| {
     matches!(
@@ -258,10 +402,6 @@ fn needs_leader_kickoff(history: &[RoomEvent]) -> bool {
   })
 }
 
-/// Runs one debater turn end-to-end. Builds the [`ChatClient`] for the
-/// process-wide low tier and delegates the agent build + stream loop to
-/// it; the runtime only sees the final assistant text once the stream
-/// completes; per-token deltas flow through the [`DebateHook`] passed in.
 async fn run_chat_turn(
   state: &AppState,
   handle: &RoomHandle,
@@ -278,13 +418,13 @@ async fn run_chat_turn(
   let schedule_label = wake_schedule_label(room);
 
   let stream = state.ensure_room_stream(&room.code).await;
-  let turn_id = new_turn_id();
-
-  stream.send(WsEvent::DraftStarted {
-    turn_id: turn_id.clone(),
-    agent: persona.name.to_string(),
-    kind: TurnKind::AgentChat,
-  });
+  let log =
+    EventLog::new(state.clone(), room.code.clone(), handle.clone(), stream);
+  let session = Arc::new(TurnSession::new(
+    log.clone(),
+    persona.name.to_string(),
+    RoomEventKind::AgentChat,
+  ));
 
   let runner =
     PythonRunner::new(workspace.clone(), room.python_timeout_seconds);
@@ -295,23 +435,21 @@ async fn run_chat_turn(
     high.clone(),
     preamble,
     schedule_label,
-  );
-  let do_nothing_tool = DoNothingTool::new();
-  let inline_note_tool =
-    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
-  let hook = DebateHook::for_draft(
-    turn_id.clone(),
-    stream.clone(),
-    state.clone(),
-    room.code.clone(),
+    log.clone(),
     persona.name.to_string(),
   );
-  let recorder = hook.recorder();
+  let do_nothing_tool =
+    DoNothingTool::new(log.clone(), persona.name.to_string());
+  let inline_note_tool = GetInlineNoteDetailTool::new(
+    state.clone(),
+    room.code.clone(),
+    log.clone(),
+    persona.name.to_string(),
+  );
 
   let client =
     build_chat_client(&low).context("failed to construct low-tier client")?;
-
-  let result = client
+  let outcome = client
     .run_debate_turn(DebateTurnInputs {
       system_prompt,
       history: history_messages,
@@ -321,316 +459,20 @@ async fn run_chat_turn(
       leader_tool,
       do_nothing_tool,
       inline_note_tool,
-      hook,
+      session: session.clone(),
     })
     .await;
 
-  let final_text = match result {
-    Ok(text) => text,
-    Err(error) => {
-      stream.send(WsEvent::DraftFailed {
-        turn_id,
-        error: error.to_string(),
-      });
-      return Err(error);
-    }
+  let status = match &outcome {
+    Ok(_) => RowStatus::Done,
+    Err(_) => RowStatus::Failed,
   };
-
-  let (reasoning, do_nothing_called) = recorder.snapshot().await;
-  let no_further_input = do_nothing_called;
-
-  // When `do_nothing` was called we discard any text the model also
-  // produced and retire the draft without persisting a bubble. The hook
-  // already emitted the inline-note breadcrumb when the tool returned.
-  if no_further_input {
-    stream.send(WsEvent::DraftFailed {
-      turn_id,
-      error: String::new(),
-    });
-    return Ok(());
-  }
-
-  let trimmed = final_text.trim().to_string();
-  if trimmed.is_empty() {
-    stream.send(WsEvent::DraftFailed {
-      turn_id,
-      error: "model produced no text after tool loop".to_string(),
-    });
-    return Ok(());
-  }
-
-  let sequence = handle.allocate_event_sequence();
-  let timestamp = Utc::now();
-  let draft = RoomEvent {
-    id: None,
-    room_code: room.code.clone(),
-    sequence,
-    kind: RoomEventKind::AgentChat,
-    agent: Some(persona.name.to_string()),
-    content: trimmed,
-    reasoning,
-    detail: String::new(),
-    timestamp,
-  };
-  let event = db::insert_event(&state.db, &draft)
-    .await
-    .report()
-    .unwrap_or_else(|| draft.clone());
-
-  stream.send(WsEvent::MessageAdded {
-    turn_id,
-    message: event,
-  });
-  Ok(())
+  session.finish(status).await;
+  outcome.map(|_| ())
 }
 
-// -- Hook -----------------------------------------------------------------
+// -- Resume gate -----------------------------------------------------------
 
-/// Bridge between Rig's [`PromptHook`] callbacks and our WebSocket /
-/// persistence layer. One instance per turn.
-///
-/// Two distinct uses:
-///
-/// - **Streaming flows** (debater turn, leader steering): construct via
-///   [`DebateHook::for_draft`] with the draft's `turn_id`. The hook
-///   forwards `DraftText` deltas live and brackets tool invocations with
-///   `DraftToolStarted` / `DraftToolCompleted` so the UI can show a
-///   spinner while a tool runs.
-/// - **Gate flows** (pause / resume gates): construct via
-///   [`DebateHook::for_gate`]. There is no draft bubble in flight, so
-///   `Draft*` frames are suppressed.
-///
-/// In both cases the hook persists one `inline_note` row per tool result
-/// (using the per-tool formatter from [`format_tool_inline_note`]) and
-/// broadcasts it as a `MessageAdded` lifecycle frame. Reasoning deltas
-/// and a `do_nothing_called` flag are accumulated in [`TurnRecorder`] so
-/// the orchestrator can finish the turn (or skip the bubble) when the
-/// stream drains.
-#[derive(Clone)]
-pub struct DebateHook {
-  /// Some when this hook is attached to a streaming draft. None for
-  /// gate-only runs that don't have a draft bubble in flight.
-  turn_id: Option<TurnId>,
-  stream: Arc<RoomStream>,
-  state: AppState,
-  room_code: String,
-  /// Author label written to inline-note rows for tool calls during this
-  /// turn (e.g. the persona's name, or `LEADER_AGENT` for gate runs).
-  author: String,
-  recorder: Arc<TurnRecorder>,
-}
-
-/// Per-turn accumulator owned by both the [`DebateHook`] and the
-/// orchestrator. Reasoning deltas append to a string; the
-/// `do_nothing_called` and `pause_room_called` flags flip on the first
-/// successful invocation of those tools so the runtime can suppress the
-/// bubble after the turn.
-#[derive(Default)]
-pub struct TurnRecorder {
-  inner: Mutex<TurnRecorderInner>,
-}
-
-#[derive(Default)]
-struct TurnRecorderInner {
-  reasoning: String,
-  do_nothing_called: bool,
-  pause_room_called: bool,
-}
-
-impl TurnRecorder {
-  /// Returns `(reasoning, do_nothing_called)` for this turn. Called once
-  /// at turn end after the LLM stream has fully drained.
-  pub async fn snapshot(&self) -> (String, bool) {
-    let inner = self.inner.lock().await;
-    (inner.reasoning.clone(), inner.do_nothing_called)
-  }
-
-  /// Returns `true` if the leader called `pause_room` successfully
-  /// during this turn. Used by the steering / kickoff paths to suppress
-  /// their own leader bubble when the pause tool already wrote one.
-  pub async fn pause_room_called(&self) -> bool {
-    self.inner.lock().await.pause_room_called
-  }
-
-  pub(crate) async fn append_reasoning(&self, delta: &str) {
-    self.inner.lock().await.reasoning.push_str(delta);
-  }
-
-  pub(crate) async fn mark_do_nothing(&self) {
-    self.inner.lock().await.do_nothing_called = true;
-  }
-
-  pub(crate) async fn mark_pause_room(&self) {
-    self.inner.lock().await.pause_room_called = true;
-  }
-}
-
-impl DebateHook {
-  /// Hook attached to a streaming draft. `Draft*` frames flow under the
-  /// supplied `turn_id`; tool inline-note rows are persisted as the
-  /// model invokes each tool.
-  pub fn for_draft(
-    turn_id: TurnId,
-    stream: Arc<RoomStream>,
-    state: AppState,
-    room_code: String,
-    author: String,
-  ) -> Self {
-    Self {
-      turn_id: Some(turn_id),
-      stream,
-      state,
-      room_code,
-      author,
-      recorder: Arc::new(TurnRecorder::default()),
-    }
-  }
-
-  /// Hook attached to a gate run. No draft is in flight, so `Draft*`
-  /// frames are suppressed; tool inline-note rows are still persisted
-  /// and broadcast as `MessageAdded`.
-  pub fn for_gate(
-    stream: Arc<RoomStream>,
-    state: AppState,
-    room_code: String,
-    author: String,
-  ) -> Self {
-    Self {
-      turn_id: None,
-      stream,
-      state,
-      room_code,
-      author,
-      recorder: Arc::new(TurnRecorder::default()),
-    }
-  }
-
-  pub(crate) fn stream(&self) -> &Arc<RoomStream> {
-    &self.stream
-  }
-
-  pub(crate) fn turn_id(&self) -> Option<&TurnId> {
-    self.turn_id.as_ref()
-  }
-
-  pub(crate) fn recorder(&self) -> Arc<TurnRecorder> {
-    self.recorder.clone()
-  }
-
-  /// Builds an `inline_note` row for a finished tool call, persists it,
-  /// and broadcasts it on the room stream so connected clients render it
-  /// without a refresh. Best-effort: a missing room handle (room deleted
-  /// mid-turn) drops the breadcrumb silently.
-  async fn persist_tool_inline_note(
-    &self,
-    tool_name: &str,
-    args: &str,
-    result: &str,
-    ok: bool,
-  ) {
-    let handle = {
-      let handles = self.state.room_handles.read().await;
-      handles.get(&self.room_code).cloned()
-    };
-    let Some(handle) = handle else {
-      return;
-    };
-
-    let note = format_tool_inline_note(tool_name, args, result, ok);
-    let draft = RoomEvent {
-      id: None,
-      room_code: self.room_code.clone(),
-      sequence: handle.allocate_event_sequence(),
-      kind: RoomEventKind::InlineNote,
-      agent: Some(self.author.clone()),
-      content: note.text,
-      reasoning: String::new(),
-      detail: note.detail,
-      timestamp: Utc::now(),
-    };
-    let event = db::insert_event(&self.state.db, &draft)
-      .await
-      .report()
-      .unwrap_or_else(|| draft.clone());
-    self.stream.send(WsEvent::MessageAdded {
-      turn_id: new_turn_id(),
-      message: event,
-    });
-  }
-}
-
-impl<M> PromptHook<M> for DebateHook
-where
-  M: CompletionModel + Clone,
-{
-  async fn on_text_delta(
-    &self,
-    text_delta: &str,
-    _aggregated_text: &str,
-  ) -> HookAction {
-    if let Some(turn_id) = &self.turn_id {
-      self.stream.send(WsEvent::DraftText {
-        turn_id: turn_id.clone(),
-        delta: text_delta.to_string(),
-      });
-    }
-    HookAction::cont()
-  }
-
-  async fn on_tool_call(
-    &self,
-    tool_name: &str,
-    _tool_call_id: Option<String>,
-    _internal_call_id: &str,
-    _args: &str,
-  ) -> ToolCallHookAction {
-    if let Some(turn_id) = &self.turn_id {
-      self.stream.send(WsEvent::DraftToolStarted {
-        turn_id: turn_id.clone(),
-        tool: tool_name.to_string(),
-      });
-    }
-    ToolCallHookAction::cont()
-  }
-
-  async fn on_tool_result(
-    &self,
-    tool_name: &str,
-    _tool_call_id: Option<String>,
-    _internal_call_id: &str,
-    args: &str,
-    result: &str,
-  ) -> HookAction {
-    // Heuristic: rig surfaces tool errors via `Result::Err`, which it then
-    // serializes with a recognizable "Tool error:" prefix in the assistant
-    // message back to the model. Treat anything else as success.
-    let ok = !result.starts_with("Tool error:");
-
-    self
-      .persist_tool_inline_note(tool_name, args, result, ok)
-      .await;
-
-    if ok && tool_name == do_nothing::NAME {
-      self.recorder.mark_do_nothing().await;
-    }
-    if ok && tool_name == pause_room::NAME {
-      self.recorder.mark_pause_room().await;
-    }
-
-    if let Some(turn_id) = &self.turn_id {
-      self.stream.send(WsEvent::DraftToolCompleted {
-        turn_id: turn_id.clone(),
-        tool: tool_name.to_string(),
-      });
-    }
-    HookAction::cont()
-  }
-}
-
-/// While paused, fires on every cron tick of `resume_schedule_cron` and
-/// asks the leader whether to wake the debate. While running (or while
-/// the user deactivated the room) we just sleep on the gate signal; the
-/// loop only does work when there is something to wake up.
 async fn run_resume_schedule_loop(
   state: AppState,
   handle: RoomHandle,
@@ -640,11 +482,6 @@ async fn run_resume_schedule_loop(
     if handle.is_stopped() {
       return;
     }
-
-    // Only run the wake gate when the debate is paused and the user has
-    // not deactivated the room. A manual deactivation is the strongest
-    // off-switch — leave the debate alone, the user will re-activate
-    // when they're ready.
     if !handle.is_debate_paused() || handle.is_deactivated() {
       tokio::select! {
         _ = handle.pause_notify.notified() => {}
@@ -697,7 +534,7 @@ async fn run_resume_schedule_loop(
 
 async fn evaluate_scheduled_resume(
   state: &AppState,
-  _handle: &RoomHandle,
+  handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
   let history = db::load_room_events(&state.db, &room.code).await?;
@@ -715,23 +552,30 @@ async fn evaluate_scheduled_resume(
     &transcript,
   );
 
-  let resume_tool = ResumeRoomTool::new(state.clone(), room.code.clone());
-  let do_nothing_tool = DoNothingTool::new();
-  let inline_note_tool =
-    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
-
   let stream = state.ensure_room_stream(&room.code).await;
-  let hook = DebateHook::for_gate(
-    stream,
+  let log =
+    EventLog::new(state.clone(), room.code.clone(), handle.clone(), stream);
+  let session = Arc::new(TurnSession::new(
+    log.clone(),
+    LEADER_AGENT.to_string(),
+    RoomEventKind::LeaderNote,
+  ));
+
+  let resume_tool =
+    ResumeRoomTool::new(state.clone(), room.code.clone(), log.clone());
+  let do_nothing_tool =
+    DoNothingTool::new(log.clone(), LEADER_AGENT.to_string());
+  let inline_note_tool = GetInlineNoteDetailTool::new(
     state.clone(),
     room.code.clone(),
+    log.clone(),
     LEADER_AGENT.to_string(),
   );
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
     build_chat_client(&high).context("failed to construct high-tier client")?;
-  client
+  let outcome = client
     .run_resume_gate_turn(ResumeGateInputs {
       system_prompt: format!(
         "{LEADER_RESUME_GATE_PROMPT}\n\n{INLINE_NOTE_TOOL_HINT}"
@@ -740,14 +584,17 @@ async fn evaluate_scheduled_resume(
       resume_tool,
       do_nothing_tool,
       inline_note_tool,
-      hook,
+      session: session.clone(),
     })
-    .await
+    .await;
+  let status = match &outcome {
+    Ok(_) => RowStatus::Done,
+    Err(_) => RowStatus::Failed,
+  };
+  session.finish(status).await;
+  outcome
 }
 
-/// Computes the next firing time of `cron` after `now` using the `cron`
-/// crate. The crate expects a 7-field schedule (sec min hour dom mon dow
-/// year); the user-facing format is the standard 5 fields, so we wrap it.
 fn next_cron_tick(cron: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
   let trimmed = cron.trim();
   if trimmed.split_whitespace().count() != 5 {
@@ -800,7 +647,7 @@ async fn run_leader_steering(
 ) -> Result<()> {
   let history = db::load_room_events(&state.db, &room.code).await?;
   if history.is_empty() {
-    return Ok(()); // nothing to steer yet
+    return Ok(());
   }
 
   let preamble = build_room_preamble(room);
@@ -813,117 +660,7 @@ async fn run_leader_steering(
      your steering note now."
   );
 
-  let stream = state.ensure_room_stream(&room.code).await;
-  let turn_id = new_turn_id();
-
-  stream.send(WsEvent::DraftStarted {
-    turn_id: turn_id.clone(),
-    agent: LEADER_AGENT.to_string(),
-    kind: TurnKind::LeaderNote,
-  });
-
-  let hook = DebateHook::for_draft(
-    turn_id.clone(),
-    stream.clone(),
-    state.clone(),
-    room.code.clone(),
-    LEADER_AGENT.to_string(),
-  );
-  let recorder = hook.recorder();
-  let inline_note_tool =
-    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
-  let pause_tool = PauseRoomTool::new(
-    state.clone(),
-    room.code.clone(),
-    wake_schedule_label(room),
-  );
-
-  let (_low, high) = current_provider_configs(state).await;
-  let client =
-    build_chat_client(&high).context("failed to construct high-tier client")?;
-  let final_text = client
-    .run_steering_turn(SteeringTurnInputs {
-      system_prompt: system,
-      user_prompt: user,
-      hook,
-      inline_note_tool,
-      pause_tool,
-    })
-    .await
-    .inspect_err(|error| {
-      stream.send(WsEvent::DraftFailed {
-        turn_id: turn_id.clone(),
-        error: error.to_string(),
-      });
-    })?;
-
-  let (reasoning, _do_nothing_called) = recorder.snapshot().await;
-  let leader_paused = recorder.pause_room_called().await;
-
-  // If the leader paused via `pause_room` the tool already emitted both
-  // a leader bubble (with the pause reasoning) and the debate-state flip.
-  // Suppress the steering bubble in that case so we don't duplicate.
-  if leader_paused {
-    stream.send(WsEvent::DraftFailed {
-      turn_id,
-      error: String::new(),
-    });
-    return Ok(());
-  }
-
-  let trimmed = final_text.trim().to_string();
-  if trimmed.is_empty() {
-    stream.send(WsEvent::DraftFailed {
-      turn_id,
-      error: "leader produced no text".to_string(),
-    });
-    return Ok(());
-  }
-
-  // Persist the inline-note breadcrumb first so the timeline shows the
-  // gate context just before the bubble.
-  let timestamp = Utc::now();
-  let inline_draft = RoomEvent {
-    id: None,
-    room_code: room.code.clone(),
-    sequence: handle.allocate_event_sequence(),
-    kind: RoomEventKind::InlineNote,
-    agent: Some(LEADER_AGENT.to_string()),
-    content: STEERING_INLINE_NOTE.to_string(),
-    reasoning: String::new(),
-    detail: String::new(),
-    timestamp,
-  };
-  let inline_event = db::insert_event(&state.db, &inline_draft)
-    .await
-    .report()
-    .unwrap_or_else(|| inline_draft.clone());
-  stream.send(WsEvent::MessageAdded {
-    turn_id: new_turn_id(),
-    message: inline_event,
-  });
-
-  let bubble_draft = RoomEvent {
-    id: None,
-    room_code: room.code.clone(),
-    sequence: handle.allocate_event_sequence(),
-    kind: RoomEventKind::LeaderNote,
-    agent: Some(LEADER_AGENT.to_string()),
-    content: trimmed,
-    reasoning,
-    detail: String::new(),
-    timestamp,
-  };
-  let bubble_event = db::insert_event(&state.db, &bubble_draft)
-    .await
-    .report()
-    .unwrap_or_else(|| bubble_draft.clone());
-
-  stream.send(WsEvent::MessageAdded {
-    turn_id,
-    message: bubble_event,
-  });
-  Ok(())
+  run_leader_turn(state, handle, room, system, user, STEERING_INLINE_NOTE).await
 }
 
 async fn run_leader_kickoff(
@@ -937,129 +674,81 @@ async fn run_leader_kickoff(
     format!("{LEADER_KICKOFF_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}");
   let transcript = render_transcript_text(history);
   let user = if transcript.trim().is_empty() {
-    "Start the room with an opening traffic-control note and a concrete plan for the next debate turns."
-      .to_string()
+    "Start the room with an opening traffic-control note and a concrete plan for the next debate turns.".to_string()
   } else {
     format!(
       "The room already has user input before kickoff:\n\n{transcript}\n\nStart with an opening traffic-control note and concrete plan aligned to that input."
     )
   };
 
+  run_leader_turn(state, handle, room, system, user, KICKOFF_INLINE_NOTE).await
+}
+
+/// Shared driver for leader-side streaming turns (steering, kickoff). Drops
+/// a context inline-note ahead of the turn so the user can tell why the
+/// leader spoke (steering tick vs. kickoff vs. on-demand) and then runs
+/// the standard streaming turn against the high model.
+async fn run_leader_turn(
+  state: &AppState,
+  handle: &RoomHandle,
+  room: &Room,
+  system_prompt: String,
+  user_prompt: String,
+  context_label: &str,
+) -> Result<()> {
   let stream = state.ensure_room_stream(&room.code).await;
-  let turn_id = new_turn_id();
+  let log =
+    EventLog::new(state.clone(), room.code.clone(), handle.clone(), stream);
+  log
+    .record_finalized(
+      RoomEventKind::InlineNote,
+      Some(LEADER_AGENT.to_string()),
+      context_label.to_string(),
+      String::new(),
+    )
+    .await;
 
-  stream.send(WsEvent::DraftStarted {
-    turn_id: turn_id.clone(),
-    agent: LEADER_AGENT.to_string(),
-    kind: TurnKind::LeaderNote,
-  });
-
-  let hook = DebateHook::for_draft(
-    turn_id.clone(),
-    stream.clone(),
+  let session = Arc::new(TurnSession::new(
+    log.clone(),
+    LEADER_AGENT.to_string(),
+    RoomEventKind::LeaderNote,
+  ));
+  let inline_note_tool = GetInlineNoteDetailTool::new(
     state.clone(),
     room.code.clone(),
+    log.clone(),
     LEADER_AGENT.to_string(),
   );
-  let recorder = hook.recorder();
-  let inline_note_tool =
-    GetInlineNoteDetailTool::new(state.clone(), room.code.clone());
   let pause_tool = PauseRoomTool::new(
     state.clone(),
     room.code.clone(),
     wake_schedule_label(room),
+    log.clone(),
   );
 
   let (_low, high) = current_provider_configs(state).await;
   let client =
     build_chat_client(&high).context("failed to construct high-tier client")?;
-  let final_text = client
+  let outcome = client
     .run_steering_turn(SteeringTurnInputs {
-      system_prompt: system,
-      user_prompt: user,
-      hook,
+      system_prompt,
+      user_prompt,
+      session: session.clone(),
       inline_note_tool,
       pause_tool,
     })
-    .await
-    .inspect_err(|error| {
-      stream.send(WsEvent::DraftFailed {
-        turn_id: turn_id.clone(),
-        error: error.to_string(),
-      });
-    })?;
+    .await;
 
-  let (reasoning, _do_nothing_called) = recorder.snapshot().await;
-  let leader_paused = recorder.pause_room_called().await;
-
-  // If the leader paused via `pause_room` the tool already emitted a
-  // leader bubble; suppress the kickoff bubble in that case.
-  if leader_paused {
-    stream.send(WsEvent::DraftFailed {
-      turn_id,
-      error: String::new(),
-    });
-    return Ok(());
-  }
-
-  let trimmed = final_text.trim().to_string();
-  if trimmed.is_empty() {
-    stream.send(WsEvent::DraftFailed {
-      turn_id,
-      error: "leader produced no kickoff text".to_string(),
-    });
-    return Ok(());
-  }
-
-  let timestamp = Utc::now();
-  let inline_draft = RoomEvent {
-    id: None,
-    room_code: room.code.clone(),
-    sequence: handle.allocate_event_sequence(),
-    kind: RoomEventKind::InlineNote,
-    agent: Some(LEADER_AGENT.to_string()),
-    content: KICKOFF_INLINE_NOTE.to_string(),
-    reasoning: String::new(),
-    detail: String::new(),
-    timestamp,
+  let status = match &outcome {
+    Ok(_) => RowStatus::Done,
+    Err(_) => RowStatus::Failed,
   };
-  let inline_event = db::insert_event(&state.db, &inline_draft)
-    .await
-    .report()
-    .unwrap_or_else(|| inline_draft.clone());
-  stream.send(WsEvent::MessageAdded {
-    turn_id: new_turn_id(),
-    message: inline_event,
-  });
-
-  let bubble_draft = RoomEvent {
-    id: None,
-    room_code: room.code.clone(),
-    sequence: handle.allocate_event_sequence(),
-    kind: RoomEventKind::LeaderNote,
-    agent: Some(LEADER_AGENT.to_string()),
-    content: trimmed,
-    reasoning,
-    detail: String::new(),
-    timestamp,
-  };
-  let bubble_event = db::insert_event(&state.db, &bubble_draft)
-    .await
-    .report()
-    .unwrap_or_else(|| bubble_draft.clone());
-
-  stream.send(WsEvent::MessageAdded {
-    turn_id,
-    message: bubble_event,
-  });
-  Ok(())
+  session.finish(status).await;
+  outcome.map(|_| ())
 }
 
 // -- Leader report ---------------------------------------------------------
 
-/// The report loop fires on every cron tick of `report_schedule_cron`. We
-/// re-read the room each iteration so a settings change takes effect at
-/// the next firing rather than at restart.
 async fn run_report_loop(
   state: AppState,
   handle: RoomHandle,
@@ -1250,9 +939,6 @@ async fn load_room_snapshot(state: &AppState, room_code: &str) -> Option<Room> {
   rooms.get(room_code).cloned()
 }
 
-/// Snapshots the process-wide low/high provider configs at the point of
-/// call. Cheap (clones the structs); used at the start of every LLM
-/// interaction so config changes land cleanly between turns.
 pub(crate) async fn current_provider_configs(
   state: &AppState,
 ) -> (ProviderConfig, ProviderConfig) {
@@ -1297,10 +983,6 @@ fn build_chat_user_prompt(
   prompt
 }
 
-/// Lists files saved in the room workspace so personas can see what
-/// artifacts other turns produced. Boilerplate (the Python project
-/// manifest, lockfiles) is filtered out so only meaningful work shows up.
-/// Capped to keep the prompt bounded.
 async fn list_shared_workspace_files(workspace: &RoomWorkspace) -> Vec<String> {
   const MAX_LISTED: usize = 50;
   const SKIP: &[&str] = &["pyproject.toml", "uv.lock", ".python-version"];
@@ -1319,10 +1001,6 @@ async fn list_shared_workspace_files(workspace: &RoomWorkspace) -> Vec<String> {
     .collect()
 }
 
-/// User-facing wake-schedule label for the room. Falls back to a
-/// generic "Every hour" string when the room's stored label is blank so
-/// downstream prompts and `pause_room` notes never have an empty
-/// placeholder.
 pub(crate) fn wake_schedule_label(room: &Room) -> String {
   if room.resume_schedule_label.trim().is_empty() {
     DEFAULT_WAKE_LABEL.to_string()
@@ -1347,14 +1025,12 @@ pub(crate) fn build_room_preamble(room: &Room) -> String {
   out
 }
 
-/// Renders persisted messages as the agent's chat history. Each row is
-/// folded into one assistant message tagged with timestamp + speaker so a
-/// new debater can tell whose turn was whose and when each happened.
 fn render_transcript_messages(
   events: &[RoomEvent],
 ) -> Vec<rig::completion::Message> {
   events
     .iter()
+    .filter(|event| !matches!(event.kind, RoomEventKind::Thinking))
     .map(|event| {
       let body = format_transcript_line(event);
       let assistant_content = AssistantContent::text(body);
@@ -1366,21 +1042,15 @@ fn render_transcript_messages(
     .collect()
 }
 
-/// Renders the transcript as a single human-readable string for the leader
-/// prompts (which take it as part of a `user` message rather than as a
-/// chain of past assistant messages).
 fn render_transcript_text(events: &[RoomEvent]) -> String {
   events
     .iter()
+    .filter(|event| !matches!(event.kind, RoomEventKind::Thinking))
     .map(format_transcript_line)
     .collect::<Vec<_>>()
     .join("\n\n")
 }
 
-/// Formats one event for the transcript. Chat-bubble kinds (agent / leader
-/// / user) get `[timestamp] speaker: content`; inline notes get the body
-/// label only with an `(inline-note #N by Author)` marker so a persona can
-/// look up the click-to-reveal detail via `get_inline_note_detail`.
 fn format_transcript_line(event: &RoomEvent) -> String {
   let timestamp = format_transcript_timestamp(event.timestamp);
   let speaker = event.agent.as_deref().unwrap_or("speaker");
@@ -1395,6 +1065,7 @@ fn format_transcript_line(event: &RoomEvent) -> String {
         event.content
       )
     }
+    RoomEventKind::Thinking => String::new(),
     RoomEventKind::AgentChat
     | RoomEventKind::LeaderNote
     | RoomEventKind::UserChat => {
@@ -1403,9 +1074,6 @@ fn format_transcript_line(event: &RoomEvent) -> String {
   }
 }
 
-/// Renders an absolute UTC timestamp in the canonical persona-prompt
-/// format `YYYY-MM-DD HH:MM:SS UTC`. Kept in one place so the transcript
-/// lines and the system-prompt "Current time" header agree exactly.
 pub(crate) fn format_transcript_timestamp(timestamp: DateTime<Utc>) -> String {
   timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }

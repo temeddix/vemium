@@ -1,88 +1,43 @@
 //! WebSocket wire protocol for room event streams.
 //!
-//! All messages a client receives over `/v1/rooms/:id/stream` are JSON
-//! encodings of [`WsEvent`]. The `type` discriminator lets the frontend
-//! pattern-match on a single union.
-//!
-//! ## Two layers: drafts and messages
-//!
-//! - **Drafts** are purely transient. While a turn is being produced the
-//!   server emits per-token `Draft*` frames so the UI can render a "writing"
-//!   card. Drafts are not persisted; if a client reconnects mid-turn, the
-//!   prefix it missed is gone — the draft simply renders cut-off, starting
-//!   from whatever tokens arrive after subscribe.
-//! - **Messages** are authoritative. The orchestrator inserts one
-//!   `room_events` row per finalized event — the assistant bubble at turn
-//!   end (carrying its reasoning trace inline) plus a separate `inline_note`
-//!   row for every tool invocation as it completes — and emits one
-//!   [`WsEvent::MessageAdded`] frame per row. The frontend uses these to
-//!   retire matching drafts and append the rows to the chat list.
-//!
-//! Sequence numbers live on messages only — they're the unit of truth that
-//! survives reconnects.
-//!
-//! ## Fan-out: [`RoomStream`]
+//! Every frame a client receives over `/v1/rooms/:code/stream` is a JSON
+//! [`WsEvent`] with a `type` discriminator. The protocol is intentionally
+//! flat: a unified [`WsEvent::RowAdded`] / [`WsEvent::RowDelta`] /
+//! [`WsEvent::RowFinished`] triplet handles every row in `room_events`,
+//! whether it's a chat bubble, a thinking burst, or a tool inline note.
 //!
 //! Producers write events through one [`RoomStream`] per room; subscribers
-//! (one per connected WebSocket) read from a [`RoomReceiver`]. Each
-//! subscriber owns its own bounded mpsc pair split into two priority lanes:
-//!
-//! - **Lifecycle** — small buffer; if full, the subscriber is dropped so
-//!   the client reconnects from a fresh snapshot. Use for events whose
-//!   loss desyncs the UI (snapshot, room status, draft start / tool start
-//!   / tool complete / fail, message added, report start / complete).
-//! - **Tokens** — large buffer; if full, the token is dropped silently and
-//!   the subscription stays alive. Use for ephemeral deltas (`DraftText`,
-//!   `DraftReasoning`, `ReportToken`).
-//!
-//! Each new subscriber receives, immediately after subscribing, a
-//! [`WsEvent::DraftStarted`] frame for every turn currently in flight on
-//! the room (metadata only — no content backfill). That gives late
-//! subscribers a header to attach incoming tokens to.
+//! (one per connected WebSocket) read from a single bounded mpsc channel.
+//! No lane splitting — preserving producer order is more valuable than
+//! per-class prioritisation, and the orchestrator never produces fast
+//! enough to fill the buffer in practice. If a subscriber falls behind by
+//! more than [`BUFFER_DEPTH`] frames the channel is closed and the client
+//! is left to reconnect, which then refetches the in-flight rows from the
+//! authoritative `room_events` table — including streaming bodies — so no
+//! draft state is ever lost.
 
 use crate::models::{
   DebateState, ReportStatus, RoomEvent, RoomReport, RoomState, RoomView,
+  RowStatus,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
-/// Per-subscriber lifecycle queue depth. A connected WebSocket should drain
-/// these almost instantly; if more than this many lifecycle frames pile up
-/// the client is hopelessly behind and gets dropped to force a reconnect.
-const LIFECYCLE_BUFFER: usize = 128;
+/// Per-subscriber queue depth. Sized to absorb several turns' worth of
+/// row deltas without ever back-pressuring the producer; if a subscriber
+/// stalls past this, the channel is dropped and the client reconnects
+/// from a fresh snapshot.
+const BUFFER_DEPTH: usize = 4096;
 
-/// Per-subscriber token queue depth. Sized to absorb several turns' worth
-/// of token deltas so brief WebSocket stalls don't drop tokens.
-const TOKEN_BUFFER: usize = 4096;
-
-struct Subscription {
-  lifecycle: mpsc::Sender<WsEvent>,
-  tokens: mpsc::Sender<WsEvent>,
-}
-
-/// Receiving end handed to one WebSocket connection. The handler awaits
-/// both lanes with a `biased` `select!` so lifecycle frames are never
-/// queued behind a backlog of token deltas.
+/// Receiving end handed to one WebSocket connection.
 pub struct RoomReceiver {
-  pub lifecycle: mpsc::Receiver<WsEvent>,
-  pub tokens: mpsc::Receiver<WsEvent>,
-}
-
-/// Metadata kept for an in-flight turn so newly-connecting subscribers can
-/// be told which agent / kind a draft belongs to even though the original
-/// `DraftStarted` was sent before they joined.
-#[derive(Clone)]
-struct DraftMeta {
-  agent: String,
-  kind: TurnKind,
+  pub events: mpsc::Receiver<WsEvent>,
 }
 
 /// Fan-out registry: producers call [`RoomStream::send`], every connected
-/// subscriber receives a clone on the appropriate lane.
+/// subscriber receives a clone on its own channel.
 #[derive(Default)]
 pub struct RoomStream {
   inner: Mutex<RoomStreamInner>,
@@ -90,12 +45,7 @@ pub struct RoomStream {
 
 #[derive(Default)]
 struct RoomStreamInner {
-  subscribers: Vec<Subscription>,
-  /// Currently-streaming turns keyed by `TurnId`. Populated on
-  /// [`WsEvent::DraftStarted`], drained on [`WsEvent::MessageAdded`] /
-  /// [`WsEvent::DraftFailed`]. Replayed for new subscribers so they always
-  /// see a header for in-flight turns.
-  active_drafts: HashMap<TurnId, DraftMeta>,
+  subscribers: Vec<mpsc::Sender<WsEvent>>,
 }
 
 impl RoomStream {
@@ -103,56 +53,20 @@ impl RoomStream {
     Self::default()
   }
 
-  /// Adds a new subscription and immediately enqueues a [`DraftStarted`]
-  /// frame for each turn currently in flight, so a client that connects
-  /// mid-stream still has a header to render incoming tokens under.
   pub fn subscribe(&self) -> RoomReceiver {
-    let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_BUFFER);
-    let (tokens_tx, tokens_rx) = mpsc::channel(TOKEN_BUFFER);
-
-    {
-      let mut inner = self.lock();
-      // Replay metadata for any in-flight drafts. We push directly into
-      // the new sender (which is empty and large enough that try_send
-      // never fails here) before exposing it to other producers.
-      for (turn_id, meta) in inner.active_drafts.iter() {
-        let _ = lifecycle_tx.try_send(WsEvent::DraftStarted {
-          turn_id: turn_id.clone(),
-          agent: meta.agent.clone(),
-          kind: meta.kind,
-        });
-      }
-      inner.subscribers.push(Subscription {
-        lifecycle: lifecycle_tx,
-        tokens: tokens_tx,
-      });
-    }
-
-    RoomReceiver {
-      lifecycle: lifecycle_rx,
-      tokens: tokens_rx,
-    }
+    let (tx, rx) = mpsc::channel(BUFFER_DEPTH);
+    self.lock().subscribers.push(tx);
+    RoomReceiver { events: rx }
   }
 
-  /// Routes `event` to every live subscriber on the lane its priority
-  /// dictates and updates the active-draft registry as a side effect.
-  ///
-  /// A failed lifecycle send drops the subscriber outright; a failed token
-  /// send keeps the subscriber but loses the delta.
+  /// Routes `event` to every live subscriber. Subscribers whose channel
+  /// is full or closed are dropped from the registry; they will reconnect
+  /// from snapshot and rejoin.
   pub fn send(&self, event: WsEvent) {
     let mut inner = self.lock();
-    inner.update_active_drafts(&event);
-
-    if event.is_token() {
-      inner.subscribers.retain(|sub| !sub.tokens.is_closed());
-      for sub in inner.subscribers.iter() {
-        let _ = sub.tokens.try_send(event.clone());
-      }
-    } else {
-      inner
-        .subscribers
-        .retain(|sub| sub.lifecycle.try_send(event.clone()).is_ok());
-    }
+    inner
+      .subscribers
+      .retain(|sub| sub.try_send(event.clone()).is_ok());
   }
 
   fn lock(&self) -> std::sync::MutexGuard<'_, RoomStreamInner> {
@@ -163,106 +77,57 @@ impl RoomStream {
   }
 }
 
-impl RoomStreamInner {
-  fn update_active_drafts(&mut self, event: &WsEvent) {
-    match event {
-      WsEvent::DraftStarted {
-        turn_id,
-        agent,
-        kind,
-      } => {
-        self.active_drafts.insert(
-          turn_id.clone(),
-          DraftMeta {
-            agent: agent.clone(),
-            kind: *kind,
-          },
-        );
-      }
-      WsEvent::MessageAdded { turn_id, .. }
-      | WsEvent::DraftFailed { turn_id, .. } => {
-        self.active_drafts.remove(turn_id);
-      }
-      _ => {}
-    }
-  }
-}
-
-/// Identifier of an in-flight turn, generated by the orchestrator. Used to
-/// correlate a draft card with the eventual [`WsEvent::MessageAdded`].
-pub type TurnId = String;
-
-/// Identifier of an in-flight report row in the WS stream. While a report
-/// is streaming, we use a stable string so the frontend can attach token
-/// deltas; the value mirrors the database `id` for finalized reports.
+/// Identifier of an in-flight report row in the WS stream. Mirrors the
+/// `room_reports.id` once persisted; held as a string so the wire format
+/// is stable across the report's pre/post-finalize transition.
 pub type ReportId = String;
 
 /// One frame of the WebSocket wire format. Variants are tagged with `type`
-/// in the JSON output, e.g. `{"type":"draftText","turnId":"...","delta":"hi"}`.
-///
-/// `Snapshot` carries `RoomView` boxed because it dwarfs every other
-/// variant in size and would otherwise inflate the per-event allocation
-/// for token streams.
+/// in the JSON output, e.g. `{"type":"rowDelta","id":42,"contentDelta":"hi"}`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum WsEvent {
-  /// First message after a successful connect. Contains the room's current
-  /// settings, the persisted message log, and the list of reports. Drafts
-  /// are NOT included; in-flight turns are surfaced separately via the
-  /// `DraftStarted` frames replayed on subscribe.
+  /// First message after a successful connect. Carries the room metadata
+  /// plus every persisted row (including any `Streaming` rows still in
+  /// flight, so reconnects converge without losing draft content).
   Snapshot {
     room: Box<RoomView>,
-    messages: Vec<RoomEvent>,
+    events: Vec<RoomEvent>,
     reports: Vec<RoomReport>,
   },
 
   /// User-controlled lifecycle gate flipped (active <-> deactivated).
-  /// Emitted only by the user-facing `/v1/rooms/:code/{activate,deactivate}`
-  /// endpoints — the leader cannot move this gate.
   RoomState { state: RoomState },
 
-  /// Leader-controlled debate gate flipped (running <-> paused). Emitted
-  /// by `pause_room` / `resume_room`, called from the periodic steering
-  /// tick, the wake-on-cron resume gate, or an on-demand
-  /// `request_leader_decision` call triggered by a debater.
+  /// Leader-controlled debate gate flipped (running <-> paused).
   DebateState { state: DebateState },
 
-  /// A new turn has started. Subsequent `Draft*` frames with the same
-  /// `turnId` belong to this draft until a matching `MessageAdded` /
-  /// `DraftFailed` retires it. Replayed to new subscribers for any
-  /// turn that is still in flight when they connect.
-  DraftStarted {
-    turn_id: TurnId,
-    agent: String,
-    kind: TurnKind,
-  },
-  /// One token (or partial token) of the draft's natural-language content.
-  /// Best-effort: dropped under backpressure rather than dropping the
-  /// subscriber.
-  DraftText { turn_id: TurnId, delta: String },
-  /// One token of the draft's reasoning trace, for models that emit
-  /// chain-of-thought separately. Same drop semantics as `DraftText`.
-  DraftReasoning { turn_id: TurnId, delta: String },
-  /// A tool invocation began as part of this draft. The frontend shows a
-  /// brief "running `<tool>`" indicator next to the draft until the
-  /// matching `DraftToolCompleted` arrives. Rig dispatches tools serially,
-  /// so at most one tool is running per draft at a time.
-  DraftToolStarted { turn_id: TurnId, tool: String },
-  /// The current tool call finished. The persisted inline-note row is
-  /// broadcast separately as `MessageAdded`; this frame just clears the
-  /// running-tool indicator on the matching draft.
-  DraftToolCompleted { turn_id: TurnId, tool: String },
-  /// The turn ended in error before producing a finalized message. The
-  /// frontend drops the draft and may surface `error` in a toast / log.
-  DraftFailed { turn_id: TurnId, error: String },
+  /// A new row appeared in `room_events`. The full row is sent so the
+  /// client can render it without waiting for any deltas. May arrive
+  /// already `Done` (e.g. a one-shot user message) or `Streaming`
+  /// (the body fills via subsequent `RowDelta` frames).
+  RowAdded { event: RoomEvent },
 
-  /// A finalized event row has been persisted. `turnId` identifies the
-  /// draft that produced it (so the frontend can retire that card);
-  /// `message` carries the authoritative content. Used both for chat
-  /// bubbles (the assistant's reply with reasoning) and for `inline_note`
-  /// rows the orchestrator's hook appends as tool calls finish — those
-  /// arrive with an arbitrary `turnId` not tied to any visible draft.
-  MessageAdded { turn_id: TurnId, message: RoomEvent },
+  /// Appends to a streaming row's `content` and/or `detail`. At least
+  /// one of the deltas is non-empty.
+  RowDelta {
+    id: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    content_delta: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    detail_delta: String,
+  },
+
+  /// The streaming row at `id` reached terminal state. Carries the final
+  /// body so clients converge to the authoritative content even if some
+  /// deltas were lost to backpressure.
+  RowFinished {
+    id: i64,
+    content: String,
+    detail: String,
+    status: RowStatus,
+    completed_at: DateTime<Utc>,
+  },
 
   /// A periodic leader report has begun streaming.
   ReportStarted { report_id: ReportId, sequence: u64 },
@@ -277,38 +142,6 @@ pub enum WsEvent {
     status: ReportStatus,
     completed_at: DateTime<Utc>,
   },
-}
-
-impl WsEvent {
-  /// Whether this frame is a per-token streaming delta. Token frames are
-  /// dropped under backpressure; every other frame is a lifecycle event
-  /// whose loss would leave the UI inconsistent.
-  pub fn is_token(&self) -> bool {
-    matches!(
-      self,
-      WsEvent::DraftText { .. }
-        | WsEvent::DraftReasoning { .. }
-        | WsEvent::ReportToken { .. }
-    )
-  }
-}
-
-/// Categorization of a turn for the UI. Drives the visual treatment (chat
-/// bubble vs. leader callout) without leaking transcript-shape details.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnKind {
-  /// A debater (low-model persona) speaking.
-  AgentChat,
-  /// A leader steering note triggered by the periodic steering timer, the
-  /// `request_leader_decision` tool, or a halt/proceed gate decision.
-  LeaderNote,
-}
-
-/// Builds a fresh, unique [`TurnId`] for a new turn. Wraps a random UUID so
-/// no caller has to think about uniqueness.
-pub fn new_turn_id() -> TurnId {
-  Uuid::new_v4().to_string()
 }
 
 /// Builds a [`ReportId`] for an in-flight report. Once the report is

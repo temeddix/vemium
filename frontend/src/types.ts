@@ -9,45 +9,30 @@
  * this back to `active`.
  */
 export type RoomState = "active" | "deactivated";
+
 /**
  * Leader-controlled debate gate. Flipped by the leader's `pause_room` /
- * `resume_room` tools, called from the periodic steering tick, the
- * wake-on-cron resume gate, or an on-demand `request_leader_decision`
- * call triggered by a debater. Only meaningful when [`RoomState`] is
- * `active`.
+ * `resume_room` tools.
  */
 export type DebateState = "running" | "paused";
-export type ReportStatus = "streaming" | "done" | "failed";
+
 /**
- * Which provider family a `ProviderConfig` targets. Selects the underlying
- * rig client at runtime: `ollama` uses the native `/api/chat` protocol,
- * `openRouter` uses OpenAI-compatible streaming and works against
- * OpenRouter (and any OpenAI-compatible endpoint that emits
- * `delta.reasoning`, e.g. llama.cpp).
+ * Lifecycle of one row in the room timeline. Every row starts `streaming`
+ * (or `done` if it had no body to stream), accumulates content via row
+ * deltas, and transitions exactly once to `done` or `failed`. Reused for
+ * leader reports - they go through the same lifecycle.
  */
+export type RowStatus = "streaming" | "done" | "failed";
+
 export type ApiType = "ollama" | "openRouter";
 
 export interface ProviderConfig {
   model: string;
-  /**
-   * Endpoint root, always required. Examples:
-   * - Ollama: `http://localhost:11434`
-   * - OpenRouter: `https://openrouter.ai/api/v1`
-   */
   baseUrl: string;
-  /**
-   * Bearer token. Required for OpenRouter; optional for Ollama. The backend
-   * redacts this to `***` in every API response.
-   */
   apiKey: string | null;
-  /** Provider family. Defaults to `"ollama"` server-side when omitted. */
   apiType?: ApiType;
 }
 
-/**
- * Process-wide low/high tier configuration shared by every room. Edited via
- * the home-screen Settings page.
- */
 export interface AppSettings {
   low: ProviderConfig;
   high: ProviderConfig;
@@ -59,11 +44,6 @@ export interface UpdateAppSettingsRequest {
   high?: ProviderConfig;
 }
 
-/**
- * One entry returned by `POST /v1/providers/:tier/models`. The `id` is the
- * exact identifier the provider expects in subsequent chat calls (e.g.
- * `qwen3:14b`, `anthropic/claude-sonnet-4-6`).
- */
 export interface ProviderModelOption {
   id: string;
 }
@@ -73,10 +53,6 @@ export interface ProviderModelsResponse {
 }
 
 export interface Room {
-  /**
-   * Readable id in `xxx-xxxx-xxx` lowercase letter format. Used as the
-   * room's primary key, the URL segment, and the workspace directory name.
-   */
   code: string;
   topic: string;
   goal: string;
@@ -95,31 +71,40 @@ export interface Room {
 }
 
 /**
- * One finalized event row in a room's chat log. Chat-bubble kinds carry
- * the assistant's reply in `content` and any chain-of-thought trace in
- * `reasoning`. For `kind === "inline_note"` rows, `content` is the
- * always-visible label and `detail` is the click-to-reveal expansion;
- * `reasoning` is empty.
- *
- * Tool invocations live on their own `inline_note` rows now - they are
- * not threaded onto the assistant message that triggered them.
+ * Categorisation of a row in the room timeline. Bubble kinds
+ * (`agentChat`/`leaderNote`/`userChat`) render as full chat bubbles with
+ * `content` always visible. Side-row kinds (`thinking`, `inlineNote`)
+ * render as dim breadcrumbs next to the author's avatar; their `detail`
+ * body shows inline only while `status === "streaming"` and is hidden
+ * behind a click-to-open dialog once `done`.
  */
-export interface Message {
-  /**
-   * Database primary key. `null` only for in-memory drafts before they hit
-   * the persistence layer; every row coming over the WebSocket carries an
-   * `id` so the frontend (and the inline-note detail tool) can address it.
-   */
+export type RoomEventKind =
+  | "agent_chat"
+  | "leader_note"
+  | "user_chat"
+  | "thinking"
+  | "inline_note";
+
+/**
+ * One row in `room_events`. The same shape covers chat bubbles, thinking
+ * rows, and tool inline notes - they only differ by `kind` and which of
+ * `content` / `detail` carries the body.
+ */
+export interface RoomEvent {
   id: number | null;
   roomCode: string;
   sequence: number;
-  kind: TurnKind;
+  kind: RoomEventKind;
   agent: string | null;
+  /** Bubble text for chat kinds; breadcrumb label for thinking / inline notes. */
   content: string;
-  reasoning: string;
-  /** Click-to-reveal expansion for `inline_note` rows; empty otherwise. */
+  /** Click-to-reveal body for thinking / inline notes. Empty for bubbles. */
   detail: string;
+  status: RowStatus;
+  /** Wall-clock when this row was first inserted. */
   timestamp: string;
+  /** Wall-clock when the row finished streaming. `null` while streaming. */
+  completedAt: string | null;
 }
 
 export interface RoomReport {
@@ -129,112 +114,61 @@ export interface RoomReport {
   content: string;
   startedAt: string;
   completedAt: string | null;
-  status: ReportStatus;
+  status: RowStatus;
 }
 
 // -- WebSocket events -----------------------------------------------------
 
 /**
- * Categorisation of a row in `room_events`. `agent_chat`, `leader_note`,
- * and `user_chat` render as full chat bubbles. `inline_note` is a
- * lightweight breadcrumb (dim text next to the author's avatar); its
- * `content` holds the always-visible label and `detail` holds the
- * click-to-reveal expansion.
- *
- * `user_chat` only ever appears on a finalized `Message` (humans don't
- * stream tokens, so there are no `user_chat` drafts).
- */
-export type TurnKind =
-  | "agent_chat"
-  | "leader_note"
-  | "user_chat"
-  | "inline_note";
-
-/** Subset of [`TurnKind`] that drafts can carry - there are no inline-note
- * or user drafts (inline notes are persisted directly without a draft
- * phase, and humans don't stream). */
-export type DraftKind = "agent_chat" | "leader_note";
-
-/**
- * First frame on every connect. Carries the room state and the persisted
- * message log; in-flight drafts are surfaced separately via `DraftStarted`
- * frames replayed by the server immediately after subscribe.
+ * First frame on every connect. Carries the room state, the persisted
+ * event log (including any rows still streaming - their `status` is
+ * `streaming` and clients reattach to them with subsequent row deltas),
+ * and the report list.
  */
 export interface WsSnapshot {
   type: "snapshot";
   room: Room;
-  messages: Message[];
+  events: RoomEvent[];
   reports: RoomReport[];
 }
 
-/** User-controlled gate flipped (active <-> deactivated). */
 export interface WsRoomState {
   type: "roomState";
   state: RoomState;
 }
 
-/** Leader-controlled gate flipped (running <-> paused). */
 export interface WsDebateState {
   type: "debateState";
   state: DebateState;
 }
 
-export interface WsDraftStarted {
-  type: "draftStarted";
-  turnId: string;
-  agent: string;
-  kind: DraftKind;
-}
-
-export interface WsDraftText {
-  type: "draftText";
-  turnId: string;
-  delta: string;
-}
-
-export interface WsDraftReasoning {
-  type: "draftReasoning";
-  turnId: string;
-  delta: string;
-}
-
 /**
- * A tool invocation began as part of this draft. Carries the tool name so
- * the UI can label the running spinner. Rig dispatches tools serially, so
- * at most one tool is running per draft at a time - the matching
- * `draftToolCompleted` clears the indicator.
+ * A new row appeared. The full row is sent so the client renders it
+ * without waiting for any deltas. May arrive already `done` (e.g. a
+ * one-shot user message) or `streaming` (the body fills via subsequent
+ * row deltas).
  */
-export interface WsDraftToolStarted {
-  type: "draftToolStarted";
-  turnId: string;
-  tool: string;
+export interface WsRowAdded {
+  type: "rowAdded";
+  event: RoomEvent;
 }
 
-/**
- * The current tool call finished. The persisted inline-note row arrives
- * separately as a `messageAdded` frame; this only clears the running-tool
- * indicator on the matching draft.
- */
-export interface WsDraftToolCompleted {
-  type: "draftToolCompleted";
-  turnId: string;
-  tool: string;
+/** Appends to a streaming row's `content` and/or `detail`. */
+export interface WsRowDelta {
+  type: "rowDelta";
+  id: number;
+  contentDelta?: string;
+  detailDelta?: string;
 }
 
-export interface WsDraftFailed {
-  type: "draftFailed";
-  turnId: string;
-  error: string;
-}
-
-/**
- * Authoritative finalization. The frontend retires the matching draft (if
- * any) and appends `message` to the chat log.
- */
-export interface WsMessageAdded {
-  type: "messageAdded";
-  turnId: string;
-  message: Message;
+/** Streaming row reached terminal state. Carries the final body. */
+export interface WsRowFinished {
+  type: "rowFinished";
+  id: number;
+  content: string;
+  detail: string;
+  status: RowStatus;
+  completedAt: string;
 }
 
 export interface WsReportStarted {
@@ -254,7 +188,7 @@ export interface WsReportCompleted {
   reportId: string;
   sequence: number;
   content: string;
-  status: ReportStatus;
+  status: RowStatus;
   completedAt: string;
 }
 
@@ -262,13 +196,9 @@ export type WsEvent =
   | WsSnapshot
   | WsRoomState
   | WsDebateState
-  | WsDraftStarted
-  | WsDraftText
-  | WsDraftReasoning
-  | WsDraftToolStarted
-  | WsDraftToolCompleted
-  | WsDraftFailed
-  | WsMessageAdded
+  | WsRowAdded
+  | WsRowDelta
+  | WsRowFinished
   | WsReportStarted
   | WsReportToken
   | WsReportCompleted;
@@ -300,53 +230,25 @@ export interface CloneRoomRequest {
 
 // -- Live in-memory state -------------------------------------------------
 
-/**
- * A turn that's currently being produced by the model. Built up from
- * `Draft*` WS frames, retired when the matching `MessageAdded` arrives.
- * Drafts are purely transient - they're never persisted and they don't
- * survive reconnects intact (a draft already in-flight at connect time is
- * surfaced via the server's `DraftStarted` replay, but its accumulated
- * text starts empty and only fills with whatever tokens arrive after).
- */
-export interface Draft {
-  turnId: string;
-  agent: string;
-  kind: DraftKind;
-  content: string;
-  reasoning: string;
-  /**
-   * Name of the tool currently running on this draft, or `null` when the
-   * model is producing text. Tools dispatch serially, so this is at most
-   * one name; persisted inline-note rows for finished tool calls arrive
-   * separately as `messageAdded` frames.
-   */
-  runningTool: string | null;
-  status: "streaming" | "failed";
-  error: string | null;
-}
-
 export interface ReportBuffer {
   reportId: string;
   sequence: number;
   content: string;
-  status: ReportStatus;
+  status: RowStatus;
   completedAt: string | null;
 }
 
 /**
  * Aggregated per-room view that the dashboard renders. Built from the
- * snapshot's `messages` (authoritative) plus live WS draft / message /
- * report frames. Never sent over the wire.
+ * snapshot's events plus any live row frames that arrive after subscribe.
+ * Never sent over the wire.
  */
 export interface RoomView {
   room: Room;
-  /** Finalized rows, newest last. Includes inline-note breadcrumbs alongside
-   * chat bubbles; the page partitions them at render time. Replaced
-   * wholesale on snapshot. */
-  messages: Message[];
-  /** In-flight drafts, keyed by turnId. Usually 0 or 1 entries. */
-  drafts: Draft[];
-  /** All reports for this room, newest last. */
+  /** Every row in the timeline, sorted by `sequence`. Includes streaming
+   * rows: their `status` is `streaming` until the matching `rowFinished`
+   * frame arrives. */
+  events: RoomEvent[];
   reports: ReportBuffer[];
 }
 
@@ -368,11 +270,6 @@ export interface SettingsEnvelope {
   settings: AppSettings;
 }
 
-/**
- * One regular file inside a room's workspace, returned by the
- * `/v1/rooms/:code/files` listing. Paths are forward-slash relative to the
- * room root regardless of platform.
- */
 export interface WorkspaceFile {
   path: string;
   sizeBytes: number;

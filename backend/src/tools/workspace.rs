@@ -11,9 +11,12 @@
 //! - [`WriteFileTool`] - overwrite a file (creates parents as needed).
 //!
 //! All paths are routed through [`crate::workspace::RoomWorkspace::resolve`],
-//! which rejects anything that escapes the room's directory.
+//! which rejects anything that escapes the room's directory. Each tool
+//! persists its own inline-note breadcrumb via [`EventLog`] before
+//! returning to the model.
 
-use crate::tools::InlineNote;
+use crate::event_log::{EventLog, RowHandle};
+use crate::models::{RoomEventKind, RowStatus};
 use crate::workspace::RoomWorkspace;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -22,8 +25,7 @@ use serde_json::json;
 use std::path::Path;
 use thiserror::Error;
 
-/// Markdown preview cap for `read_file` inline-note `detail`. Avoids
-/// dumping the full 64 KiB read limit into the click-to-reveal dialog.
+/// Markdown preview cap for `read_file` inline-note `detail`.
 const READ_PREVIEW_CHARS: usize = 2_000;
 
 #[derive(Debug, Error)]
@@ -36,20 +38,46 @@ impl WorkspaceToolError {
   }
 }
 
+/// Opens a fresh inline-note row scoped to `author`.
+async fn open_row(log: &EventLog, author: &str, label: String) -> RowHandle {
+  log
+    .start_row(
+      RoomEventKind::InlineNote,
+      Some(author.to_string()),
+      label,
+      String::new(),
+    )
+    .await
+}
+
+async fn finish_ok(row: &RowHandle, label: String, detail: String) {
+  row.replace_body(label, detail).await;
+  row.finish(RowStatus::Done).await;
+}
+
+async fn finish_err(row: &RowHandle, label: String, detail: String) {
+  row.replace_body(label, detail).await;
+  row.finish(RowStatus::Failed).await;
+}
+
 // -- list_subject_folders --------------------------------------------------
 
 pub const LIST_FOLDERS_NAME: &str = "list_subject_folders";
-pub const LIST_FOLDERS_NOTE_TEXT: &str = "Listed subject folders";
-pub const LIST_FOLDERS_NOTE_FAIL_TEXT: &str = "Subject folder listing failed";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ListSubjectFoldersTool {
   workspace: RoomWorkspace,
+  log: EventLog,
+  author: String,
 }
 
 impl ListSubjectFoldersTool {
-  pub fn new(workspace: RoomWorkspace) -> Self {
-    Self { workspace }
+  pub fn new(workspace: RoomWorkspace, log: EventLog, author: String) -> Self {
+    Self {
+      workspace,
+      log,
+      author,
+    }
   }
 }
 
@@ -65,8 +93,8 @@ pub struct ListSubjectFoldersOutput {
 pub struct SubjectFolderEntry {
   pub name: String,
   /// `true` if the folder follows the canonical `<datetime> (<subject>)`
-  /// convention. Off-format folders are still listed so the agent can read
-  /// what the user (or a previous agent) put there.
+  /// convention. Off-format folders are still listed so the agent can
+  /// read what the user (or a previous agent) put there.
   pub structured: bool,
 }
 
@@ -94,36 +122,71 @@ impl Tool for ListSubjectFoldersTool {
   }
 
   async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let folders = self
-      .workspace
-      .list_subject_folders()
-      .await
-      .map_err(WorkspaceToolError::from_anyhow)?;
-    Ok(ListSubjectFoldersOutput {
-      folders: folders
-        .into_iter()
-        .map(|f| SubjectFolderEntry {
-          name: f.name,
-          structured: f.structured,
-        })
-        .collect(),
-    })
+    let row = open_row(
+      &self.log,
+      &self.author,
+      "Listing subject folders".to_string(),
+    )
+    .await;
+    match self.workspace.list_subject_folders().await {
+      Ok(folders) => {
+        let entries: Vec<_> = folders
+          .into_iter()
+          .map(|f| SubjectFolderEntry {
+            name: f.name,
+            structured: f.structured,
+          })
+          .collect();
+        let detail = if entries.is_empty() {
+          "(none)".to_string()
+        } else {
+          entries
+            .iter()
+            .map(|f| {
+              if f.structured {
+                format!("- {}", f.name)
+              } else {
+                format!("- {} (off-format)", f.name)
+              }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        finish_ok(&row, "Listed subject folders".to_string(), detail).await;
+        Ok(ListSubjectFoldersOutput { folders: entries })
+      }
+      Err(error) => {
+        let error = WorkspaceToolError::from_anyhow(error);
+        finish_err(
+          &row,
+          "Subject folder listing failed".to_string(),
+          error.0.clone(),
+        )
+        .await;
+        Err(error)
+      }
+    }
   }
 }
 
 // -- create_subject_folder -------------------------------------------------
 
 pub const CREATE_FOLDER_NAME: &str = "create_subject_folder";
-pub const CREATE_FOLDER_NOTE_FAIL_TEXT: &str = "Subject folder creation failed";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CreateSubjectFolderTool {
   workspace: RoomWorkspace,
+  log: EventLog,
+  author: String,
 }
 
 impl CreateSubjectFolderTool {
-  pub fn new(workspace: RoomWorkspace) -> Self {
-    Self { workspace }
+  pub fn new(workspace: RoomWorkspace, log: EventLog, author: String) -> Self {
+    Self {
+      workspace,
+      log,
+      author,
+    }
   }
 }
 
@@ -135,8 +198,7 @@ pub struct CreateSubjectFolderArgs {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSubjectFolderOutput {
-  /// Resulting folder name on disk, e.g.
-  /// `2026-05-03_14-23-05 (CPI categories)`.
+  /// Resulting folder name on disk.
   pub folder: String,
 }
 
@@ -170,28 +232,54 @@ impl Tool for CreateSubjectFolderTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let folder = self
-      .workspace
-      .create_subject_folder(&args.subject)
-      .await
-      .map_err(WorkspaceToolError::from_anyhow)?;
-    Ok(CreateSubjectFolderOutput { folder })
+    let row = open_row(
+      &self.log,
+      &self.author,
+      format!("Creating subject folder: {}", args.subject.trim()),
+    )
+    .await;
+    match self.workspace.create_subject_folder(&args.subject).await {
+      Ok(folder) => {
+        finish_ok(
+          &row,
+          format!("Created subject folder {}", folder),
+          String::new(),
+        )
+        .await;
+        Ok(CreateSubjectFolderOutput { folder })
+      }
+      Err(error) => {
+        let error = WorkspaceToolError::from_anyhow(error);
+        finish_err(
+          &row,
+          "Subject folder creation failed".to_string(),
+          format!("Subject: {}\n\n{}", args.subject, error.0),
+        )
+        .await;
+        Err(error)
+      }
+    }
   }
 }
 
 // -- list_files ------------------------------------------------------------
 
 pub const LIST_FILES_NAME: &str = "list_files";
-pub const LIST_FILES_NOTE_FAIL_TEXT: &str = "File listing failed";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ListFilesTool {
   workspace: RoomWorkspace,
+  log: EventLog,
+  author: String,
 }
 
 impl ListFilesTool {
-  pub fn new(workspace: RoomWorkspace) -> Self {
-    Self { workspace }
+  pub fn new(workspace: RoomWorkspace, log: EventLog, author: String) -> Self {
+    Self {
+      workspace,
+      log,
+      author,
+    }
   }
 }
 
@@ -242,42 +330,76 @@ impl Tool for ListFilesTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let relative = args.path.unwrap_or_default();
+    let relative = args.path.clone().unwrap_or_default();
+    let dir_label = if relative.is_empty() {
+      ".".to_string()
+    } else {
+      relative.clone()
+    };
+    let row = open_row(
+      &self.log,
+      &self.author,
+      format!("Listing files in {dir_label}"),
+    )
+    .await;
     let target = if relative.is_empty() {
       Path::new(".")
     } else {
       Path::new(relative.as_str())
     };
-    let files = self
-      .workspace
-      .list_files(target)
-      .await
-      .map_err(WorkspaceToolError::from_anyhow)?;
-    Ok(ListFilesOutput {
-      files: files
-        .into_iter()
-        .map(|f| WorkspaceFileEntry {
-          path: f.relative_path,
-          size_bytes: f.size_bytes,
-        })
-        .collect(),
-    })
+    match self.workspace.list_files(target).await {
+      Ok(files) => {
+        let entries: Vec<_> = files
+          .into_iter()
+          .map(|f| WorkspaceFileEntry {
+            path: f.relative_path,
+            size_bytes: f.size_bytes,
+          })
+          .collect();
+        let detail = if entries.is_empty() {
+          "(empty)".to_string()
+        } else {
+          entries
+            .iter()
+            .map(|f| format!("- {} ({} bytes)", f.path, f.size_bytes))
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        finish_ok(&row, format!("Listed files in {dir_label}"), detail).await;
+        Ok(ListFilesOutput { files: entries })
+      }
+      Err(error) => {
+        let error = WorkspaceToolError::from_anyhow(error);
+        finish_err(
+          &row,
+          "File listing failed".to_string(),
+          format!("Directory: {dir_label}\n\n{}", error.0),
+        )
+        .await;
+        Err(error)
+      }
+    }
   }
 }
 
 // -- read_file -------------------------------------------------------------
 
 pub const READ_FILE_NAME: &str = "read_file";
-pub const READ_FILE_NOTE_FAIL_TEXT: &str = "File read failed";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReadFileTool {
   workspace: RoomWorkspace,
+  log: EventLog,
+  author: String,
 }
 
 impl ReadFileTool {
-  pub fn new(workspace: RoomWorkspace) -> Self {
-    Self { workspace }
+  pub fn new(workspace: RoomWorkspace, log: EventLog, author: String) -> Self {
+    Self {
+      workspace,
+      log,
+      author,
+    }
   }
 }
 
@@ -319,31 +441,53 @@ impl Tool for ReadFileTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let contents = self
-      .workspace
-      .read_file(Path::new(&args.path))
-      .await
-      .map_err(WorkspaceToolError::from_anyhow)?;
-    Ok(ReadFileOutput {
-      path: args.path,
-      contents,
-    })
+    let row = open_row(
+      &self.log,
+      &self.author,
+      format!("Reading file {}", args.path),
+    )
+    .await;
+    match self.workspace.read_file(Path::new(&args.path)).await {
+      Ok(contents) => {
+        let preview = preview_chars(&contents, READ_PREVIEW_CHARS);
+        finish_ok(&row, format!("Read file {}", args.path), preview).await;
+        Ok(ReadFileOutput {
+          path: args.path,
+          contents,
+        })
+      }
+      Err(error) => {
+        let error = WorkspaceToolError::from_anyhow(error);
+        finish_err(
+          &row,
+          "File read failed".to_string(),
+          format!("Path: {}\n\n{}", args.path, error.0),
+        )
+        .await;
+        Err(error)
+      }
+    }
   }
 }
 
 // -- write_file ------------------------------------------------------------
 
 pub const WRITE_FILE_NAME: &str = "write_file";
-pub const WRITE_FILE_NOTE_FAIL_TEXT: &str = "File write failed";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WriteFileTool {
   workspace: RoomWorkspace,
+  log: EventLog,
+  author: String,
 }
 
 impl WriteFileTool {
-  pub fn new(workspace: RoomWorkspace) -> Self {
-    Self { workspace }
+  pub fn new(workspace: RoomWorkspace, log: EventLog, author: String) -> Self {
+    Self {
+      workspace,
+      log,
+      author,
+    }
   }
 }
 
@@ -393,216 +537,49 @@ impl Tool for WriteFileTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    let row = open_row(
+      &self.log,
+      &self.author,
+      format!("Writing file {}", args.path),
+    )
+    .await;
     let bytes_written = args.contents.len();
-    self
+    match self
       .workspace
       .write_file(Path::new(&args.path), &args.contents)
       .await
-      .map_err(WorkspaceToolError::from_anyhow)?;
-    Ok(WriteFileOutput {
-      path: args.path,
-      bytes_written,
-    })
-  }
-}
-
-// -- inline-note formatters ------------------------------------------------
-
-/// Inline-note for `list_subject_folders`. The detail surfaces the folder
-/// names so the breadcrumb is a one-click stand-in for re-running the
-/// listing.
-pub fn format_list_subject_folders_inline_note(
-  _args: &str,
-  result: &str,
-  ok: bool,
-) -> InlineNote {
-  if !ok {
-    return InlineNote {
-      text: LIST_FOLDERS_NOTE_FAIL_TEXT.to_string(),
-      detail: result.to_string(),
-    };
-  }
-  let detail = match serde_json::from_str::<ListSubjectFoldersOutput>(result) {
-    Ok(parsed) => {
-      if parsed.folders.is_empty() {
-        "(none)".to_string()
-      } else {
-        parsed
-          .folders
-          .iter()
-          .map(|f| {
-            if f.structured {
-              format!("- {}", f.name)
-            } else {
-              format!("- {} (off-format)", f.name)
-            }
-          })
-          .collect::<Vec<_>>()
-          .join("\n")
+    {
+      Ok(()) => {
+        finish_ok(
+          &row,
+          format!("Wrote file {}", args.path),
+          format!("{bytes_written} bytes written"),
+        )
+        .await;
+        Ok(WriteFileOutput {
+          path: args.path,
+          bytes_written,
+        })
+      }
+      Err(error) => {
+        let error = WorkspaceToolError::from_anyhow(error);
+        finish_err(
+          &row,
+          "File write failed".to_string(),
+          format!("Path: {}\n\n{}", args.path, error.0),
+        )
+        .await;
+        Err(error)
       }
     }
-    Err(_) => result.to_string(),
-  };
-  InlineNote {
-    text: LIST_FOLDERS_NOTE_TEXT.to_string(),
-    detail,
   }
 }
 
-/// Inline-note for `create_subject_folder`. The label embeds the resulting
-/// folder name (workspace-relative) so the user can read it from the
-/// timeline without opening the detail dialog.
-pub fn format_create_subject_folder_inline_note(
-  args: &str,
-  result: &str,
-  ok: bool,
-) -> InlineNote {
-  if !ok {
-    let subject = serde_json::from_str::<CreateSubjectFolderArgs>(args)
-      .map(|a| a.subject)
-      .unwrap_or_default();
-    let detail = if subject.is_empty() {
-      result.to_string()
-    } else {
-      format!("Subject: {subject}\n\n{result}")
-    };
-    return InlineNote {
-      text: CREATE_FOLDER_NOTE_FAIL_TEXT.to_string(),
-      detail,
-    };
-  }
-  match serde_json::from_str::<CreateSubjectFolderOutput>(result) {
-    Ok(parsed) => InlineNote {
-      text: format!("Created subject folder {}", parsed.folder),
-      detail: String::new(),
-    },
-    Err(_) => InlineNote {
-      text: "Created subject folder".to_string(),
-      detail: result.to_string(),
-    },
-  }
-}
-
-/// Inline-note for `list_files`. The label includes the listed directory
-/// (workspace-relative, root rendered as `.`); the detail dumps the full
-/// path/size table.
-pub fn format_list_files_inline_note(
-  args: &str,
-  result: &str,
-  ok: bool,
-) -> InlineNote {
-  let dir_label = match serde_json::from_str::<ListFilesArgs>(args)
-    .map(|a| a.path.unwrap_or_default())
-  {
-    Ok(path) if !path.is_empty() => path,
-    _ => ".".to_string(),
-  };
-  if !ok {
-    return InlineNote {
-      text: LIST_FILES_NOTE_FAIL_TEXT.to_string(),
-      detail: format!("Directory: {dir_label}\n\n{result}"),
-    };
-  }
-  let detail = match serde_json::from_str::<ListFilesOutput>(result) {
-    Ok(parsed) => {
-      if parsed.files.is_empty() {
-        "(empty)".to_string()
-      } else {
-        parsed
-          .files
-          .iter()
-          .map(|f| format!("- {} ({} bytes)", f.path, f.size_bytes))
-          .collect::<Vec<_>>()
-          .join("\n")
-      }
-    }
-    Err(_) => result.to_string(),
-  };
-  InlineNote {
-    text: format!("Listed files in {dir_label}"),
-    detail,
-  }
-}
-
-/// Inline-note for `read_file`. The label embeds the file path
-/// (workspace-relative); the detail carries a leading-chunk preview rather
-/// than the full contents to keep the click-to-reveal dialog manageable.
-pub fn format_read_file_inline_note(
-  args: &str,
-  result: &str,
-  ok: bool,
-) -> InlineNote {
-  let path = serde_json::from_str::<ReadFileArgs>(args)
-    .map(|a| a.path)
-    .unwrap_or_default();
-  if !ok {
-    let detail = if path.is_empty() {
-      result.to_string()
-    } else {
-      format!("Path: {path}\n\n{result}")
-    };
-    return InlineNote {
-      text: READ_FILE_NOTE_FAIL_TEXT.to_string(),
-      detail,
-    };
-  }
-  let label = if path.is_empty() {
-    "Read file".to_string()
-  } else {
-    format!("Read file {path}")
-  };
-  let detail = match serde_json::from_str::<ReadFileOutput>(result) {
-    Ok(parsed) => preview(&parsed.contents),
-    Err(_) => preview(result),
-  };
-  InlineNote {
-    text: label,
-    detail,
-  }
-}
-
-/// Inline-note for `write_file`. The label embeds the file path
-/// (workspace-relative); the detail just records the byte count, since
-/// echoing the full payload back would duplicate what is already on disk.
-pub fn format_write_file_inline_note(
-  args: &str,
-  result: &str,
-  ok: bool,
-) -> InlineNote {
-  let path = serde_json::from_str::<WriteFileArgs>(args)
-    .map(|a| a.path)
-    .unwrap_or_default();
-  if !ok {
-    let detail = if path.is_empty() {
-      result.to_string()
-    } else {
-      format!("Path: {path}\n\n{result}")
-    };
-    return InlineNote {
-      text: WRITE_FILE_NOTE_FAIL_TEXT.to_string(),
-      detail,
-    };
-  }
-  let label = if path.is_empty() {
-    "Wrote file".to_string()
-  } else {
-    format!("Wrote file {path}")
-  };
-  let detail = match serde_json::from_str::<WriteFileOutput>(result) {
-    Ok(parsed) => format!("{} bytes written", parsed.bytes_written),
-    Err(_) => String::new(),
-  };
-  InlineNote {
-    text: label,
-    detail,
-  }
-}
-
-fn preview(text: &str) -> String {
-  if text.chars().count() <= READ_PREVIEW_CHARS {
+fn preview_chars(text: &str, max_chars: usize) -> String {
+  if text.chars().count() <= max_chars {
     return text.to_string();
   }
-  let mut out: String = text.chars().take(READ_PREVIEW_CHARS).collect();
+  let mut out: String = text.chars().take(max_chars).collect();
   out.push_str("\n\n... (truncated)");
   out
 }

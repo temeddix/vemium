@@ -1,12 +1,11 @@
 import {
   formatSeparatorTimestamp,
   isLastInRun,
-  resolveAvatarColor,
   shouldShowTimeSeparator,
 } from "@/app/chat";
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
-import type { Draft, Message, Room, RoomView, TurnKind } from "@/app/types";
+import type { Room, RoomEvent, RoomView } from "@/app/types";
 import { roomBadgeText } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
@@ -15,17 +14,18 @@ import { createRef, type Ref, ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
 
 import "./chat-composer.ts";
-
 import "./chat-message.ts";
 import { nextCronTick } from "./cron-picker.ts";
+import { formatDuration } from "./inline-note.ts";
 import "./room-files-dialog.ts";
 import "./room-reports-dialog.ts";
 import "./room-settings-dialog.ts";
 
-interface NoteDialogState {
+interface DetailDialogState {
   author: string;
-  text: string;
-  detail: string;
+  label: string;
+  body: string;
+  duration: string;
 }
 
 declare global {
@@ -35,29 +35,11 @@ declare global {
 }
 
 /**
- * One entry rendered in the scroll area. Either a finalized message (chat
- * bubble or inline-note breadcrumb depending on `kind`), or a live draft.
- * Drafts are always chat-bubble shaped - inline notes are persisted
- * directly without a draft phase.
- */
-interface BubbleEntry {
-  type: "message" | "draft";
-  message: Message | null;
-  draft: Draft | null;
-  /** Sort key shared between persisted messages and live drafts. */
-  sortKey: number;
-  /** ISO timestamp used for time-gap separators and grouping decisions. */
-  timestamp: string;
-  /** Speaker identity for grouping (matches `Message.agent`/`Draft.agent`). */
-  agentKey: string;
-  kind: TurnKind;
-}
-
-/**
  * Top-level page for `/room/:code`. Owns the chat-stream subscription
- * lifecycle (delegated to the store) and renders the bubble feed plus
- * the human composer. Header actions open Settings / Reports modals
- * rather than inline tabs so the chat itself stays the focal point.
+ * lifecycle (delegated to the store) and renders the timeline plus the
+ * human composer. The timeline is a flat list of [`RoomEvent`] rows -
+ * bubble kinds render via [`te-chat-message`], side-row kinds (thinking
+ * and tool inline notes) render via [`te-inline-note`].
  */
 @customElement("te-room-chat-page")
 export class RoomChatPage extends LitElement {
@@ -75,19 +57,15 @@ export class RoomChatPage extends LitElement {
   private accessor sending = false;
 
   @state()
-  private accessor noteDialog: NoteDialogState | null = null;
+  private accessor detailDialog: DetailDialogState | null = null;
 
-  /**
-   * Wall-clock tick used to redraw the paused-room countdown each second.
-   * The interval handle is owned by `#countdownInterval` and only runs
-   * while the component is connected.
-   */
+  /** Wall-clock tick used to redraw the paused-room countdown each second. */
   @state()
   private accessor nowMillis = Date.now();
 
   #countdownInterval: ReturnType<typeof setInterval> | null = null;
 
-  #noteDialogRef: Ref<HTMLElement & { open: boolean }> = createRef();
+  #detailDialogRef: Ref<HTMLElement & { open: boolean }> = createRef();
 
   #settingsDialogRef: Ref<HTMLElementTagNameMap["te-room-settings-dialog"]> =
     createRef();
@@ -105,8 +83,7 @@ export class RoomChatPage extends LitElement {
 
   /**
    * Tracks whether the user is currently anchored to the bottom of the
-   * scroll viewport. Auto-scroll to the new bottom only fires when this
-   * is true so a user reading older messages isn't yanked away.
+   * scroll viewport. Auto-scroll only fires when this is true.
    */
   #pinnedToBottom = true;
 
@@ -197,71 +174,6 @@ export class RoomChatPage extends LitElement {
       padding: 0.5rem 0;
     }
 
-    .inline-note-row {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-    }
-
-    .inline-note-avatar {
-      width: 2rem;
-      height: 2rem;
-      border-radius: 50%;
-      display: grid;
-      place-items: center;
-      font-size: 0.7rem;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      flex-shrink: 0;
-    }
-
-    .inline-note-avatar.is-hidden {
-      visibility: hidden;
-    }
-
-    .inline-note-button {
-      background: none;
-      border: none;
-      padding: 0.1rem 0.4rem;
-      margin: 0;
-      font: inherit;
-      font-size: 0.78rem;
-      color: var(--wa-color-text-quiet);
-      cursor: pointer;
-      text-align: left;
-      border-radius: 0.4rem;
-    }
-
-    .inline-note-button:hover:not(:disabled),
-    .inline-note-button:focus-visible:not(:disabled) {
-      background: var(--wa-color-fill-quiet);
-      color: var(--wa-color-text-normal);
-      outline: none;
-    }
-
-    .inline-note-button:disabled {
-      cursor: default;
-    }
-
-    .inline-note-author {
-      font-weight: 600;
-    }
-
-    .detail-dialog-author {
-      font-size: 0.78rem;
-      color: var(--wa-color-text-quiet);
-      margin-bottom: 0.4rem;
-    }
-
-    .detail-dialog-body {
-      font-size: 0.95rem;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      overflow-wrap: anywhere;
-      font-family: var(--wa-font-family-code, ui-monospace, monospace);
-    }
-
     .empty {
       flex: 1;
       display: grid;
@@ -319,6 +231,28 @@ export class RoomChatPage extends LitElement {
       color: var(--wa-color-text-normal);
       outline: none;
     }
+
+    .detail-dialog-author {
+      font-size: 0.78rem;
+      color: var(--wa-color-text-quiet);
+      margin-bottom: 0.4rem;
+    }
+
+    .detail-dialog-duration {
+      font-size: 0.78rem;
+      color: var(--wa-color-text-quiet);
+      margin-bottom: 0.4rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .detail-dialog-body {
+      font-size: 0.9rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
+      font-family: var(--wa-font-family-code, ui-monospace, monospace);
+    }
   `;
 
   override connectedCallback(): void {
@@ -362,7 +296,7 @@ export class RoomChatPage extends LitElement {
       return this.#renderResolving();
     }
     const { room } = view;
-    const entries = this.#bubbleEntries(view);
+    const events = view.events;
     const topicLabel = room.topic.trim() === "" ? room.code : room.topic;
     return html`
       <div class="container">
@@ -413,7 +347,7 @@ export class RoomChatPage extends LitElement {
             </wa-dropdown-item>
           </wa-dropdown>
         </header>
-        ${this.#renderScrollArea(entries)}
+        ${this.#renderScrollArea(events)}
         <div class="composer-wrap">
           ${this.#renderPausedBanner(room)}
           <te-chat-composer
@@ -442,12 +376,15 @@ export class RoomChatPage extends LitElement {
         .store="${this.store}"
       ></te-room-files-dialog>
       <wa-dialog
-        ${ref(this.#noteDialogRef)}
-        label="${this.noteDialog === null ? "" : this.noteDialog.text}"
+        ${ref(this.#detailDialogRef)}
+        label="${this.detailDialog?.label ?? ""}"
       >
-        ${this.noteDialog === null ? nothing : html`
-          <div class="detail-dialog-author">${this.noteDialog.author}</div>
-          <div class="detail-dialog-body">${this.noteDialog.detail}</div>
+        ${this.detailDialog === null ? nothing : html`
+          <div class="detail-dialog-author">${this.detailDialog.author}</div>
+          <div class="detail-dialog-duration">
+            Took ${this.detailDialog.duration}
+          </div>
+          <div class="detail-dialog-body">${this.detailDialog.body}</div>
         `}
       </wa-dialog>
     `;
@@ -493,13 +430,6 @@ export class RoomChatPage extends LitElement {
     `;
   }
 
-  /**
-   * Renders the paused-room banner: a live HH:MM:SS countdown to the next
-   * scheduled leader wake check plus a Resume button that flips
-   * `DebateState` back to `Running` immediately. Hidden when the debate is
-   * already running, or when the user has deactivated the room - that
-   * state takes over the chrome via the `Deactivated` badge.
-   */
   #renderPausedBanner(room: Room) {
     if (room.debateState !== "paused" || room.roomState !== "active") {
       return nothing;
@@ -534,8 +464,8 @@ export class RoomChatPage extends LitElement {
     `;
   }
 
-  #renderScrollArea(entries: BubbleEntry[]) {
-    if (entries.length === 0) {
+  #renderScrollArea(events: RoomEvent[]) {
+    if (events.length === 0) {
       return html`
         <div class="empty">
           No messages yet. Say hello to start the debate.
@@ -543,138 +473,79 @@ export class RoomChatPage extends LitElement {
       `;
     }
     return html`
-      <div class="scroll">
+      <div class="scroll" @te-open-detail="${this.#onOpenDetail}">
         ${repeat(
-          entries,
-          (entry) => entryKey(entry),
-          (entry, idx) => this.#renderEntry(entry, entries, idx),
+          events,
+          (event) => entryKey(event),
+          (event, idx) => this.#renderEntry(event, events, idx),
         )}
       </div>
     `;
   }
 
-  #renderEntry(entry: BubbleEntry, entries: BubbleEntry[], idx: number) {
-    const previous = idx > 0 ? entries[idx - 1] : null;
-    const next = idx < entries.length - 1 ? entries[idx + 1] : null;
+  #renderEntry(event: RoomEvent, events: RoomEvent[], idx: number) {
+    const previous = idx > 0 ? events[idx - 1] : null;
+    const next = idx < events.length - 1 ? events[idx + 1] : null;
     const showSeparator = shouldShowTimeSeparator(
       previous?.timestamp ?? null,
-      entry.timestamp,
+      event.timestamp,
     );
-    if (entry.kind === "inline_note" && entry.message !== null) {
-      return this.#renderInlineNote(
-        entry.message,
-        showSeparator,
-        next,
-      );
-    }
     const isLast = isLastInRun(
-      { kind: entry.kind, agent: entry.agentKey },
-      next === null ? null : { kind: next.kind, agent: next.agentKey },
+      { kind: event.kind, agent: event.agent },
+      next === null ? null : { kind: next.kind, agent: next.agent },
     );
     const isFirstInRun = previous === null ||
-      previous.agentKey !== entry.agentKey ||
-      previous.kind !== entry.kind ||
+      previous.agent !== event.agent ||
+      previous.kind !== event.kind ||
       showSeparator;
+    const separator = showSeparator
+      ? html`
+        <div class="time-separator">
+          ${formatSeparatorTimestamp(event.timestamp)}
+        </div>
+      `
+      : nothing;
+    if (event.kind === "thinking" || event.kind === "inline_note") {
+      return html`
+        ${separator}
+        <te-inline-note
+          .event="${event}"
+          ?showAvatar="${isLast}"
+          ?showLabel="${isFirstInRun}"
+        ></te-inline-note>
+      `;
+    }
     return html`
-      ${showSeparator
-        ? html`
-          <div class="time-separator">
-            ${formatSeparatorTimestamp(entry.timestamp)}
-          </div>
-        `
-        : nothing}
+      ${separator}
       <te-chat-message
-        .message="${entry.message}"
-        .draft="${entry.draft}"
+        .event="${event}"
         ?showAvatar="${isLast}"
-        ?showLabel="${isFirstInRun && entry.kind !== "user_chat"}"
+        ?showLabel="${isFirstInRun && event.kind !== "user_chat"}"
       ></te-chat-message>
     `;
   }
 
-  /** Renders an inline-note breadcrumb (e.g. `do_nothing`, Python run
-   * outcome, or a leader appearance like "Appeared for steering"). The
-   * avatar matches the chat-bubble row layout so the note visually
-   * attaches to the author's identity, and the dim text is a button that
-   * opens a dialog with the full detail. */
-  #renderInlineNote(
-    message: Message,
-    showSeparator: boolean,
-    next: BubbleEntry | null,
-  ) {
-    const author = message.agent ?? "";
-    const showAvatar = isLastInRun(
-      { kind: "inline_note", agent: author },
-      next === null ? null : { kind: next.kind, agent: next.agentKey },
-    );
-    const color = resolveAvatarColor("inline_note", message.agent);
-    const avatarStyle =
-      `background:${color.background};color:${color.foreground}`;
-    const hasDetail = message.detail !== "";
-    const onClick = (): void => {
-      if (hasDetail) {
-        this.#openNoteDialog(author, message.content, message.detail);
-      }
+  #onOpenDetail = (raw: Event): void => {
+    const event = (raw as CustomEvent<RoomEvent>).detail;
+    const author = event.agent ?? "";
+    const finishedAt = event.completedAt !== null
+      ? Date.parse(event.completedAt)
+      : Date.now();
+    const startedAt = Date.parse(event.timestamp);
+    const elapsedMs = Number.isNaN(startedAt) || Number.isNaN(finishedAt)
+      ? 0
+      : Math.max(0, finishedAt - startedAt);
+    this.detailDialog = {
+      author,
+      label: event.content,
+      body: event.detail,
+      duration: formatDuration(elapsedMs),
     };
-    return html`
-      ${showSeparator
-        ? html`
-          <div class="time-separator">
-            ${formatSeparatorTimestamp(message.timestamp)}
-          </div>
-        `
-        : nothing}
-      <div class="inline-note-row">
-        <div
-          class="inline-note-avatar ${showAvatar ? "" : "is-hidden"}"
-          style="${avatarStyle}"
-        >
-        </div>
-        <button
-          type="button"
-          class="inline-note-button"
-          ?disabled="${!hasDetail}"
-          @click="${onClick}"
-        >
-          <span class="inline-note-author">${author}</span>
-          <span> ${message.content}</span>
-        </button>
-      </div>
-    `;
-  }
-
-  #openNoteDialog(author: string, text: string, detail: string): void {
-    this.noteDialog = { author, text, detail };
-    const dialog = this.#noteDialogRef.value;
+    const dialog = this.#detailDialogRef.value;
     if (dialog !== undefined) {
       dialog.open = true;
     }
-  }
-
-  #bubbleEntries(view: RoomView): BubbleEntry[] {
-    const messages: BubbleEntry[] = view.messages.map((message) => ({
-      type: "message",
-      message,
-      draft: null,
-      sortKey: message.sequence,
-      timestamp: message.timestamp,
-      agentKey: message.agent ?? "",
-      kind: message.kind,
-    }));
-    const drafts: BubbleEntry[] = view.drafts.map((draft) => ({
-      type: "draft",
-      message: null,
-      draft,
-      // Drafts always sort after every persisted message (sequences live in
-      // the same monotonic counter, so any unfinished draft is "newer than
-      // anything we've seen").
-      sortKey: Number.MAX_SAFE_INTEGER,
-      timestamp: new Date().toISOString(),
-      agentKey: draft.agent,
-      kind: draft.kind,
-    }));
-    return [...messages, ...drafts].sort((a, b) => a.sortKey - b.sortKey);
-  }
+  };
 
   // -- Actions ------------------------------------------------------------
 
@@ -691,7 +562,6 @@ export class RoomChatPage extends LitElement {
     this.sending = true;
     try {
       await this.store.sendUserMessage(view.room.code, event.detail.content);
-      // Pin to bottom whenever the user themselves sends.
       this.#pinnedToBottom = true;
     } finally {
       this.sending = false;
@@ -726,8 +596,6 @@ export class RoomChatPage extends LitElement {
     }
     const room = this.store.findRoomByCode(this.code);
     if (room === null) {
-      // Rooms list may not have loaded yet; we'll try again on the next
-      // store update via `updated()`.
       return;
     }
     this.#lastSelectedCode = this.code;
@@ -762,30 +630,19 @@ export class RoomChatPage extends LitElement {
 }
 
 /**
- * Stable identity for a `BubbleEntry` used as the `repeat` key. Persisted
- * messages are keyed by their database id; live drafts are keyed by their
- * `turnId`. The namespace prefix avoids collisions between the two id
- * spaces. Without stable keys, a newly inserted `inline_note` row would
- * shift later entries by index and cause Lit to recreate the active draft
- * element, which resets the thinking-block scroll position and collapsed
- * state.
+ * Stable identity for the `repeat` directive. Prefer the row's database
+ * id so reconnects (which replay the same row from snapshot) reuse the
+ * same DOM and don't reset scroll / streaming-body state. Falls back to
+ * a sequence-derived key for the rare in-memory event without an id.
  */
-function entryKey(entry: BubbleEntry): string {
-  if (entry.type === "message" && entry.message !== null) {
-    return `m-${entry.message.id ?? entry.sortKey}`;
-  }
-  if (entry.type === "draft" && entry.draft !== null) {
-    return `d-${entry.draft.turnId}`;
-  }
-  return `x-${entry.sortKey}`;
+function entryKey(event: RoomEvent): string {
+  return event.id !== null ? `r-${event.id}` : `s-${event.sequence}`;
 }
 
 /**
- * Formats a remaining-time delta. Under 24 hours renders as `HH:MM:SS`;
- * 24 hours or more prepends a `N day(s) and` prefix so weekly schedules
- * read naturally instead of overflowing the hour slot. Negative inputs
- * clamp to zero so the banner never flashes a negative countdown between
- * the target tick and the next interval recompute.
+ * Formats a remaining-time delta for the paused-room banner. Under 24
+ * hours renders as `HH:MM:SS`; 24 hours or more prepends `N day(s) and`.
+ * Negative inputs clamp to zero.
  */
 function formatCountdown(milliseconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));

@@ -40,14 +40,15 @@ use crate::app_state::AppState;
 use crate::config::room_defaults;
 use crate::db;
 use crate::error::ReportError;
+use crate::event_log::EventLog;
 use crate::models::{
   AppSettings, CloneRoomRequest, CreateMessageRequest, CreateRoomRequest,
-  DebateState, ProviderConfig, REDACTED_API_KEY_SENTINEL, Room, RoomEvent,
-  RoomEventKind, RoomState, UpdateAppSettingsRequest, UpdateRoomRequest,
+  DebateState, ProviderConfig, REDACTED_API_KEY_SENTINEL, Room, RoomEventKind,
+  RoomState, UpdateAppSettingsRequest, UpdateRoomRequest,
 };
 use crate::provider_models;
 use crate::runtime;
-use crate::streaming::{RoomReceiver, WsEvent, new_turn_id};
+use crate::streaming::{RoomReceiver, WsEvent};
 use crate::workspace::DebateRoot;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -646,31 +647,16 @@ async fn post_user_message(
     }
   };
 
-  let draft = RoomEvent {
-    id: None,
-    room_code: code.clone(),
-    sequence: handle.allocate_event_sequence(),
-    kind: RoomEventKind::UserChat,
-    agent: Some(USER_AGENT_NAME.to_string()),
-    content,
-    reasoning: String::new(),
-    detail: String::new(),
-    timestamp: Utc::now(),
-  };
-
-  let event = match db::insert_event(&state.db, &draft).await {
-    Ok(stored) => stored,
-    Err(error) => {
-      tracing::warn!(%error, "failed to insert user message");
-      return internal("failed to persist message");
-    }
-  };
-
   let stream = state.ensure_room_stream(&code).await;
-  stream.send(WsEvent::MessageAdded {
-    turn_id: new_turn_id(),
-    message: event.clone(),
-  });
+  let log = EventLog::new(state.clone(), code.clone(), handle, stream);
+  let event = log
+    .record_finalized(
+      RoomEventKind::UserChat,
+      Some(USER_AGENT_NAME.to_string()),
+      content,
+      String::new(),
+    )
+    .await;
 
   (StatusCode::CREATED, Json(json!({"message": event}))).into_response()
 }
@@ -869,7 +855,7 @@ async fn stream_room_events(
 /// deleted between connection acceptance and snapshot construction.
 async fn build_snapshot(state: &AppState, room_code: &str) -> Option<WsEvent> {
   let room_view = state.rooms.read().await.get(room_code).map(Room::view)?;
-  let messages = db::load_room_events(&state.db, room_code)
+  let events = db::load_room_events(&state.db, room_code)
     .await
     .report()
     .unwrap_or_default();
@@ -879,7 +865,7 @@ async fn build_snapshot(state: &AppState, room_code: &str) -> Option<WsEvent> {
     .unwrap_or_default();
   Some(WsEvent::Snapshot {
     room: Box::new(room_view),
-    messages,
+    events,
     reports,
   })
 }
@@ -897,35 +883,21 @@ async fn handle_socket(
     return;
   }
   loop {
-    // `biased` makes lifecycle frames win the poll order so a backlog of
-    // tokens in the second lane can never delay a `TurnStarted` /
-    // `TurnCompleted`. Both lanes use bounded mpsc per-subscriber, so
-    // there's no shared ring that could evict another connection's
-    // events.
     tokio::select! {
-      biased;
       incoming = socket.recv() => match incoming {
         Some(Ok(Message::Close(_))) | None => break,
         Some(Ok(_)) => {}
         Some(Err(_)) => break,
       },
-      event = receiver.lifecycle.recv() => match event {
+      event = receiver.events.recv() => match event {
         Some(event) => {
           if !send_event(&mut socket, &event).await {
             break;
           }
         }
-        // Lifecycle channel closed: producer dropped this subscription
-        // (likely lifecycle buffer full -> behind beyond recovery). Bail
-        // and let the client reconnect with a fresh snapshot.
-        None => break,
-      },
-      event = receiver.tokens.recv() => match event {
-        Some(event) => {
-          if !send_event(&mut socket, &event).await {
-            break;
-          }
-        }
+        // Channel closed: the producer dropped this subscription
+        // (queue full, beyond recovery). Bail and let the client
+        // reconnect from a fresh snapshot.
         None => break,
       },
     }

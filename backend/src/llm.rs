@@ -22,7 +22,7 @@ use futures::StreamExt;
 use rig::agent::{AgentBuilder, MultiTurnStreamItem};
 use rig::client::BearerAuth;
 use rig::client::CompletionClient;
-use rig::completion::{CompletionModel, Message, Prompt};
+use rig::completion::{CompletionModel, Message};
 use rig::providers::{
   ollama::{self, OllamaApiKey},
   openrouter,
@@ -32,8 +32,7 @@ use serde_json::{Value, json};
 
 use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
-use crate::runtime::{DebateHook, ReportHook, TurnRecorder};
-use crate::streaming::{RoomStream, TurnId, WsEvent};
+use crate::runtime::{DebateHook, ReportHook, TurnSession};
 use crate::tools::do_nothing::DoNothingTool;
 use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
@@ -69,10 +68,9 @@ fn openrouter_extra_params() -> Value {
   json!({ "reasoning": { "enabled": true } })
 }
 
-/// Inputs for a debater turn (full tool set). Bundled into a single struct
-/// because the runtime always passes them together. The hook carries the
-/// per-turn `state` / `room_code` / `author` context needed to persist
-/// inline-note breadcrumbs as tools fire.
+/// Inputs for a debater turn (full tool set). The `session` segments the
+/// stream into thinking and bubble rows; tools persist their own
+/// inline-note rows out of band.
 pub struct DebateTurnInputs {
   pub system_prompt: String,
   pub history: Vec<Message>,
@@ -82,48 +80,43 @@ pub struct DebateTurnInputs {
   pub leader_tool: RequestLeaderDecisionTool,
   pub do_nothing_tool: DoNothingTool,
   pub inline_note_tool: GetInlineNoteDetailTool,
-  pub hook: DebateHook,
+  pub session: Arc<TurnSession>,
 }
 
 /// Inputs for the resume-gate tool loop. Used while a room is paused: the
-/// model must call exactly one of `resume_room` (wake the debate) or
-/// `do_nothing` (stay paused), with `get_inline_note_detail` available
-/// for context lookups.
+/// model may call `resume_room` (wake the debate) or `do_nothing` (stay
+/// paused), with `get_inline_note_detail` available for context lookups.
 pub struct ResumeGateInputs {
   pub system_prompt: String,
   pub user_prompt: String,
   pub resume_tool: ResumeRoomTool,
   pub do_nothing_tool: DoNothingTool,
   pub inline_note_tool: GetInlineNoteDetailTool,
-  pub hook: DebateHook,
+  pub session: Arc<TurnSession>,
 }
 
-/// Inputs for the leader steering turn. Streams tokens via the hook and
-/// exposes `get_inline_note_detail` so the leader can pull breadcrumb
-/// bodies, plus `pause_room` so it can choose to pause the debate
-/// directly when it judges the discussion has run its course.
+/// Inputs for the leader steering turn. The session segments thinking /
+/// bubble rows; tools own their inline-note rows. `pause_room` is
+/// available so the leader can pause the debate directly.
 pub struct SteeringTurnInputs {
   pub system_prompt: String,
   pub user_prompt: String,
-  pub hook: DebateHook,
+  pub session: Arc<TurnSession>,
   pub inline_note_tool: GetInlineNoteDetailTool,
   pub pause_tool: PauseRoomTool,
 }
 
 /// Inputs for the on-demand leader-decision turn invoked by the
 /// `request_leader_decision` tool from a debater. Carries `pause_room`
-/// so the leader can pause the room itself when the debater asks for a
-/// final judgment, plus `get_inline_note_detail` for breadcrumb lookups.
-/// The turn is non-streaming; the final text becomes the on-demand
-/// leader bubble unless `pause_room` was called (in which case that
-/// tool already emitted the bubble). The hook persists per-tool inline
-/// notes and lets the caller see `pause_room_called` via its recorder.
+/// so the leader can pause the room itself, plus `get_inline_note_detail`
+/// for breadcrumb lookups. The session segments the stream like any
+/// other turn; the final text is also returned to the calling debater.
 pub struct LeaderDecisionTurnInputs {
   pub system_prompt: String,
   pub user_prompt: String,
   pub pause_tool: PauseRoomTool,
   pub inline_note_tool: GetInlineNoteDetailTool,
-  pub hook: DebateHook,
+  pub session: Arc<TurnSession>,
 }
 
 /// Inputs for a no-tool streaming turn (leader report). Used only by the
@@ -376,9 +369,11 @@ impl ChatClient for OpenRouterChatClient {
 
 // -- Generic helpers ------------------------------------------------------
 
-/// Generic core of a debater turn. Builds the agent with the full tool set,
-/// drives the multi-turn streaming loop, forwards reasoning deltas through
-/// the hook's broadcaster, and returns the final assistant text.
+/// Generic core of a debater turn. Builds the agent with the full tool
+/// set, drives the multi-turn streaming loop, and returns the final
+/// assistant text. Reasoning and text deltas are routed into the
+/// session's row state machine; tool inline-note rows are produced by
+/// each tool from inside its own `call()`.
 async fn run_chat_turn_with_builder<M>(
   builder: AgentBuilder<M>,
   inputs: DebateTurnInputs,
@@ -386,31 +381,50 @@ async fn run_chat_turn_with_builder<M>(
 where
   M: CompletionModel + 'static,
 {
+  let session = inputs.session.clone();
+  let log = session.log().clone();
+  let author = session.author().to_string();
+  let workspace = inputs.workspace;
   let agent = builder
     .preamble(&inputs.system_prompt)
-    .tool(WebFetchTool::new())
-    .tool(RunPythonTool::new(inputs.workspace.clone(), inputs.runner))
-    .tool(ListSubjectFoldersTool::new(inputs.workspace.clone()))
-    .tool(CreateSubjectFolderTool::new(inputs.workspace.clone()))
-    .tool(ListFilesTool::new(inputs.workspace.clone()))
-    .tool(ReadFileTool::new(inputs.workspace.clone()))
-    .tool(WriteFileTool::new(inputs.workspace))
+    .tool(WebFetchTool::new(log.clone(), author.clone()))
+    .tool(RunPythonTool::new(
+      workspace.clone(),
+      inputs.runner,
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(ListSubjectFoldersTool::new(
+      workspace.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(CreateSubjectFolderTool::new(
+      workspace.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(ListFilesTool::new(
+      workspace.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(ReadFileTool::new(
+      workspace.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(WriteFileTool::new(workspace, log, author))
     .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
     .tool(inputs.inline_note_tool)
     .build();
 
-  let reasoning_stream = inputs.hook.stream().clone();
-  let Some(reasoning_turn_id) = inputs.hook.turn_id().cloned() else {
-    bail!("debate turn hook is missing its draft turn id");
-  };
-  let reasoning_recorder = inputs.hook.recorder();
-
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .with_history(inputs.history)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(inputs.hook)
+    .with_hook(DebateHook::new(session.clone()))
     .await;
 
   let mut final_text = String::new();
@@ -420,15 +434,9 @@ where
         final_text = final_response.response().to_string();
       }
       MultiTurnStreamItem::StreamAssistantItem(content) => {
-        forward_reasoning(
-          &reasoning_stream,
-          &reasoning_turn_id,
-          &reasoning_recorder,
-          &content,
-        )
-        .await;
-        // Text deltas, tool starts, and tool results are surfaced through
-        // `DebateHook`; we only intercept reasoning here.
+        if let Some(delta) = reasoning_delta(&content) {
+          session.append_thinking(&delta).await;
+        }
       }
       _ => {}
     }
@@ -436,10 +444,6 @@ where
   Ok(final_text)
 }
 
-/// Streaming steering turn for the leader. Mirrors
-/// [`run_chat_turn_with_builder`] but with `get_inline_note_detail` so
-/// the leader can pull breadcrumb bodies and `pause_room` so it can
-/// pause the debate directly when the discussion has run its course.
 async fn run_steering_stream<M>(
   builder: AgentBuilder<M>,
   inputs: SteeringTurnInputs,
@@ -452,17 +456,12 @@ where
     .tool(inputs.inline_note_tool)
     .tool(inputs.pause_tool)
     .build();
-  let reasoning_stream = inputs.hook.stream().clone();
-  let Some(reasoning_turn_id) = inputs.hook.turn_id().cloned() else {
-    bail!("steering turn hook is missing its draft turn id");
-  };
-  let reasoning_recorder = inputs.hook.recorder();
+  let session = inputs.session;
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(inputs.hook)
+    .with_hook(DebateHook::new(session.clone()))
     .await;
-
   let mut final_text = String::new();
   while let Some(item) = stream.next().await {
     match item.map_err(|e| anyhow!(e.to_string()))? {
@@ -470,13 +469,9 @@ where
         final_text = final_response.response().to_string();
       }
       MultiTurnStreamItem::StreamAssistantItem(content) => {
-        forward_reasoning(
-          &reasoning_stream,
-          &reasoning_turn_id,
-          &reasoning_recorder,
-          &content,
-        )
-        .await;
+        if let Some(delta) = reasoning_delta(&content) {
+          session.append_thinking(&delta).await;
+        }
       }
       _ => {}
     }
@@ -484,11 +479,6 @@ where
   Ok(final_text)
 }
 
-/// Runs the on-demand leader decision turn: build the agent with
-/// `pause_room` and `get_inline_note_detail` and let the leader either
-/// pause the debate directly or compose a verdict as text. The final
-/// text is returned to the caller; if `pause_room` was called, the
-/// pause tool already emitted its own bubble.
 async fn run_leader_decision_with_builder<M>(
   builder: AgentBuilder<M>,
   inputs: LeaderDecisionTurnInputs,
@@ -501,17 +491,29 @@ where
     .tool(inputs.pause_tool)
     .tool(inputs.inline_note_tool)
     .build();
-  agent
-    .prompt(inputs.user_prompt)
-    .with_hook(inputs.hook)
-    .max_turns(MAX_TOOL_ROUNDS_PER_TURN)
-    .await
-    .map_err(|e| anyhow!(e.to_string()))
+  let session = inputs.session;
+  let mut stream = agent
+    .stream_prompt(inputs.user_prompt)
+    .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
+    .with_hook(DebateHook::new(session.clone()))
+    .await;
+  let mut final_text = String::new();
+  while let Some(item) = stream.next().await {
+    match item.map_err(|e| anyhow!(e.to_string()))? {
+      MultiTurnStreamItem::FinalResponse(final_response) => {
+        final_text = final_response.response().to_string();
+      }
+      MultiTurnStreamItem::StreamAssistantItem(content) => {
+        if let Some(delta) = reasoning_delta(&content) {
+          session.append_thinking(&delta).await;
+        }
+      }
+      _ => {}
+    }
+  }
+  Ok(final_text)
 }
 
-/// Runs the wake-on-cron resume gate. The model is expected to call
-/// exactly one of `resume_room` / `do_nothing`; both terminating tools
-/// own their side effects, so we discard the assistant's text reply.
 async fn run_resume_gate_with_builder<M>(
   builder: AgentBuilder<M>,
   inputs: ResumeGateInputs,
@@ -525,13 +527,43 @@ where
     .tool(inputs.do_nothing_tool)
     .tool(inputs.inline_note_tool)
     .build();
-  agent
-    .prompt(inputs.user_prompt)
-    .with_hook(inputs.hook)
-    .max_turns(MAX_TOOL_ROUNDS_PER_TURN)
-    .await
-    .map_err(|e| anyhow!(e.to_string()))?;
+  let session = inputs.session;
+  let mut stream = agent
+    .stream_prompt(inputs.user_prompt)
+    .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
+    .with_hook(DebateHook::new(session.clone()))
+    .await;
+  while let Some(item) = stream.next().await {
+    if let MultiTurnStreamItem::StreamAssistantItem(content) =
+      item.map_err(|e| anyhow!(e.to_string()))?
+      && let Some(delta) = reasoning_delta(&content)
+    {
+      session.append_thinking(&delta).await;
+    }
+  }
   Ok(())
+}
+
+/// Returns the reasoning delta carried by a `StreamedAssistantContent`
+/// item, or `None` when the item is a text/tool/final variant. Treats
+/// the non-delta `Reasoning(_)` variant as a single full-text delta -
+/// providers that only emit the cumulative form will produce a single
+/// thinking row whose body is the full trace.
+fn reasoning_delta<R>(item: &StreamedAssistantContent<R>) -> Option<String> {
+  match item {
+    StreamedAssistantContent::Reasoning(reasoning) => {
+      let text = reasoning.display_text();
+      if text.is_empty() { None } else { Some(text) }
+    }
+    StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+      if reasoning.is_empty() {
+        None
+      } else {
+        Some(reasoning.clone())
+      }
+    }
+    _ => None,
+  }
 }
 
 /// Streaming no-tool turn used by leader reports. The hook is a
@@ -557,38 +589,4 @@ where
     }
   }
   Ok(final_text)
-}
-
-/// Forwards reasoning tokens that arrive on the [`MultiTurnStreamItem`]
-/// stream. Reasoning is not exposed via [`rig::agent::PromptHook`], so we
-/// extract it here, push it into the [`TurnRecorder`] (so the eventual
-/// `MessageAdded` includes the full trace inline) and emit a
-/// [`WsEvent::DraftReasoning`] frame for live rendering.
-async fn forward_reasoning<R>(
-  stream: &RoomStream,
-  turn_id: &TurnId,
-  recorder: &TurnRecorder,
-  item: &StreamedAssistantContent<R>,
-) {
-  let delta = match item {
-    StreamedAssistantContent::Reasoning(reasoning) => {
-      let text = reasoning.display_text();
-      if text.is_empty() {
-        return;
-      }
-      text
-    }
-    StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-      if reasoning.is_empty() {
-        return;
-      }
-      reasoning.clone()
-    }
-    _ => return,
-  };
-  recorder.append_reasoning(&delta).await;
-  stream.send(WsEvent::DraftReasoning {
-    turn_id: turn_id.clone(),
-    delta,
-  });
 }

@@ -8,7 +8,7 @@
  * across reloads, and even after server-side renames.
  */
 
-import type { TurnKind } from "@/app/types";
+import type { RoomEventKind } from "@/app/types";
 
 /** Stable string the backend writes into `agent` for human-authored rows. */
 export const USER_AGENT_NAME = "user";
@@ -51,7 +51,7 @@ const SELF_COLOR: PersonaColor = {
  * persona, even if some persona happened to be named "user".
  */
 export function resolveAvatarColor(
-  kind: TurnKind,
+  kind: RoomEventKind,
   agent: string | null,
 ): PersonaColor {
   if (kind === "user_chat") {
@@ -91,8 +91,8 @@ export function shouldShowTimeSeparator(
  * gates avatar rendering.
  */
 export function isLastInRun(
-  current: { kind: TurnKind; agent: string | null },
-  next: { kind: TurnKind; agent: string | null } | null,
+  current: { kind: RoomEventKind; agent: string | null },
+  next: { kind: RoomEventKind; agent: string | null } | null,
 ): boolean {
   if (next === null) {
     return true;

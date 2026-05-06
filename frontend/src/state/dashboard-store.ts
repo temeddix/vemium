@@ -4,14 +4,12 @@ import type {
   CloneRoomRequest,
   CreateMessageRequest,
   CreateRoomRequest,
-  Draft,
-  DraftKind,
-  Message,
   ProviderConfig,
   ProviderModelOption,
   ProviderModelsResponse,
   ReportBuffer,
   Room,
+  RoomEvent,
   RoomReport,
   RoomsListResponse,
   RoomView,
@@ -56,10 +54,10 @@ const INITIAL_STATE: DashboardState = {
 };
 
 /**
- * The dashboard store is the single source of truth for the UI. Web
- * components subscribe via `subscribe()` and read with `getState()`. The
- * store owns one `RoomClient` and re-targets it whenever the user selects
- * a different room.
+ * Single source of truth for the UI. Web components subscribe via
+ * `subscribe()` and read with `getState()`. The store owns one
+ * `RoomClient` and re-targets it whenever the user selects a different
+ * room.
  */
 export class DashboardStore {
   #state: DashboardState = INITIAL_STATE;
@@ -164,15 +162,6 @@ export class DashboardStore {
     }
   }
 
-  /**
-   * Probes the provider configured by `config` and returns the model
-   * identifiers it advertises. Used by the settings page to populate a
-   * dropdown from the form's in-progress values; `tier` selects which
-   * stored API key the redacted sentinel `***` falls back to on the
-   * backend. Errors (network, upstream non-2xx, unparseable response)
-   * resolve with an `error` string instead of throwing so the caller can
-   * render a per-tier message without polluting global state.
-   */
   async fetchProviderModels(
     tier: "low" | "high",
     config: ProviderConfig,
@@ -216,11 +205,6 @@ export class DashboardStore {
     this.#client.connect(roomCode);
   }
 
-  /**
-   * Drops the active WS subscription and clears the current selection.
-   * Called by the router when navigating away from `/room/:code` so we
-   * don't keep streaming events for an off-screen room.
-   */
   clearSelection(): void {
     if (this.#state.currentRoomCode === null) {
       return;
@@ -233,11 +217,6 @@ export class DashboardStore {
     });
   }
 
-  /**
-   * Returns the loaded room matching `code`, or null if none has loaded
-   * yet. The router uses this to translate `/room/:code` URLs into a
-   * `selectRoom(code)` call once the rooms list has populated.
-   */
   findRoomByCode(code: string): Room | null {
     return this.#state.rooms.find((room) => room.code === code) ?? null;
   }
@@ -272,12 +251,6 @@ export class DashboardStore {
     }
   }
 
-  /**
-   * Asks the backend to duplicate `roomCode` into a fresh room. The reply
-   * carries the new room's metadata; we reload the room list so the clone
-   * appears in the home grid before navigation. Returns the cloned room on
-   * success, or null when the request fails.
-   */
   async cloneRoom(
     roomCode: string,
     request: CloneRoomRequest,
@@ -333,12 +306,6 @@ export class DashboardStore {
     }
   }
 
-  /**
-   * POSTs a human-authored message into the room. The backend persists it
-   * and broadcasts a `messageAdded` WS frame, so we don't need to mutate
-   * local state here; the active subscription will deliver the event and
-   * `#applyEvent` will append it to the view.
-   */
   async sendUserMessage(
     roomCode: string,
     content: string,
@@ -366,12 +333,6 @@ export class DashboardStore {
     }
   }
 
-  /**
-   * Fetches the flat list of files inside the given room's workspace. The
-   * dialog turns this into a tree client-side. Hidden directories like
-   * `.venv` are filtered server-side, so the response is safe to render
-   * verbatim.
-   */
   async loadWorkspaceFiles(roomCode: string): Promise<WorkspaceFile[] | null> {
     try {
       const response = await fetch(
@@ -391,42 +352,23 @@ export class DashboardStore {
     }
   }
 
-  /** URL the browser should `window.open` to view a single workspace file. */
   workspaceFileUrl(roomCode: string, path: string): string {
     const params = new URLSearchParams({ path });
     return `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files/raw?${params.toString()}`;
   }
 
-  /** URL of the workspace zip download for the given room. */
   workspaceDownloadUrl(roomCode: string): string {
     return `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files/download`;
   }
 
-  /**
-   * Flips the user-controlled gate on this room to `Active`. Independent
-   * of the leader-controlled `DebateState`: a room the leader paused stays
-   * paused until the leader (or the resume schedule) flips it back;
-   * activating only undoes a prior deactivation.
-   */
   async activateRoom(roomCode: string): Promise<void> {
     await this.#postRoomStateAction(roomCode, "activate");
   }
 
-  /**
-   * Flips the user-controlled gate on this room to `Deactivated`. The
-   * strongest off-switch - while deactivated the orchestrator is fully
-   * halted regardless of what the leader does.
-   */
   async deactivateRoom(roomCode: string): Promise<void> {
     await this.#postRoomStateAction(roomCode, "deactivate");
   }
 
-  /**
-   * User override for the leader-controlled `DebateState` gate. Wakes the
-   * paused debate immediately rather than waiting for the next scheduled
-   * leader check. Idempotent on the backend; calling on an already-running
-   * room is a no-op.
-   */
   async resumeRoom(roomCode: string): Promise<void> {
     await this.#postRoomStateAction(roomCode, "resume");
   }
@@ -478,7 +420,7 @@ export class DashboardStore {
   #applyEvent(event: WsEvent): void {
     switch (event.type) {
       case "snapshot":
-        this.#applySnapshot(event.room, event.messages, event.reports);
+        this.#applySnapshot(event.room, event.events, event.reports);
         break;
       case "roomState":
         this.#patchCurrentRoom((room) => ({ ...room, roomState: event.state }));
@@ -489,62 +431,28 @@ export class DashboardStore {
           debateState: event.state,
         }));
         break;
-      case "draftStarted":
-        this.#mutateView((view) =>
-          upsertDraft(view, event.turnId, event.agent, event.kind)
-        );
+      case "rowAdded":
+        this.#mutateView((view) => upsertRow(view, event.event));
         break;
-      case "draftText":
+      case "rowDelta":
         this.#mutateView((view) =>
-          mapDraft(view, event.turnId, (draft) => ({
-            ...draft,
-            content: draft.content + event.delta,
+          mapRow(view, event.id, (row) => ({
+            ...row,
+            content: row.content + (event.contentDelta ?? ""),
+            detail: row.detail + (event.detailDelta ?? ""),
           }))
         );
         break;
-      case "draftReasoning":
+      case "rowFinished":
         this.#mutateView((view) =>
-          mapDraft(view, event.turnId, (draft) => ({
-            ...draft,
-            reasoning: draft.reasoning + event.delta,
+          mapRow(view, event.id, (row) => ({
+            ...row,
+            content: event.content,
+            detail: event.detail,
+            status: event.status,
+            completedAt: event.completedAt,
           }))
         );
-        break;
-      case "draftToolStarted":
-        this.#mutateView((view) =>
-          mapDraft(view, event.turnId, (draft) => ({
-            ...draft,
-            runningTool: event.tool,
-          }))
-        );
-        break;
-      case "draftToolCompleted":
-        this.#mutateView((view) =>
-          mapDraft(
-            view,
-            event.turnId,
-            (draft) =>
-              draft.runningTool === event.tool
-                ? { ...draft, runningTool: null }
-                : draft,
-          )
-        );
-        break;
-      case "draftFailed":
-        this.#mutateView((view) =>
-          mapDraft(view, event.turnId, (draft) => ({
-            ...draft,
-            status: "failed",
-            error: event.error,
-          }))
-        );
-        break;
-      case "messageAdded":
-        this.#mutateView((view) => ({
-          ...view,
-          messages: appendMessage(view.messages, event.message),
-          drafts: view.drafts.filter((d) => d.turnId !== event.turnId),
-        }));
         break;
       case "reportStarted":
         this.#mutateView((view) =>
@@ -580,17 +488,12 @@ export class DashboardStore {
 
   #applySnapshot(
     room: Room,
-    messages: Message[],
+    events: RoomEvent[],
     reports: RoomReport[],
   ): void {
-    // Snapshot is authoritative for `messages`. `drafts` are recreated by
-    // any `DraftStarted` frames the server replays right after subscribe;
-    // we wipe the live draft list so a stale draft from a previous
-    // selection of the same room doesn't linger.
     const view: RoomView = {
       room,
-      messages,
-      drafts: [],
+      events: events.slice().sort((a, b) => a.sequence - b.sequence),
       reports: reports.map(toReportBuffer),
     };
     this.#patch({
@@ -645,89 +548,42 @@ export class DashboardStore {
 
 // -- Pure helpers ---------------------------------------------------------
 
-function emptyDraft(turnId: string, agent: string, kind: DraftKind): Draft {
-  return {
-    turnId,
-    agent,
-    kind,
-    content: "",
-    reasoning: "",
-    runningTool: null,
-    status: "streaming",
-    error: null,
-  };
-}
-
 /**
- * Inserts (or refreshes the metadata of) a draft for `turnId`. Refresh
- * happens when the server replays `DraftStarted` for an already-known
- * draft (e.g. because we're a late subscriber); we keep any tokens
- * already accumulated and just patch the header.
+ * Inserts (or replaces) `incoming` in `view.events`, keeping the list
+ * sorted by `sequence`. If a row with the same id already exists (e.g.
+ * a `rowAdded` arriving after a snapshot replayed it), the latest wire
+ * payload wins.
  */
-function upsertDraft(
-  view: RoomView,
-  turnId: string,
-  agent: string,
-  kind: DraftKind,
-): RoomView {
-  const idx = view.drafts.findIndex((d) => d.turnId === turnId);
-  if (idx < 0) {
-    return {
-      ...view,
-      drafts: [...view.drafts, emptyDraft(turnId, agent, kind)],
-    };
+function upsertRow(view: RoomView, incoming: RoomEvent): RoomView {
+  if (incoming.id === null) {
+    return { ...view, events: [...view.events, incoming] };
   }
-  const drafts = view.drafts.map((d, i) =>
-    i === idx ? { ...d, agent, kind } : d
-  );
-  return { ...view, drafts };
-}
-
-/**
- * Applies `transform` to the draft for `turnId`. If no such draft exists
- * yet (we received a delta before any `DraftStarted` frame), creates an
- * anonymous placeholder so the tokens have somewhere to land - the
- * server's replay will fill in the header before the next render.
- */
-function mapDraft(
-  view: RoomView,
-  turnId: string,
-  transform: (draft: Draft) => Draft,
-): RoomView {
-  const idx = view.drafts.findIndex((d) => d.turnId === turnId);
-  if (idx < 0) {
-    // Default kind is `agent_chat` - placeholder for tokens that arrived
-    // ahead of `DraftStarted`. The server's replay will rewrite the kind
-    // before the next render if it's actually a leader-note draft.
-    const placeholder = emptyDraft(turnId, "", "agent_chat");
-    return {
-      ...view,
-      drafts: [...view.drafts, transform(placeholder)],
-    };
-  }
-  const drafts = view.drafts.map((d, i) => (i === idx ? transform(d) : d));
-  return { ...view, drafts };
-}
-
-/**
- * Inserts `message` into `messages` keeping the list sorted by sequence.
- * `MessageAdded` frames usually arrive in order, but we tolerate
- * reordering (e.g. on-demand leader notes interleaved with a debater
- * turn) by re-sorting around the insertion point.
- */
-function appendMessage(messages: Message[], incoming: Message): Message[] {
-  if (messages.some((m) => m.sequence === incoming.sequence)) {
-    return messages.map((m) => m.sequence === incoming.sequence ? incoming : m);
+  const existing = view.events.findIndex((e) => e.id === incoming.id);
+  if (existing >= 0) {
+    const events = view.events.map((e, i) => (i === existing ? incoming : e));
+    return { ...view, events };
   }
   if (
-    messages.length === 0 ||
-    incoming.sequence > messages[messages.length - 1].sequence
+    view.events.length === 0 ||
+    incoming.sequence > view.events[view.events.length - 1].sequence
   ) {
-    return [...messages, incoming];
+    return { ...view, events: [...view.events, incoming] };
   }
-  const next = [...messages, incoming];
-  next.sort((a, b) => a.sequence - b.sequence);
-  return next;
+  const events = [...view.events, incoming].sort(
+    (a, b) => a.sequence - b.sequence,
+  );
+  return { ...view, events };
+}
+
+function mapRow(
+  view: RoomView,
+  id: number,
+  transform: (row: RoomEvent) => RoomEvent,
+): RoomView {
+  const events = view.events.map((
+    row,
+  ) => (row.id === id ? transform(row) : row));
+  return { ...view, events };
 }
 
 function appendReport(view: RoomView, report: ReportBuffer): RoomView {
@@ -749,12 +605,6 @@ function mapReport(
   return { ...view, reports };
 }
 
-/**
- * Extracts a human-readable message from a non-2xx response body. The
- * backend returns `{"error": "..."}` JSON for known failures; falls back to
- * the raw text if the body is not the expected shape, and to a generic
- * status-coded message when even that is empty.
- */
 function extractErrorMessage(body: string, status: number): string {
   if (body !== "") {
     try {

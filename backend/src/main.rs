@@ -12,6 +12,7 @@ mod app_state;
 mod config;
 mod db;
 mod error;
+mod event_log;
 mod llm;
 mod models;
 mod provider_models;

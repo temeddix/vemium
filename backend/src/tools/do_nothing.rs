@@ -1,29 +1,28 @@
 //! `do_nothing` tool: an explicit opt-out signal usable by any persona or
-//! the leader. Calling it terminates the turn without producing a chat
-//! bubble; the `DebateHook` writes the public inline-note breadcrumb that
-//! tells the user what happened.
-//!
-//! `reason` is required; it travels into the inline-note `detail` field so
-//! the user only sees it on click and the timeline label stays terse.
+//! the leader. Persists a short inline-note breadcrumb explaining why no
+//! further action was taken; does not produce a chat bubble. The tool
+//! creates and finalizes its own inline-note row through [`EventLog`].
 
+use crate::event_log::EventLog;
+use crate::models::{RoomEventKind, RowStatus};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::tools::InlineNote;
-
 pub const NAME: &str = "do_nothing";
 pub const INLINE_NOTE_TEXT: &str = "Decided to do nothing.";
-pub const INLINE_NOTE_FAIL_TEXT: &str = "Tried to do nothing (failed)";
 
-#[derive(Clone, Default)]
-pub struct DoNothingTool;
+#[derive(Clone)]
+pub struct DoNothingTool {
+  log: EventLog,
+  author: String,
+}
 
 impl DoNothingTool {
-  pub fn new() -> Self {
-    Self
+  pub fn new(log: EventLog, author: String) -> Self {
+    Self { log, author }
   }
 }
 
@@ -76,28 +75,29 @@ impl Tool for DoNothingTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    if args.reason.trim().is_empty() {
+    let reason = args.reason.trim().to_string();
+    if reason.is_empty() {
+      self
+        .log
+        .record_finalized(
+          RoomEventKind::InlineNote,
+          Some(self.author.clone()),
+          "Tried to do nothing (failed)".to_string(),
+          "reason must not be empty".to_string(),
+        )
+        .await;
       return Err(DoNothingError::EmptyReason);
     }
+    let row = self
+      .log
+      .start_row(
+        RoomEventKind::InlineNote,
+        Some(self.author.clone()),
+        INLINE_NOTE_TEXT.to_string(),
+        reason,
+      )
+      .await;
+    row.finish(RowStatus::Done).await;
     Ok(DoNothingOutput { acknowledged: true })
-  }
-}
-
-/// Builds the inline-note attached to a `do_nothing` invocation. On success
-/// the reason becomes the detail body; on failure the rig-provided error
-/// string is shown instead.
-pub fn format_inline_note(args: &str, result: &str, ok: bool) -> InlineNote {
-  if !ok {
-    return InlineNote {
-      text: INLINE_NOTE_FAIL_TEXT.to_string(),
-      detail: result.to_string(),
-    };
-  }
-  let reason = serde_json::from_str::<DoNothingArgs>(args)
-    .map(|args| args.reason.trim().to_string())
-    .unwrap_or_default();
-  InlineNote {
-    text: INLINE_NOTE_TEXT.to_string(),
-    detail: reason,
   }
 }

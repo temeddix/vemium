@@ -12,7 +12,8 @@
 //! HTML->Markdown saves dramatic amounts of tokens compared with feeding
 //! raw HTML; in practice 60-90% reduction on real-world articles.
 
-use crate::tools::InlineNote;
+use crate::event_log::EventLog;
+use crate::models::{RoomEventKind, RowStatus};
 use dom_smoothie::{Config, Readability};
 use reqwest::Client;
 use rig::completion::ToolDefinition;
@@ -34,25 +35,21 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; VemiumDebateBot/1.0; +https://github.com/cunarist/vemium)";
 
 /// Owns the shared `reqwest::Client`. Cheap to clone.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WebFetchTool {
   http: Client,
+  log: EventLog,
+  author: String,
 }
 
 impl WebFetchTool {
-  pub fn new() -> Self {
+  pub fn new(log: EventLog, author: String) -> Self {
     let http = Client::builder()
       .timeout(REQUEST_TIMEOUT)
       .user_agent(USER_AGENT)
       .build()
       .unwrap_or_else(|_| Client::new());
-    Self { http }
-  }
-}
-
-impl Default for WebFetchTool {
-  fn default() -> Self {
-    Self::new()
+    Self { http, log, author }
   }
 }
 
@@ -123,25 +120,60 @@ impl Tool for WebFetchTool {
       .unwrap_or(DEFAULT_MAX_CHARS)
       .max(MIN_MAX_CHARS);
 
-    let response = self.http.get(&args.url).send().await?;
-    if !response.status().is_success() {
-      return Err(WebFetchError::Status {
-        url: args.url,
-        status: response.status().as_u16(),
-      });
-    }
-    let html = response.text().await?;
+    let row = self
+      .log
+      .start_row(
+        RoomEventKind::InlineNote,
+        Some(self.author.clone()),
+        format!("Fetching {}", args.url),
+        String::new(),
+      )
+      .await;
 
-    let cleaned_html = extract_main_content(&html, &args.url);
-    let markdown = htmd::convert(&cleaned_html).unwrap_or(cleaned_html);
-    let trimmed = collapse_whitespace(&markdown);
-    let (markdown, truncated) = truncate_chars(&trimmed, max_chars);
-
-    Ok(WebFetchOutput {
-      url: args.url,
-      markdown,
-      truncated,
+    let outcome = (async {
+      let response = self.http.get(&args.url).send().await?;
+      if !response.status().is_success() {
+        return Err(WebFetchError::Status {
+          url: args.url.clone(),
+          status: response.status().as_u16(),
+        });
+      }
+      let html = response.text().await?;
+      let cleaned_html = extract_main_content(&html, &args.url);
+      let markdown = htmd::convert(&cleaned_html).unwrap_or(cleaned_html);
+      let trimmed = collapse_whitespace(&markdown);
+      let (markdown, truncated) = truncate_chars(&trimmed, max_chars);
+      Ok(WebFetchOutput {
+        url: args.url.clone(),
+        markdown,
+        truncated,
+      })
     })
+    .await;
+
+    match outcome {
+      Ok(output) => {
+        let (preview, _) = truncate_chars(&output.markdown, NOTE_PREVIEW_CHARS);
+        row
+          .replace_body(
+            INLINE_NOTE_TEXT.to_string(),
+            format!("URL: {}\n\n{preview}", output.url),
+          )
+          .await;
+        row.finish(RowStatus::Done).await;
+        Ok(output)
+      }
+      Err(error) => {
+        row
+          .replace_body(
+            INLINE_NOTE_FAIL_TEXT.to_string(),
+            format!("URL: {}\n\n{error}", args.url),
+          )
+          .await;
+        row.finish(RowStatus::Failed).await;
+        Err(error)
+      }
+    }
   }
 }
 
@@ -184,37 +216,4 @@ fn truncate_chars(text: &str, max_chars: usize) -> (String, bool) {
   let mut out: String = text.chars().take(max_chars).collect();
   out.push_str("\n\n... (truncated)");
   (out, true)
-}
-
-/// Builds the inline-note attached to a `web_fetch` invocation. The detail
-/// echoes the requested URL and a short markdown preview so a user can
-/// see what came back without firing off the same fetch themselves.
-pub fn format_inline_note(args: &str, result: &str, ok: bool) -> InlineNote {
-  if !ok {
-    let url = serde_json::from_str::<WebFetchArgs>(args)
-      .map(|a| a.url)
-      .unwrap_or_default();
-    let detail = if url.is_empty() {
-      result.to_string()
-    } else {
-      format!("URL: {url}\n\n{result}")
-    };
-    return InlineNote {
-      text: INLINE_NOTE_FAIL_TEXT.to_string(),
-      detail,
-    };
-  }
-  match serde_json::from_str::<WebFetchOutput>(result) {
-    Ok(parsed) => {
-      let (preview, _) = truncate_chars(&parsed.markdown, NOTE_PREVIEW_CHARS);
-      InlineNote {
-        text: INLINE_NOTE_TEXT.to_string(),
-        detail: format!("URL: {}\n\n{preview}", parsed.url),
-      }
-    }
-    Err(_) => InlineNote {
-      text: INLINE_NOTE_TEXT.to_string(),
-      detail: result.to_string(),
-    },
-  }
 }

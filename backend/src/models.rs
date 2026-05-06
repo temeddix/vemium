@@ -282,25 +282,27 @@ pub struct RoomView {
   pub updated_at: DateTime<Utc>,
 }
 
-/// Categorisation of a row in `room_events`. Chat-bubble kinds
-/// (`AgentChat`, `LeaderNote`, `UserChat`) are part of the LLM-visible
-/// transcript and render as full message bubbles. `InlineNote` is a
-/// lightweight breadcrumb (dim text next to the author's avatar) — its
-/// `content` holds the always-visible label and `detail` holds the
-/// click-to-reveal expansion.
+/// Categorisation of a row in `room_events`. Bubble kinds (`AgentChat`,
+/// `LeaderNote`, `UserChat`) render the full message body always. Side-row
+/// kinds (`Thinking`, `InlineNote`) render as dim breadcrumbs next to the
+/// author's avatar: `content` is the always-visible label, `detail` holds
+/// the click-to-reveal body. Side rows show their body inline only while
+/// streaming; once `Done`, the body is hidden behind the breadcrumb dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoomEventKind {
-  /// A debater (low-model persona) finished a turn.
+  /// A debater (low-model persona) producing a chat bubble.
   AgentChat,
-  /// The leader (high-model) emitted a steering note.
+  /// The leader (high-model) producing a chat bubble.
   LeaderNote,
-  /// The human operator injected a message into the room. The orchestrator
-  /// picks it up like any other transcript entry on the next turn.
+  /// A human-authored message injected by the operator.
   UserChat,
-  /// A short status breadcrumb (e.g. "Decided to do nothing.",
-  /// "Appeared for steering"). Always-visible label lives in `content`;
-  /// click-to-reveal text lives in `detail`.
+  /// A burst of model chain-of-thought emitted between text/tool segments.
+  /// `detail` carries the full thinking text; `content` is the static
+  /// label `"Thinking"`.
+  Thinking,
+  /// A short tool-call breadcrumb. `content` is the action label,
+  /// `detail` carries the click-to-reveal expansion (args, result, etc.).
   InlineNote,
 }
 
@@ -310,6 +312,7 @@ impl RoomEventKind {
       Self::AgentChat => "agent_chat",
       Self::LeaderNote => "leader_note",
       Self::UserChat => "user_chat",
+      Self::Thinking => "thinking",
       Self::InlineNote => "inline_note",
     }
   }
@@ -319,48 +322,75 @@ impl RoomEventKind {
       "agent_chat" => Ok(Self::AgentChat),
       "leader_note" => Ok(Self::LeaderNote),
       "user_chat" => Ok(Self::UserChat),
+      "thinking" => Ok(Self::Thinking),
       "inline_note" => Ok(Self::InlineNote),
       other => Err(anyhow::anyhow!("unknown room event kind: {other}")),
     }
   }
 }
 
-/// One finalized row in `room_events`. For chat-bubble kinds (`AgentChat`,
-/// `LeaderNote`, `UserChat`), `content` is the message text and
-/// `reasoning` is the model's chain-of-thought. For
-/// [`RoomEventKind::InlineNote`], `content` is the short label and
-/// `detail` is the click-to-reveal expansion; `reasoning` is empty.
-///
-/// Tool invocations live on their own `inline_note` rows now — they no
-/// longer ride along on the assistant message that triggered them. See
-/// migration `0014` for the schema change.
-///
-/// `id` is `None` for in-memory events that have not yet been persisted;
-/// the database assigns the actual primary key on insert.
+/// Lifecycle of a [`RoomEvent`]. Every row is born `Streaming` (or
+/// `Done` if it had no body to stream), accumulates content via row-delta
+/// frames, then transitions exactly once to `Done` or `Failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowStatus {
+  Streaming,
+  Done,
+  Failed,
+}
+
+impl RowStatus {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Streaming => "streaming",
+      Self::Done => "done",
+      Self::Failed => "failed",
+    }
+  }
+
+  pub fn parse(value: &str) -> anyhow::Result<Self> {
+    match value {
+      "streaming" => Ok(Self::Streaming),
+      "done" => Ok(Self::Done),
+      "failed" => Ok(Self::Failed),
+      other => Err(anyhow::anyhow!("unknown row status: {other}")),
+    }
+  }
+}
+
+/// One row in `room_events`. Unified across bubbles, thinking bursts, and
+/// tool inline notes - they only differ by `kind` and which of
+/// `content` / `detail` carries the body. `status` reflects the row's
+/// lifecycle; the row is INSERTed at start (`Streaming`), UPDATEd as
+/// content accumulates, and finalized to `Done` / `Failed` when the
+/// producer is finished.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomEvent {
-  /// Database primary key. `None` for events constructed in memory before
-  /// they hit `db::insert_event`; populated on every row read back from
-  /// the database, and reflected to the wire so the frontend (and the
-  /// inline-note detail tool) can address rows by id.
+  /// Database primary key. `None` only for events constructed in memory
+  /// before [`crate::db::insert_event`] returns; populated on every row
+  /// read back from the database and reflected on the wire.
   #[serde(default)]
   pub id: Option<i64>,
   pub room_code: String,
   pub sequence: u64,
   pub kind: RoomEventKind,
   pub agent: Option<String>,
+  /// Bubble text for `AgentChat`/`LeaderNote`/`UserChat`; the
+  /// always-visible breadcrumb label for `Thinking`/`InlineNote`.
   pub content: String,
-  /// Model's chain-of-thought for this turn. Empty when the model emitted
-  /// none, when the provider doesn't expose reasoning separately, or for
-  /// `inline_note` rows.
-  #[serde(default)]
-  pub reasoning: String,
-  /// Click-to-reveal expansion for [`RoomEventKind::InlineNote`] rows.
-  /// Empty for every other kind.
+  /// Click-to-reveal body for `Thinking` (the full reasoning trace) and
+  /// `InlineNote` (tool args/result). Empty for bubble kinds.
   #[serde(default)]
   pub detail: String,
+  pub status: RowStatus,
+  /// Wall-clock when this row was first inserted.
   pub timestamp: DateTime<Utc>,
+  /// Wall-clock when the row finished streaming. `None` while the row is
+  /// still `Streaming`.
+  #[serde(default)]
+  pub completed_at: Option<DateTime<Utc>>,
 }
 
 /// Lifecycle state of a [`RoomReport`]. Reports are streamed token-by-token

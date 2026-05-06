@@ -11,9 +11,15 @@
 //!   each tool reported, so it can fix the code and retry.
 //! - The room's `python_timeout_seconds` governs the actual script run
 //!   only; lint/type stages have a fixed short cap.
+//! - The tool's inline-note row streams every line of stdout / stderr as
+//!   the script runs, so a slow script's progress is visible in the
+//!   timeline before the final exit code lands.
 
-use crate::python_runner::{PythonRunResult, PythonRunner, StageResult};
-use crate::tools::InlineNote;
+use crate::event_log::{EventLog, RowHandle};
+use crate::models::{RoomEventKind, RowStatus};
+use crate::python_runner::{
+  PythonRunResult, PythonRunner, StageResult, StageSink,
+};
 use crate::workspace::RoomWorkspace;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -21,24 +27,34 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub const NAME: &str = "run_python";
 pub const INLINE_NOTE_SUCCESS: &str = "Python script run success";
 pub const INLINE_NOTE_FAIL: &str = "Python script run fail";
 
-/// Tool that delegates to a [`PythonRunner`]. One instance per room/turn.
-/// The runtime's [`crate::runtime::DebateHook`] formats the inline-note
-/// breadcrumb after the call returns; the tool only owns the actual run.
 #[derive(Clone)]
 pub struct RunPythonTool {
   workspace: RoomWorkspace,
   runner: PythonRunner,
+  log: EventLog,
+  author: String,
 }
 
 impl RunPythonTool {
-  pub fn new(workspace: RoomWorkspace, runner: PythonRunner) -> Self {
-    Self { workspace, runner }
+  pub fn new(
+    workspace: RoomWorkspace,
+    runner: PythonRunner,
+    log: EventLog,
+    author: String,
+  ) -> Self {
+    Self {
+      workspace,
+      runner,
+      log,
+      author,
+    }
   }
 }
 
@@ -50,8 +66,7 @@ pub struct RunPythonArgs {
   /// Script filename inside the subject folder. Defaults to `script.py`.
   #[serde(default = "default_script_name")]
   pub script_name: String,
-  /// Source code to write before running. Overwrites any existing file at
-  /// the same path.
+  /// Source code to write before running.
   pub source: String,
   /// Optional command-line arguments forwarded to the script.
   #[serde(default)]
@@ -130,16 +145,56 @@ impl Tool for RunPythonTool {
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
     let relative: PathBuf =
       PathBuf::from(&args.subject_folder).join(&args.script_name);
-    self
-      .workspace
-      .write_file(&relative, &args.source)
-      .await
-      .map_err(RunPythonError::from_anyhow)?;
-    let result = self
+    let row = self
+      .log
+      .start_row(
+        RoomEventKind::InlineNote,
+        Some(self.author.clone()),
+        format!("Running {}", relative.display()),
+        String::new(),
+      )
+      .await;
+
+    if let Err(error) = self.workspace.write_file(&relative, &args.source).await
+    {
+      let error = RunPythonError::from_anyhow(error);
+      row
+        .replace_body(INLINE_NOTE_FAIL.to_string(), error.0.clone())
+        .await;
+      row.finish(RowStatus::Failed).await;
+      return Err(error);
+    }
+
+    let result = match self
       .runner
-      .run(&relative, &args.args)
+      .run(&relative, &args.args, Some(stream_sink(&row)))
       .await
-      .map_err(RunPythonError::from_anyhow)?;
+    {
+      Ok(result) => result,
+      Err(error) => {
+        let error = RunPythonError::from_anyhow(error);
+        row
+          .replace_body(INLINE_NOTE_FAIL.to_string(), error.0.clone())
+          .await;
+        row.finish(RowStatus::Failed).await;
+        return Err(error);
+      }
+    };
+
+    let label = if result.overall_ok {
+      INLINE_NOTE_SUCCESS
+    } else {
+      INLINE_NOTE_FAIL
+    };
+    let detail = format_run_detail(&result);
+    let final_status = if result.overall_ok {
+      RowStatus::Done
+    } else {
+      RowStatus::Failed
+    };
+    row.replace_body(label.to_string(), detail).await;
+    row.finish(final_status).await;
+
     Ok(RunPythonOutput {
       script_path: relative.to_string_lossy().replace('\\', "/"),
       result,
@@ -147,40 +202,21 @@ impl Tool for RunPythonTool {
   }
 }
 
-/// Builds the inline-note attached to a `run_python` invocation. The label
-/// reflects whether the pipeline went green end-to-end; the detail carries
-/// every stage's stdout/stderr so a user clicking the breadcrumb sees the
-/// same trace the model received.
-pub fn format_inline_note(_args: &str, result: &str, ok: bool) -> InlineNote {
-  if !ok {
-    return InlineNote {
-      text: INLINE_NOTE_FAIL.to_string(),
-      detail: result.to_string(),
-    };
-  }
-  match serde_json::from_str::<RunPythonOutput>(result) {
-    Ok(parsed) => {
-      let text = if parsed.result.overall_ok {
-        INLINE_NOTE_SUCCESS
-      } else {
-        INLINE_NOTE_FAIL
-      };
-      InlineNote {
-        text: text.to_string(),
-        detail: format_run_detail(&parsed.result),
-      }
-    }
-    Err(_) => InlineNote {
-      text: INLINE_NOTE_SUCCESS.to_string(),
-      detail: result.to_string(),
-    },
-  }
+/// Builds a [`StageSink`] that appends every captured line to the row's
+/// `detail` so the user sees stdout / stderr arrive in real time.
+fn stream_sink(row: &RowHandle) -> StageSink {
+  let row = row.clone();
+  Arc::new(move |line: String| {
+    let row = row.clone();
+    Box::pin(async move {
+      row.append_detail(&line).await;
+    })
+  })
 }
 
-/// Formats the full run pipeline as a single human-readable block: one section
-/// per executed stage with its rendered command, exit code, duration, and
-/// captured stdout/stderr. Truncated outputs already carry a marker from the
-/// runner; we do not re-truncate here.
+/// Formats the full run pipeline as a single human-readable block: one
+/// section per executed stage with its rendered command, exit code,
+/// duration, and captured stdout / stderr.
 fn format_run_detail(result: &PythonRunResult) -> String {
   let mut out = String::new();
   for stage in &result.stages {

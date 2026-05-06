@@ -1,18 +1,12 @@
 //! `get_inline_note_detail` tool: looks up the click-to-reveal `detail`
-//! payload of an inline-note row by its `id`.
-//!
-//! The room transcript shows inline-note breadcrumbs in the form
-//! `(inline-note #N by Author)` so personas can request the full body of
-//! one when relevant - typically a Python-run failure with a long
-//! traceback that would otherwise bloat the buffer if always inlined.
-//!
-//! Lookups are scoped to the calling room: an inline-note id from a
-//! different room (or any non-inline event id) is treated as not found,
-//! so personas cannot use this to peek across rooms.
+//! payload of an inline-note row by its `id`. Lookups are scoped to the
+//! calling room. The tool persists its own breadcrumb noting which id
+//! was queried; the result is also returned to the model.
 
 use crate::app_state::AppState;
 use crate::db;
-use crate::tools::InlineNote;
+use crate::event_log::EventLog;
+use crate::models::{RoomEventKind, RowStatus};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -20,19 +14,28 @@ use serde_json::json;
 use thiserror::Error;
 
 pub const NAME: &str = "get_inline_note_detail";
-pub const INLINE_NOTE_FAIL_TEXT: &str = "Note lookup failed";
 
-/// Embeds enough context to load an inline-note row scoped to the calling
-/// room. Constructed fresh per turn; cheap to clone.
 #[derive(Clone)]
 pub struct GetInlineNoteDetailTool {
   state: AppState,
   room_code: String,
+  log: EventLog,
+  author: String,
 }
 
 impl GetInlineNoteDetailTool {
-  pub fn new(state: AppState, room_code: String) -> Self {
-    Self { state, room_code }
+  pub fn new(
+    state: AppState,
+    room_code: String,
+    log: EventLog,
+    author: String,
+  ) -> Self {
+    Self {
+      state,
+      room_code,
+      log,
+      author,
+    }
   }
 }
 
@@ -91,48 +94,57 @@ impl Tool for GetInlineNoteDetailTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let event = db::load_inline_note(&self.state.db, args.id)
-      .await
-      .map_err(|e| GetInlineNoteDetailError::Load(e.to_string()))?;
-    let event = event
-      .filter(|event| event.room_code == self.room_code)
-      .ok_or(GetInlineNoteDetailError::NotFound(args.id))?;
+    let row = self
+      .log
+      .start_row(
+        RoomEventKind::InlineNote,
+        Some(self.author.clone()),
+        format!("Looked up note #{}", args.id),
+        String::new(),
+      )
+      .await;
 
-    Ok(GetInlineNoteDetailOutput {
-      id: args.id,
-      agent: event.agent,
-      label: event.content,
-      detail: event.detail,
-      timestamp: event.timestamp.to_rfc3339(),
-    })
+    let lookup = db::load_inline_note(&self.state.db, args.id)
+      .await
+      .map_err(|e| GetInlineNoteDetailError::Load(e.to_string()));
+    match lookup {
+      Ok(Some(event)) if event.room_code == self.room_code => {
+        row
+          .replace_body(row_label(args.id), event.detail.clone())
+          .await;
+        row.finish(RowStatus::Done).await;
+        Ok(GetInlineNoteDetailOutput {
+          id: args.id,
+          agent: event.agent,
+          label: event.content,
+          detail: event.detail,
+          timestamp: event.timestamp.to_rfc3339(),
+        })
+      }
+      Ok(_) => {
+        row
+          .replace_body(
+            format!("Failed to look up note #{}", args.id),
+            format!("inline note #{} not found in this room", args.id),
+          )
+          .await;
+        row.finish(RowStatus::Failed).await;
+        Err(GetInlineNoteDetailError::NotFound(args.id))
+      }
+      Err(error) => {
+        row
+          .replace_body(
+            format!("Failed to look up note #{}", args.id),
+            error.to_string(),
+          )
+          .await;
+        row.finish(RowStatus::Failed).await;
+        Err(error)
+      }
+    }
   }
 }
 
-/// Builds the inline-note attached to a `get_inline_note_detail`
-/// invocation. The label embeds the looked-up note id so a user scanning
-/// the timeline can see what was being researched without clicking; the
-/// detail body shows the full lookup result.
-pub fn format_inline_note(args: &str, result: &str, ok: bool) -> InlineNote {
-  let id = serde_json::from_str::<GetInlineNoteDetailArgs>(args)
-    .map(|a| a.id)
-    .ok();
-  if !ok {
-    let text = match id {
-      Some(id) => format!("Failed to look up note #{id}"),
-      None => INLINE_NOTE_FAIL_TEXT.to_string(),
-    };
-    return InlineNote {
-      text,
-      detail: result.to_string(),
-    };
-  }
-  let text = match id {
-    Some(id) => format!("Looked up note #{id}"),
-    None => "Looked up an inline note".to_string(),
-  };
-  let detail = serde_json::from_str::<GetInlineNoteDetailOutput>(result)
-    .ok()
-    .map(|out| out.detail)
-    .unwrap_or_default();
-  InlineNote { text, detail }
+fn row_label(id: i64) -> String {
+  format!("Looked up note #{id}")
 }

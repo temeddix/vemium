@@ -1,6 +1,6 @@
 import { type PersonaColor, resolveAvatarColor } from "@/app/chat";
-import type { Draft, Message, TurnKind } from "@/app/types";
-import { css, html, LitElement, nothing, type PropertyValues } from "lit";
+import type { RoomEvent } from "@/app/types";
+import { css, html, LitElement, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { ref } from "lit/directives/ref.js";
 
@@ -11,28 +11,18 @@ declare global {
 }
 
 /**
- * One chat row. Renders either a finalized [`Message`] or an in-flight
- * [`Draft`] in an Instagram-style bubble: friend (AI) on the left with an
- * avatar, self (`user_chat`) on the right without one. The parent decides
- * whether the avatar slot and the agent-name label should appear (gated by
- * grouping with neighboring rows); this component owns everything inside
- * the row.
+ * One chat-bubble row. Renders a single bubble for a `RoomEvent` of kind
+ * `agent_chat` / `leader_note` / `user_chat`. Streaming bubbles get a
+ * pulsing indicator on the avatar; failed bubbles get a red border.
  *
- * Tool invocations are NOT rendered inline on the bubble - they are
- * persisted as separate `inline_note` rows the page renders alongside
- * bubbles. While a tool is running on an in-flight draft, the bubble
- * shows a small "running `<tool>`" indicator that disappears as soon as
- * the matching `draftToolCompleted` arrives.
+ * Side rows (thinking, tool inline notes) are NOT rendered here - they go
+ * through `te-inline-note` instead. The page-level scroll list dispatches
+ * by kind.
  */
 @customElement("te-chat-message")
 export class ChatMessage extends LitElement {
-  #shouldStickReasoningToBottom = false;
-
   @property({ attribute: false })
-  accessor message: Message | null = null;
-
-  @property({ attribute: false })
-  accessor draft: Draft | null = null;
+  accessor event: RoomEvent | null = null;
 
   /**
    * Show the avatar (true) or reserve invisible space for it (false). The
@@ -43,8 +33,8 @@ export class ChatMessage extends LitElement {
   accessor showAvatar = true;
 
   /**
-   * Render the small agent-name label above the bubble. The page sets this
-   * on the first bubble in a same-speaker run only.
+   * Render the small agent-name label above the bubble. The page sets
+   * this on the first bubble in a same-speaker run only.
    */
   @property({ type: Boolean })
   accessor showLabel = false;
@@ -92,9 +82,10 @@ export class ChatMessage extends LitElement {
       align-items: flex-end;
     }
 
-    .label {
-      font-size: 0.72rem;
-      color: var(--wa-color-text-quiet);
+    .author-name {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--wa-color-text-normal);
       padding: 0 0.4rem;
     }
 
@@ -130,123 +121,21 @@ export class ChatMessage extends LitElement {
     .markdown wa-markdown {
       display: block;
     }
-
-    .collapsible-block {
-      margin: 0.8rem 0;
-      padding: 0.3rem 0.5rem;
-      background: transparent;
-      border-left: var(--wa-border-width-s) solid
-        var(--wa-color-neutral-border-normal);
-      font-size: 0.74rem;
-      color: var(--wa-color-text-quiet);
-    }
-
-    .collapsible-block > summary {
-      cursor: pointer;
-      list-style: none;
-      display: flex;
-      align-items: center;
-      gap: 0.3rem;
-      font-size: 0.68rem;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--wa-color-text-quiet);
-      user-select: none;
-    }
-
-    .collapsible-block > summary::-webkit-details-marker {
-      display: none;
-    }
-
-    .collapsible-marker {
-      font-size: 0.65rem;
-      transition: transform 0.15s ease;
-    }
-
-    .collapsible-block[open] > summary > .collapsible-marker {
-      transform: rotate(90deg);
-    }
-
-    .reasoning-text {
-      margin: 0.3rem 0 0;
-      white-space: pre-wrap;
-      font-family: var(--wa-font-family-code, monospace);
-      font-size: 0.74rem;
-      line-height: 1.45;
-      max-height: 16rem;
-      overflow-y: auto;
-    }
-
-    .streaming-dot {
-      display: inline-block;
-      width: 0.4rem;
-      height: 0.4rem;
-      border-radius: 50%;
-      background: var(--wa-color-warning-fill-loud);
-      animation: chat-pulse 1s ease-in-out infinite;
-    }
-
-    @keyframes chat-pulse {
-      0%, 100% {
-        opacity: 0.35;
-      }
-      50% {
-        opacity: 1;
-      }
-    }
-
-    .running-tool {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      margin: 0.4rem 0 0;
-      font-size: 0.74rem;
-      color: var(--wa-color-text-quiet);
-    }
-
-    .running-tool wa-spinner {
-      font-size: 0.85rem;
-    }
-
-    .running-tool-name {
-      font-family: var(--wa-font-family-code, monospace);
-    }
-
-    .error-line {
-      font-size: 0.72rem;
-      color: var(--wa-color-danger-on-quiet);
-      margin: 0.3rem 0 0;
-    }
   `;
 
-  override willUpdate(_changedProperties: PropertyValues<this>) {
-    const reasoningEl = this.#reasoningElement();
-    this.#shouldStickReasoningToBottom = reasoningEl !== null &&
-      this.#isScrolledToBottom(reasoningEl);
-  }
-
-  override updated(_changedProperties: PropertyValues<this>) {
-    if (!this.#shouldStickReasoningToBottom) {
-      return;
-    }
-    const reasoningEl = this.#reasoningElement();
-    if (reasoningEl === null) {
-      return;
-    }
-    reasoningEl.scrollTop = reasoningEl.scrollHeight;
-  }
-
   override render() {
-    const view = this.#view();
-    if (view === null) {
+    const event = this.event;
+    if (event === null) {
       return nothing;
     }
-    const isSelf = view.kind === "user_chat";
-    const rowClasses = ["row", isSelf ? "is-self" : ""]
-      .filter(Boolean)
-      .join(" ");
-    const bubbleClasses = ["bubble", view.failed ? "is-failed" : ""]
+    const isSelf = event.kind === "user_chat";
+    const failed = event.status === "failed";
+    const streaming = event.status === "streaming";
+    const color = resolveAvatarColor(event.kind, event.agent);
+    const rowClasses = ["row", isSelf ? "is-self" : ""].filter(Boolean).join(
+      " ",
+    );
+    const bubbleClasses = ["bubble", failed ? "is-failed" : ""]
       .filter(Boolean)
       .join(" ");
     return html`
@@ -255,39 +144,32 @@ export class ChatMessage extends LitElement {
           ? html`
             <div class="avatar is-hidden"></div>
           `
-          : this.#renderAvatar(view)}
+          : this.#renderAvatar(color, streaming)}
         <div class="stack">
-          ${this.showLabel && view.agentName !== "" && !isSelf
+          ${this.showLabel && event.agent !== null && !isSelf
             ? html`
-              <span class="label">${view.agentName}</span>
+              <span class="author-name">${event.agent}</span>
             `
             : nothing}
           <div class="${bubbleClasses}">
-            ${view.reasoning !== ""
-              ? this.#renderReasoning(view.reasoning, view.streaming)
-              : nothing} ${this.#renderContent(
-                view.content,
-              )} ${view.runningTool !==
-                null
-              ? this.#renderRunningTool(view.runningTool)
-              : nothing} ${view.error !== null
+            ${event.content === "" && streaming
               ? html`
-                <p class="error-line">${view.error}</p>
+                <wa-spinner style="font-size: 0.85rem;"></wa-spinner>
               `
-              : nothing}
+              : renderMarkdown(event.content)}
           </div>
         </div>
       </div>
     `;
   }
 
-  #renderAvatar(view: ChatRowView) {
+  #renderAvatar(color: PersonaColor, streaming: boolean) {
     const visibility = this.showAvatar ? "" : "is-hidden";
     const style =
-      `background: ${view.color.background}; color: ${view.color.foreground};`;
+      `background: ${color.background}; color: ${color.foreground};`;
     return html`
       <div class="avatar ${visibility}" style="${style}">
-        ${view.streaming
+        ${streaming
           ? html`
             <wa-spinner style="font-size: 1rem;"></wa-spinner>
           `
@@ -295,118 +177,12 @@ export class ChatMessage extends LitElement {
       </div>
     `;
   }
-
-  #renderContent(content: string) {
-    if (content === "") {
-      return nothing;
-    }
-    return renderMarkdown(content);
-  }
-
-  #renderCollapsible(title: string, streaming: boolean, body: unknown) {
-    return html`
-      <details class="collapsible-block" ?open="${streaming}">
-        <summary>
-          <wa-icon class="collapsible-marker" name="chevron-right"></wa-icon>
-          ${title} ${streaming
-            ? html`
-              <span class="streaming-dot"></span>
-            `
-            : nothing}
-        </summary>
-        ${body}
-      </details>
-    `;
-  }
-
-  #renderReasoning(text: string, streaming: boolean) {
-    return this.#renderCollapsible(
-      "Thinking",
-      streaming,
-      html`
-        <pre class="reasoning-text">${text}</pre>
-      `,
-    );
-  }
-
-  /**
-   * Compact "running `<tool>`" indicator shown inside the bubble while a
-   * tool call is in flight. Cleared by `draftToolCompleted`. The persisted
-   * inline-note row for the call arrives separately and renders next to
-   * the avatar in the page-level scroll list.
-   */
-  #renderRunningTool(tool: string) {
-    return html`
-      <div class="running-tool">
-        <wa-spinner></wa-spinner>
-        <span>running</span>
-        <span class="running-tool-name">${tool}</span>
-      </div>
-    `;
-  }
-
-  #view(): ChatRowView | null {
-    if (this.message !== null) {
-      return messageView(this.message);
-    }
-    if (this.draft !== null) {
-      return draftView(this.draft);
-    }
-    return null;
-  }
-
-  #reasoningElement(): HTMLPreElement | null {
-    return this.renderRoot.querySelector<HTMLPreElement>(".reasoning-text");
-  }
-
-  #isScrolledToBottom(element: HTMLElement): boolean {
-    const remaining = element.scrollHeight - element.scrollTop -
-      element.clientHeight;
-    return remaining <= 2;
-  }
-}
-
-interface ChatRowView {
-  kind: TurnKind;
-  agentName: string;
-  color: PersonaColor;
-  content: string;
-  reasoning: string;
-  runningTool: string | null;
-  streaming: boolean;
-  failed: boolean;
-  error: string | null;
-}
-
-function messageView(message: Message): ChatRowView {
-  return {
-    kind: message.kind,
-    agentName: message.agent ?? "",
-    color: resolveAvatarColor(message.kind, message.agent),
-    content: message.content,
-    reasoning: message.reasoning,
-    runningTool: null,
-    streaming: false,
-    failed: false,
-    error: null,
-  };
-}
-
-function draftView(draft: Draft): ChatRowView {
-  return {
-    kind: draft.kind,
-    agentName: draft.agent,
-    color: resolveAvatarColor(draft.kind, draft.agent),
-    content: draft.content,
-    reasoning: draft.reasoning,
-    runningTool: draft.runningTool,
-    streaming: draft.status === "streaming",
-    failed: draft.status === "failed",
-    error: draft.error,
-  };
 }
 
 function renderMarkdown(content: string) {
+  if (content === "") {
+    return nothing;
+  }
   return html`
     <div class="markdown">
       <wa-markdown ${ref((el) => {

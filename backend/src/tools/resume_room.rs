@@ -1,16 +1,12 @@
 //! `resume_room` tool: leader gate decision to wake a paused debate at a
-//! scheduled checkpoint. Persists a `leader_note` bubble announcing the
-//! restart and flips the room's [`DebateState`] back to `Running`.
-//!
-//! Note: this is the leader-controlled gate. The user-controlled
-//! activate/deactivate path is independent and lives on the routes layer.
+//! scheduled checkpoint. Persists an inline-note breadcrumb carrying the
+//! note in `detail` and flips the room's [`DebateState`] back to `Running`.
 
 use crate::app_state::AppState;
 use crate::db;
-use crate::error::ReportError;
-use crate::models::{DebateState, RoomEvent, RoomEventKind};
-use crate::streaming::{WsEvent, new_turn_id};
-use crate::tools::InlineNote;
+use crate::event_log::EventLog;
+use crate::models::{DebateState, RoomEventKind, RowStatus};
+use crate::streaming::WsEvent;
 use crate::tools::pause_room::LEADER_AGENT;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
@@ -27,17 +23,22 @@ pub const INLINE_NOTE_FAIL_TEXT: &str = "Resume failed";
 pub struct ResumeRoomTool {
   state: AppState,
   room_code: String,
+  log: EventLog,
 }
 
 impl ResumeRoomTool {
-  pub fn new(state: AppState, room_code: String) -> Self {
-    Self { state, room_code }
+  pub fn new(state: AppState, room_code: String, log: EventLog) -> Self {
+    Self {
+      state,
+      room_code,
+      log,
+    }
   }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ResumeRoomArgs {
-  /// Reasoning shown as a public leader note bubble.
+  /// Reasoning shown in the inline-note's click-to-reveal body.
   pub note: String,
 }
 
@@ -65,8 +66,7 @@ impl Tool for ResumeRoomTool {
       name: NAME.to_string(),
       description: "Wake the room and let the debate resume. Call this when \
                     a concrete next task should run now. Your `note` is \
-                    persisted as a public leader bubble announcing the \
-                    restart."
+                    recorded as the breadcrumb body announcing the restart."
         .to_string(),
       parameters: json!({
         "type": "object",
@@ -90,35 +90,30 @@ impl Tool for ResumeRoomTool {
       trimmed.to_string()
     };
 
+    let row = self
+      .log
+      .start_row(
+        RoomEventKind::InlineNote,
+        Some(LEADER_AGENT.to_string()),
+        INLINE_NOTE_TEXT.to_string(),
+        note,
+      )
+      .await;
+
     let handle = {
       let handles = self.state.room_handles.read().await;
       handles.get(&self.room_code).cloned()
     };
     let Some(handle) = handle else {
+      row
+        .replace_body(
+          INLINE_NOTE_FAIL_TEXT.to_string(),
+          "room handle missing".to_string(),
+        )
+        .await;
+      row.finish(RowStatus::Failed).await;
       return Err(ResumeRoomError::HandleMissing);
     };
-
-    let draft = RoomEvent {
-      id: None,
-      room_code: self.room_code.clone(),
-      sequence: handle.allocate_event_sequence(),
-      kind: RoomEventKind::LeaderNote,
-      agent: Some(LEADER_AGENT.to_string()),
-      content: note,
-      reasoning: String::new(),
-      detail: String::new(),
-      timestamp: Utc::now(),
-    };
-    let event = db::insert_event(&self.state.db, &draft)
-      .await
-      .report()
-      .unwrap_or_else(|| draft.clone());
-
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
-    stream.send(WsEvent::MessageAdded {
-      turn_id: new_turn_id(),
-      message: event,
-    });
 
     let updated_at = Utc::now();
     {
@@ -128,37 +123,28 @@ impl Tool for ResumeRoomTool {
         room.updated_at = updated_at;
       }
     }
-    db::update_debate_state(
+    if let Err(error) = db::update_debate_state(
       &self.state.db,
       &self.room_code,
       DebateState::Running,
       updated_at,
     )
     .await
-    .map_err(|e| ResumeRoomError::Persist(e.to_string()))?;
+    {
+      row
+        .replace_body(INLINE_NOTE_FAIL_TEXT.to_string(), error.to_string())
+        .await;
+      row.finish(RowStatus::Failed).await;
+      return Err(ResumeRoomError::Persist(error.to_string()));
+    }
 
     handle.request_resume_debate();
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
     stream.send(WsEvent::DebateState {
       state: DebateState::Running,
     });
 
+    row.finish(RowStatus::Done).await;
     Ok(ResumeRoomOutput { acknowledged: true })
-  }
-}
-
-/// Builds the inline-note attached to a `resume_room` invocation. The
-/// reasoning lives on the leader-bubble row the tool persisted directly,
-/// so the breadcrumb only carries the action label and (on failure) the
-/// error text.
-pub fn format_inline_note(_args: &str, result: &str, ok: bool) -> InlineNote {
-  if !ok {
-    return InlineNote {
-      text: INLINE_NOTE_FAIL_TEXT.to_string(),
-      detail: result.to_string(),
-    };
-  }
-  InlineNote {
-    text: INLINE_NOTE_TEXT.to_string(),
-    detail: String::new(),
   }
 }

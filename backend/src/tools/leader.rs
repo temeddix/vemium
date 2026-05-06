@@ -1,62 +1,41 @@
-//! `request_leader_decision` tool: a debater calls this when it wants
-//! the leader to weigh in. The leader is invoked as a tool-loop turn
-//! against the room's `high` provider with two tools available:
-//!
-//! - `pause_room` — flip [`crate::models::DebateState`] to `Paused`. The
-//!   pause tool emits its own leader bubble carrying the reasoning, so
-//!   when the leader chooses this option we suppress the on-demand
-//!   verdict bubble.
-//! - `get_inline_note_detail` — pull the click-to-reveal body of a
-//!   transcript breadcrumb (e.g. a Python-run traceback) so the leader
-//!   can ground its answer.
-//!
-//! When the leader does not pause, its final text is persisted as a
-//! `leader_note` event so the user sees the verdict in the chat log,
-//! and the same text is returned to the calling debater.
+//! `request_leader_decision` tool: a debater calls this when it wants the
+//! leader to weigh in. The leader runs a fresh sub-turn against the high
+//! model with its own [`TurnSession`], producing its own thinking /
+//! balloon / inline-note rows. The tool wraps the sub-turn in a single
+//! breadcrumb (`Appeared on demand`) so the user can tell which leader
+//! turns were debater-initiated, and returns the leader's final text to
+//! the calling debater.
 
 use crate::app_state::AppState;
-use crate::db;
-use crate::error::ReportError;
+use crate::event_log::EventLog;
 use crate::llm::{LeaderDecisionTurnInputs, build_chat_client};
-use crate::models::{ProviderConfig, RoomEvent, RoomEventKind};
-use crate::runtime::DebateHook;
-use crate::streaming::{WsEvent, new_turn_id};
-use crate::tools::InlineNote;
+use crate::models::{ProviderConfig, RoomEventKind, RowStatus};
+use crate::runtime::TurnSession;
 use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
-use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub const NAME: &str = "request_leader_decision";
-/// Inline-note label written before the leader's chat bubble. The leader
-/// always speaks under the plain "Leader" name now; this breadcrumb is
-/// what tells the user this particular bubble was triggered on demand by
-/// a debater rather than by the periodic steering tick.
 pub const INLINE_NOTE_TEXT: &str = "Appeared on demand";
 pub const INLINE_NOTE_FAIL_TEXT: &str = "Leader request failed";
 
-/// Embeds enough context to invoke the high model, persist the resulting
-/// `leader_note`, and broadcast it to subscribed WS clients.
-///
-/// Constructed fresh per turn by the runtime; cheap to clone.
 #[derive(Clone)]
 pub struct RequestLeaderDecisionTool {
   state: AppState,
   room_code: String,
-  /// Snapshot of the high-tier provider config taken at turn start. Stored
-  /// verbatim so the call uses whatever the global settings say *now*.
   high_provider: ProviderConfig,
-  /// Snapshot of the room's topic / goal etc. at turn start. Used to frame
-  /// the leader prompt without an extra DB read.
   context_preamble: String,
-  /// User-facing wake-schedule label, threaded through to
-  /// [`PauseRoomTool`] so its default note references the right
-  /// schedule when the leader pauses without supplying its own copy.
   schedule_label: String,
+  log: EventLog,
+  /// Author label for the persona-side breadcrumb (the debater who
+  /// invoked the leader). The leader's own rows always speak as
+  /// [`LEADER_AGENT`].
+  caller_author: String,
 }
 
 impl RequestLeaderDecisionTool {
@@ -66,6 +45,8 @@ impl RequestLeaderDecisionTool {
     high_provider: ProviderConfig,
     context_preamble: String,
     schedule_label: String,
+    log: EventLog,
+    caller_author: String,
   ) -> Self {
     Self {
       state,
@@ -73,6 +54,8 @@ impl RequestLeaderDecisionTool {
       high_provider,
       context_preamble,
       schedule_label,
+      log,
+      caller_author,
     }
   }
 }
@@ -110,14 +93,12 @@ impl Tool for RequestLeaderDecisionTool {
   async fn definition(&self, _prompt: String) -> ToolDefinition {
     ToolDefinition {
       name: NAME.to_string(),
-      description: "Asks the room's leader (high model) to weigh in. \
-                    Use this when the debate has hit an impasse, when an \
-                    important judgment is needed, or when you think the \
-                    discussion has plainly run its course and the room \
-                    should pause. The leader can either return a verdict \
-                    (recorded as a public `leader_note`) or pause the \
-                    debate directly. Calling it frequently defeats its \
-                    purpose."
+      description: "Asks the room's leader (high model) to weigh in. Use \
+                    when the debate has hit an impasse, an important \
+                    judgment is needed, or the discussion has plainly run \
+                    its course. The leader can return a verdict (recorded \
+                    as a public `leader_note` bubble) or pause the debate \
+                    directly. Calling it frequently defeats its purpose."
         .to_string(),
       parameters: json!({
         "type": "object",
@@ -138,60 +119,74 @@ impl Tool for RequestLeaderDecisionTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    // The persona's outer hook already persists an inline-note for this
-    // tool call via [`format_inline_note`], so we don't write a separate
-    // breadcrumb here. We do attach a gate hook to the leader's
-    // sub-turn so any tools the leader invokes (notably `pause_room`)
-    // leave their own breadcrumbs and pause is observable.
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
-    let hook = DebateHook::for_gate(
-      stream,
-      self.state.clone(),
-      self.room_code.clone(),
-      LEADER_AGENT.to_string(),
-    );
-    let recorder = hook.recorder();
+    let detail = build_lookup_detail(&args);
+    let row = self
+      .log
+      .start_row(
+        RoomEventKind::InlineNote,
+        Some(self.caller_author.clone()),
+        INLINE_NOTE_TEXT.to_string(),
+        detail.clone(),
+      )
+      .await;
 
+    let leader_session = Arc::new(TurnSession::new(
+      self.log.clone(),
+      LEADER_AGENT.to_string(),
+      RoomEventKind::LeaderNote,
+    ));
     let pause_tool = PauseRoomTool::new(
       self.state.clone(),
       self.room_code.clone(),
       self.schedule_label.clone(),
+      self.log.clone(),
     );
-    let inline_note_tool =
-      GetInlineNoteDetailTool::new(self.state.clone(), self.room_code.clone());
+    let inline_note_tool = GetInlineNoteDetailTool::new(
+      self.state.clone(),
+      self.room_code.clone(),
+      self.log.clone(),
+      LEADER_AGENT.to_string(),
+    );
 
-    let client = build_chat_client(&self.high_provider)
-      .map_err(|e| LeaderDecisionError::Config(e.to_string()))?;
-    let answer = client
+    let client = match build_chat_client(&self.high_provider) {
+      Ok(client) => client,
+      Err(error) => {
+        row
+          .replace_body(INLINE_NOTE_FAIL_TEXT.to_string(), error.to_string())
+          .await;
+        row.finish(RowStatus::Failed).await;
+        return Err(LeaderDecisionError::Config(error.to_string()));
+      }
+    };
+    let outcome = client
       .run_leader_decision_turn(LeaderDecisionTurnInputs {
         system_prompt: self.system_prompt(),
         user_prompt: self.user_prompt(&args),
         pause_tool,
         inline_note_tool,
-        hook,
+        session: leader_session.clone(),
       })
-      .await
-      .map_err(|e| LeaderDecisionError::Call(e.to_string()))?;
-
-    let answer = answer.trim().to_string();
-    let leader_paused = recorder.pause_room_called().await;
-
-    // When the leader paused, `pause_room` already emitted a leader
-    // bubble carrying the pause reasoning, so we suppress a second
-    // bubble here. Otherwise the leader's verdict text becomes the
-    // on-demand bubble.
-    if !leader_paused && !answer.is_empty() {
-      self.emit_verdict_bubble(&answer).await;
-    }
-
-    let output_answer = if answer.is_empty() && leader_paused {
-      "Leader paused the debate.".to_string()
-    } else {
-      answer
+      .await;
+    let session_status = match &outcome {
+      Ok(_) => RowStatus::Done,
+      Err(_) => RowStatus::Failed,
     };
-    Ok(LeaderDecisionOutput {
-      answer: output_answer,
-    })
+    leader_session.finish(session_status).await;
+
+    match outcome {
+      Ok(answer) => {
+        let answer = answer.trim().to_string();
+        row.finish(RowStatus::Done).await;
+        Ok(LeaderDecisionOutput { answer })
+      }
+      Err(error) => {
+        row
+          .replace_body(INLINE_NOTE_FAIL_TEXT.to_string(), error.to_string())
+          .await;
+        row.finish(RowStatus::Failed).await;
+        Err(LeaderDecisionError::Call(error.to_string()))
+      }
+    }
   }
 }
 
@@ -223,68 +218,15 @@ impl RequestLeaderDecisionTool {
     }
     user
   }
-
-  /// Persists the leader's verdict text as a `leader_note` row and
-  /// broadcasts it. Used only on the non-pause path; when the leader
-  /// pauses, `pause_room` writes its own bubble already.
-  async fn emit_verdict_bubble(&self, content: &str) {
-    let handle = {
-      let handles = self.state.room_handles.read().await;
-      handles.get(&self.room_code).cloned()
-    };
-    let Some(handle) = handle else {
-      return;
-    };
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
-    let bubble_draft = RoomEvent {
-      id: None,
-      room_code: self.room_code.clone(),
-      sequence: handle.allocate_event_sequence(),
-      kind: RoomEventKind::LeaderNote,
-      agent: Some(LEADER_AGENT.to_string()),
-      content: content.to_string(),
-      reasoning: String::new(),
-      detail: String::new(),
-      timestamp: Utc::now(),
-    };
-    let bubble_event = db::insert_event(&self.state.db, &bubble_draft)
-      .await
-      .report()
-      .unwrap_or_else(|| bubble_draft.clone());
-
-    stream.send(WsEvent::MessageAdded {
-      turn_id: new_turn_id(),
-      message: bubble_event,
-    });
-  }
 }
 
-/// Builds the inline-note attached to a `request_leader_decision`
-/// invocation. The detail carries the question (and optional caller
-/// context) so the user can see what was asked without scrolling; the
-/// answer lives on the leader-bubble row this tool persists directly.
-pub fn format_inline_note(args: &str, result: &str, ok: bool) -> InlineNote {
-  if !ok {
-    return InlineNote {
-      text: INLINE_NOTE_FAIL_TEXT.to_string(),
-      detail: result.to_string(),
-    };
+fn build_lookup_detail(args: &LeaderDecisionArgs) -> String {
+  let mut detail = format!("Question: {}", args.question.trim());
+  if let Some(extra) = args.context.as_deref()
+    && !extra.trim().is_empty()
+  {
+    detail.push_str("\n\nAdditional context:\n");
+    detail.push_str(extra.trim());
   }
-  let detail = match serde_json::from_str::<LeaderDecisionArgs>(args) {
-    Ok(parsed) => {
-      let mut detail = format!("Question: {}", parsed.question.trim());
-      if let Some(extra) = parsed.context.as_deref()
-        && !extra.trim().is_empty()
-      {
-        detail.push_str("\n\nAdditional context:\n");
-        detail.push_str(extra.trim());
-      }
-      detail
-    }
-    Err(_) => String::new(),
-  };
-  InlineNote {
-    text: INLINE_NOTE_TEXT.to_string(),
-    detail,
-  }
+  detail
 }

@@ -1,19 +1,16 @@
-//! `pause_room` tool: leader decision to pause the debate. Called from
-//! the periodic steering tick or from inside an on-demand
-//! `request_leader_decision` call when the leader judges the debate has
-//! run its course. Persists a `leader_note` bubble carrying the
-//! reasoning and flips the room's [`DebateState`] to `Paused` so the
-//! resume scheduler picks it up at the next cron tick.
+//! `pause_room` tool: leader decision to pause the debate. Persists an
+//! inline-note breadcrumb carrying the leader's reasoning in `detail` and
+//! flips the room's [`DebateState`] to `Paused` so the resume scheduler
+//! picks it up at the next cron tick.
 //!
 //! Note: this is the leader-controlled gate. The user-controlled
 //! activate/deactivate path is independent and lives on the routes layer.
 
 use crate::app_state::AppState;
 use crate::db;
-use crate::error::ReportError;
-use crate::models::{DebateState, RoomEvent, RoomEventKind};
-use crate::streaming::{WsEvent, new_turn_id};
-use crate::tools::InlineNote;
+use crate::event_log::EventLog;
+use crate::models::{DebateState, RoomEventKind, RowStatus};
+use crate::streaming::WsEvent;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -24,18 +21,15 @@ use thiserror::Error;
 pub const NAME: &str = "pause_room";
 pub const INLINE_NOTE_TEXT: &str = "Paused debate";
 pub const INLINE_NOTE_FAIL_TEXT: &str = "Pause failed";
-/// Stable agent label written to `room_events.agent`. Always plain
-/// "Leader"; the gate context (steering / on-demand / pause / resume) is
-/// surfaced via a preceding inline note rather than baked into the name.
+/// Stable agent label written to `room_events.agent` for leader rows.
 pub const LEADER_AGENT: &str = "Leader";
 
 #[derive(Clone)]
 pub struct PauseRoomTool {
   state: AppState,
   room_code: String,
-  /// Cached schedule label so the default note stays meaningful when the
-  /// model returns an empty `note`.
   schedule_label: String,
+  log: EventLog,
 }
 
 impl PauseRoomTool {
@@ -43,18 +37,20 @@ impl PauseRoomTool {
     state: AppState,
     room_code: String,
     schedule_label: String,
+    log: EventLog,
   ) -> Self {
     Self {
       state,
       room_code,
       schedule_label,
+      log,
     }
   }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PauseRoomArgs {
-  /// Reasoning shown as a public leader note bubble.
+  /// Reasoning shown in the inline-note's click-to-reveal body.
   pub note: String,
 }
 
@@ -83,8 +79,8 @@ impl Tool for PauseRoomTool {
       description: "Pause the debate until the next scheduled wake check. \
                     Call this when the discussion has plainly run its \
                     course or further turns would be wasteful. Your `note` \
-                    is persisted as a public leader bubble so the user \
-                    sees why."
+                    is recorded as the breadcrumb body so the user sees \
+                    why if they click."
         .to_string(),
       parameters: json!({
         "type": "object",
@@ -111,35 +107,30 @@ impl Tool for PauseRoomTool {
       trimmed.to_string()
     };
 
+    let row = self
+      .log
+      .start_row(
+        RoomEventKind::InlineNote,
+        Some(LEADER_AGENT.to_string()),
+        INLINE_NOTE_TEXT.to_string(),
+        note,
+      )
+      .await;
+
     let handle = {
       let handles = self.state.room_handles.read().await;
       handles.get(&self.room_code).cloned()
     };
     let Some(handle) = handle else {
+      row
+        .replace_body(
+          INLINE_NOTE_FAIL_TEXT.to_string(),
+          "room handle missing".to_string(),
+        )
+        .await;
+      row.finish(RowStatus::Failed).await;
       return Err(PauseRoomError::HandleMissing);
     };
-
-    let draft = RoomEvent {
-      id: None,
-      room_code: self.room_code.clone(),
-      sequence: handle.allocate_event_sequence(),
-      kind: RoomEventKind::LeaderNote,
-      agent: Some(LEADER_AGENT.to_string()),
-      content: note,
-      reasoning: String::new(),
-      detail: String::new(),
-      timestamp: Utc::now(),
-    };
-    let event = db::insert_event(&self.state.db, &draft)
-      .await
-      .report()
-      .unwrap_or_else(|| draft.clone());
-
-    let stream = self.state.ensure_room_stream(&self.room_code).await;
-    stream.send(WsEvent::MessageAdded {
-      turn_id: new_turn_id(),
-      message: event,
-    });
 
     let updated_at = Utc::now();
     {
@@ -149,37 +140,28 @@ impl Tool for PauseRoomTool {
         room.updated_at = updated_at;
       }
     }
-    db::update_debate_state(
+    if let Err(error) = db::update_debate_state(
       &self.state.db,
       &self.room_code,
       DebateState::Paused,
       updated_at,
     )
     .await
-    .map_err(|e| PauseRoomError::Persist(e.to_string()))?;
+    {
+      row
+        .replace_body(INLINE_NOTE_FAIL_TEXT.to_string(), error.to_string())
+        .await;
+      row.finish(RowStatus::Failed).await;
+      return Err(PauseRoomError::Persist(error.to_string()));
+    }
 
     handle.request_pause_debate();
+    let stream = self.state.ensure_room_stream(&self.room_code).await;
     stream.send(WsEvent::DebateState {
       state: DebateState::Paused,
     });
 
+    row.finish(RowStatus::Done).await;
     Ok(PauseRoomOutput { acknowledged: true })
-  }
-}
-
-/// Builds the inline-note attached to a `pause_room` invocation. The
-/// reasoning lives on the leader-bubble row the tool persisted directly,
-/// so the breadcrumb only carries the action label and (on failure) the
-/// error text.
-pub fn format_inline_note(_args: &str, result: &str, ok: bool) -> InlineNote {
-  if !ok {
-    return InlineNote {
-      text: INLINE_NOTE_FAIL_TEXT.to_string(),
-      detail: result.to_string(),
-    };
-  }
-  InlineNote {
-    text: INLINE_NOTE_TEXT.to_string(),
-    detail: String::new(),
   }
 }

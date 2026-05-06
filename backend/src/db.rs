@@ -12,7 +12,7 @@
 
 use crate::models::{
   AppSettings, DebateState, ProviderConfig, ReportStatus, Room, RoomEvent,
-  RoomEventKind, RoomReport, RoomState,
+  RoomEventKind, RoomReport, RoomState, RowStatus,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -297,28 +297,30 @@ pub async fn update_app_settings(
 
 // -- Events ----------------------------------------------------------------
 
-/// Inserts one finalized event row. The caller is responsible for
-/// populating `reasoning` and `detail` with their per-kind defaults
-/// (empty string) so the schema stays uniform. The returned [`RoomEvent`]
-/// carries the database-assigned `id` so callers can persist or broadcast
-/// it without a follow-up read.
+/// Inserts a row at the start of its lifecycle. Callers typically pass
+/// `status = Streaming` and an empty body; subsequent
+/// [`update_event_body`] calls accumulate content, then [`finish_event`]
+/// flips `status` and sets `completed_at`. For pre-finalized rows (e.g.
+/// a user message inserted in one shot) pass `status = Done` and a
+/// matching `completed_at`.
 pub async fn insert_event(
   pool: &SqlitePool,
   event: &RoomEvent,
 ) -> Result<RoomEvent> {
   let result = sqlx::query(
     "INSERT INTO room_events
-        (room_code, sequence, kind, agent, content, reasoning, detail, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (room_code, sequence, kind, agent, content, detail, status, timestamp, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(&event.room_code)
   .bind(event.sequence as i64)
   .bind(event.kind.as_str())
   .bind(event.agent.as_deref())
   .bind(&event.content)
-  .bind(&event.reasoning)
   .bind(&event.detail)
+  .bind(event.status.as_str())
   .bind(event.timestamp.to_rfc3339())
+  .bind(event.completed_at.map(|t| t.to_rfc3339()))
   .execute(pool)
   .await
   .context("failed to insert room event")?;
@@ -327,12 +329,56 @@ pub async fn insert_event(
   Ok(stored)
 }
 
+/// Replaces `content` and `detail` for a streaming row. Cheap enough to
+/// call on every flush tick because SQLite WAL absorbs the writes.
+pub async fn update_event_body(
+  pool: &SqlitePool,
+  id: i64,
+  content: &str,
+  detail: &str,
+) -> Result<()> {
+  sqlx::query("UPDATE room_events SET content = ?, detail = ? WHERE id = ?")
+    .bind(content)
+    .bind(detail)
+    .bind(id)
+    .execute(pool)
+    .await
+    .context("failed to update room event body")?;
+  Ok(())
+}
+
+/// Finalizes a streaming row: stamps the body one last time, flips
+/// `status`, and records `completed_at`.
+pub async fn finish_event(
+  pool: &SqlitePool,
+  id: i64,
+  content: &str,
+  detail: &str,
+  status: RowStatus,
+  completed_at: DateTime<Utc>,
+) -> Result<()> {
+  sqlx::query(
+    "UPDATE room_events
+     SET content = ?, detail = ?, status = ?, completed_at = ?
+     WHERE id = ?",
+  )
+  .bind(content)
+  .bind(detail)
+  .bind(status.as_str())
+  .bind(completed_at.to_rfc3339())
+  .bind(id)
+  .execute(pool)
+  .await
+  .context("failed to finish room event")?;
+  Ok(())
+}
+
 pub async fn load_room_events(
   pool: &SqlitePool,
   room_code: &str,
 ) -> Result<Vec<RoomEvent>> {
   let rows = sqlx::query(
-    "SELECT id, room_code, sequence, kind, agent, content, reasoning, detail, timestamp
+    "SELECT id, room_code, sequence, kind, agent, content, detail, status, timestamp, completed_at
      FROM room_events
      WHERE room_code = ?
      ORDER BY sequence ASC",
@@ -353,7 +399,7 @@ pub async fn load_inline_note(
   id: i64,
 ) -> Result<Option<RoomEvent>> {
   let row = sqlx::query(
-    "SELECT id, room_code, sequence, kind, agent, content, reasoning, detail, timestamp
+    "SELECT id, room_code, sequence, kind, agent, content, detail, status, timestamp, completed_at
      FROM room_events
      WHERE id = ? AND kind = 'inline_note'",
   )
@@ -364,11 +410,10 @@ pub async fn load_inline_note(
   row.map(parse_event_row).transpose()
 }
 
-/// Copies every event from `source` into `target`, preserving sequence
-/// numbers, kinds, content, reasoning, detail, and timestamps. Used by the
-/// room-clone endpoint when the user opts to carry chat history into the
-/// new room. Run inside a transaction so a partial copy never leaves the
-/// clone with a half-populated transcript.
+/// Copies every event from `source` into `target`, preserving every column
+/// except `room_code`. Used by the room-clone endpoint when the user opts
+/// to carry chat history into the new room. Run inside a transaction so a
+/// partial copy never leaves the clone with a half-populated transcript.
 pub async fn clone_room_events(
   pool: &SqlitePool,
   source_code: &str,
@@ -377,8 +422,8 @@ pub async fn clone_room_events(
   let mut tx = pool.begin().await.context("failed to begin clone tx")?;
   sqlx::query(
     "INSERT INTO room_events
-        (room_code, sequence, kind, agent, content, reasoning, detail, timestamp)
-     SELECT ?, sequence, kind, agent, content, reasoning, detail, timestamp
+        (room_code, sequence, kind, agent, content, detail, status, timestamp, completed_at)
+     SELECT ?, sequence, kind, agent, content, detail, status, timestamp, completed_at
      FROM room_events
      WHERE room_code = ?
      ORDER BY sequence ASC",
@@ -419,6 +464,16 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     .context("room_events.sequence missing")?;
   let kind_str: String =
     row.try_get("kind").context("room_events.kind missing")?;
+  let status_str: String = row
+    .try_get("status")
+    .context("room_events.status missing")?;
+  let completed_at_str: Option<String> = row
+    .try_get("completed_at")
+    .context("room_events.completed_at missing")?;
+  let completed_at = match completed_at_str {
+    Some(value) => Some(parse_rfc3339(&value)?),
+    None => None,
+  };
 
   Ok(RoomEvent {
     id: Some(id),
@@ -431,13 +486,12 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     content: row
       .try_get("content")
       .context("room_events.content missing")?,
-    reasoning: row
-      .try_get("reasoning")
-      .context("room_events.reasoning missing")?,
     detail: row
       .try_get("detail")
       .context("room_events.detail missing")?,
+    status: RowStatus::parse(&status_str)?,
     timestamp: parse_timestamp(&row, "timestamp")?,
+    completed_at,
   })
 }
 
