@@ -64,8 +64,8 @@ export class InlineNote extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 0.2rem;
+      max-width: 36rem;
       min-width: 0;
-      flex: 1;
     }
 
     .author-name {
