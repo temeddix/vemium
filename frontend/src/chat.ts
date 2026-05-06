@@ -85,22 +85,6 @@ export function shouldShowTimeSeparator(
 }
 
 /**
- * Returns true when `current` is the last bubble in a run of consecutive
- * messages from the same speaker. The chat shows the avatar only on the
- * last bubble of a run (Instagram-style grouping), so this predicate
- * gates avatar rendering.
- */
-export function isLastInRun(
-  current: { kind: RoomEventKind; agent: string | null },
-  next: { kind: RoomEventKind; agent: string | null } | null,
-): boolean {
-  if (next === null) {
-    return true;
-  }
-  return current.kind !== next.kind || current.agent !== next.agent;
-}
-
-/**
  * Formats a timestamp the way the centered separator displays it. We keep
  * the date out unless the message is from a different day than "now",
  * matching how Instagram/KakaoTalk lay out their separators.
@@ -123,6 +107,22 @@ export function formatSeparatorTimestamp(timestamp: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/**
+ * Formats a millisecond duration as a compact `Ns` / `M:SS` string. The
+ * dialog uses the same format for the final "Took N seconds" line, so
+ * elapsed labels look identical pre/post finalisation.
+ */
+export function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const pad2 = (n: number): string => n < 10 ? `0${n}` : `${n}`;
+  return `${minutes}:${pad2(seconds)}`;
 }
 
 /**

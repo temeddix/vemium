@@ -1,6 +1,6 @@
 import {
+  formatDuration,
   formatSeparatorTimestamp,
-  isLastInRun,
   shouldShowTimeSeparator,
 } from "@/app/chat";
 import { dashboardContext } from "@/app/context";
@@ -16,7 +16,6 @@ import { repeat } from "lit/directives/repeat.js";
 import "./chat-composer.ts";
 import "./chat-message.ts";
 import { nextCronTick } from "./cron-picker.ts";
-import { formatDuration } from "./inline-note.ts";
 import "./room-files-dialog.ts";
 import "./room-reports-dialog.ts";
 import "./room-settings-dialog.ts";
@@ -37,9 +36,9 @@ declare global {
 /**
  * Top-level page for `/room/:code`. Owns the chat-stream subscription
  * lifecycle (delegated to the store) and renders the timeline plus the
- * human composer. The timeline is a flat list of [`RoomEvent`] rows -
- * bubble kinds render via [`te-chat-message`], side-row kinds (thinking
- * and tool inline notes) render via [`te-inline-note`].
+ * human composer. The timeline is a flat list of [`RoomEvent`] rows; all
+ * kinds (bubbles, thinking, tool inline notes) render via
+ * [`te-chat-message`], which switches body shape by `event.kind`.
  */
 @customElement("te-room-chat-page")
 export class RoomChatPage extends LitElement {
@@ -485,19 +484,10 @@ export class RoomChatPage extends LitElement {
 
   #renderEntry(event: RoomEvent, events: RoomEvent[], idx: number) {
     const previous = idx > 0 ? events[idx - 1] : null;
-    const next = idx < events.length - 1 ? events[idx + 1] : null;
     const showSeparator = shouldShowTimeSeparator(
       previous?.timestamp ?? null,
       event.timestamp,
     );
-    const isLast = isLastInRun(
-      { kind: event.kind, agent: event.agent },
-      next === null ? null : { kind: next.kind, agent: next.agent },
-    );
-    const isFirstInRun = previous === null ||
-      previous.agent !== event.agent ||
-      previous.kind !== event.kind ||
-      showSeparator;
     const separator = showSeparator
       ? html`
         <div class="time-separator">
@@ -505,23 +495,9 @@ export class RoomChatPage extends LitElement {
         </div>
       `
       : nothing;
-    if (event.kind === "thinking" || event.kind === "inline_note") {
-      return html`
-        ${separator}
-        <te-inline-note
-          .event="${event}"
-          ?showAvatar="${isLast}"
-          ?showLabel="${isFirstInRun}"
-        ></te-inline-note>
-      `;
-    }
     return html`
       ${separator}
-      <te-chat-message
-        .event="${event}"
-        ?showAvatar="${isLast}"
-        ?showLabel="${isFirstInRun && event.kind !== "user_chat"}"
-      ></te-chat-message>
+      <te-chat-message .event="${event}"></te-chat-message>
     `;
   }
 
