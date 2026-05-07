@@ -8,6 +8,14 @@ services:
     volumes:
       - vemium-data:/data
     restart: unless-stopped
+    depends_on:
+      crawl4ai:
+        condition: service_started
+
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    restart: unless-stopped
+    shm_size: 1g
 
 volumes:
   vemium-data:
