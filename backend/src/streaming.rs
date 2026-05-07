@@ -85,7 +85,11 @@ pub type ReportId = String;
 /// One frame of the WebSocket wire format. Variants are tagged with `type`
 /// in the JSON output, e.g. `{"type":"rowDelta","id":42,"contentDelta":"hi"}`.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+  tag = "type",
+  rename_all = "camelCase",
+  rename_all_fields = "camelCase"
+)]
 pub enum WsEvent {
   /// First message after a successful connect. Carries the room metadata
   /// plus every persisted row (including any `Streaming` rows still in

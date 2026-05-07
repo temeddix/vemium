@@ -1,20 +1,11 @@
-//! `web_fetch` tool: fetch a URL and return its main content as Markdown.
+//! `web_fetch` tool: fetch a URL via crawl4ai and return its content as
+//! Markdown.
 //!
-//! The conversion pipeline is:
-//!
-//! 1. `reqwest::get` (with a short timeout and a friendly user-agent).
-//! 2. `dom_smoothie::Readability` - extract the article-like body, dropping
-//!    nav/footer/sidebar/ads. Falls back to the raw HTML on failure.
-//! 3. `htmd::convert` - turn the cleaned HTML into Markdown.
-//! 4. Truncate to `max_chars` (default 12k) so the result fits comfortably
-//!    inside the model's context.
-//!
-//! HTML->Markdown saves dramatic amounts of tokens compared with feeding
-//! raw HTML; in practice 60-90% reduction on real-world articles.
+//! Uses the crawl4ai `/md` endpoint which renders JavaScript, strips noise,
+//! and returns clean Markdown in a single synchronous request.
 
 use crate::event_log::EventLog;
 use crate::models::{RoomEventKind, RowStatus};
-use dom_smoothie::{Config, Readability};
 use reqwest::Client;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -26,13 +17,13 @@ use thiserror::Error;
 pub const NAME: &str = "web_fetch";
 pub const INLINE_NOTE_TEXT: &str = "Fetched URL";
 pub const INLINE_NOTE_FAIL_TEXT: &str = "Web fetch failed";
-/// Markdown preview cap for the inline-note `detail`. Way smaller than
-/// `DEFAULT_MAX_CHARS` so a click-to-reveal doesn't dump a small book.
+/// Markdown preview cap for the inline-note `detail`.
 const NOTE_PREVIEW_CHARS: usize = 2_000;
 const DEFAULT_MAX_CHARS: usize = 12_000;
 const MIN_MAX_CHARS: usize = 256;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const USER_AGENT: &str = "Mozilla/5.0 (compatible; VemiumDebateBot/1.0; +https://github.com/cunarist/vemium)";
+const CRAWL4AI_URL: &str = "http://crawl4ai:11235";
+/// crawl4ai may need time to render JS-heavy pages.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Owns the shared `reqwest::Client`. Cheap to clone.
 #[derive(Clone)]
@@ -46,7 +37,6 @@ impl WebFetchTool {
   pub fn new(log: EventLog, author: String) -> Self {
     let http = Client::builder()
       .timeout(REQUEST_TIMEOUT)
-      .user_agent(USER_AGENT)
       .build()
       .unwrap_or_else(|_| Client::new());
     Self { http, log, author }
@@ -68,15 +58,30 @@ pub struct WebFetchOutput {
   pub truncated: bool,
 }
 
-/// Anything that can go wrong before the body is in hand. After we have a
-/// body the conversion pipeline degrades gracefully (`htmd` failures fall
-/// back to the cleaned HTML), so this enum stays small.
 #[derive(Debug, Error)]
 pub enum WebFetchError {
-  #[error("fetch failed: {0}")]
+  #[error("crawl4ai request failed: {0}")]
   Request(#[from] reqwest::Error),
-  #[error("{url} returned HTTP {status}")]
-  Status { url: String, status: u16 },
+  #[error("crawl4ai returned HTTP {0}")]
+  HttpStatus(u16),
+  #[error("crawl4ai scrape failed: {0}")]
+  Scrape(String),
+  #[error("crawl4ai returned no markdown content")]
+  NoMarkdown,
+}
+
+#[derive(Serialize)]
+struct MdRequest<'a> {
+  url: &'a str,
+  /// "fit" returns LLM-optimised markdown with noise removed.
+  f: &'a str,
+}
+
+#[derive(Deserialize)]
+struct MdResponse {
+  success: bool,
+  markdown: Option<String>,
+  error: Option<String>,
 }
 
 impl Tool for WebFetchTool {
@@ -88,11 +93,10 @@ impl Tool for WebFetchTool {
   async fn definition(&self, _prompt: String) -> ToolDefinition {
     ToolDefinition {
       name: NAME.to_string(),
-      description: "Fetches a URL and returns its main article content \
-                    converted to Markdown. Use this when you need to read \
-                    a public web page; the output is pre-cleaned \
-                    (nav/ads/footer dropped) so it is much shorter than \
-                    raw HTML."
+      description: "Fetches a URL and returns its main content as Markdown. \
+                    Uses a headless browser for JavaScript-rendered pages and \
+                    single-page applications. Output is pre-cleaned \
+                    (nav/ads/footer dropped) and token-efficient."
         .to_string(),
       parameters: json!({
         "type": "object",
@@ -130,26 +134,7 @@ impl Tool for WebFetchTool {
       )
       .await;
 
-    let outcome = (async {
-      let response = self.http.get(&args.url).send().await?;
-      if !response.status().is_success() {
-        return Err(WebFetchError::Status {
-          url: args.url.clone(),
-          status: response.status().as_u16(),
-        });
-      }
-      let html = response.text().await?;
-      let cleaned_html = extract_main_content(&html, &args.url);
-      let markdown = htmd::convert(&cleaned_html).unwrap_or(cleaned_html);
-      let trimmed = collapse_whitespace(&markdown);
-      let (markdown, truncated) = truncate_chars(&trimmed, max_chars);
-      Ok(WebFetchOutput {
-        url: args.url.clone(),
-        markdown,
-        truncated,
-      })
-    })
-    .await;
+    let outcome = self.fetch_markdown(&args.url, max_chars).await;
 
     match outcome {
       Ok(output) => {
@@ -177,36 +162,37 @@ impl Tool for WebFetchTool {
   }
 }
 
-/// Runs Readability on `html`, returning the cleaned article HTML. If the
-/// extractor fails (e.g., on a non-article page), returns `html` unchanged.
-fn extract_main_content(html: &str, url: &str) -> String {
-  let config = Config::default();
-  match Readability::new(html, Some(url), Some(config)) {
-    Ok(mut reader) => match reader.parse() {
-      Ok(article) => article.content.to_string(),
-      Err(_) => html.to_string(),
-    },
-    Err(_) => html.to_string(),
-  }
-}
+impl WebFetchTool {
+  async fn fetch_markdown(
+    &self,
+    url: &str,
+    max_chars: usize,
+  ) -> Result<WebFetchOutput, WebFetchError> {
+    let response = self
+      .http
+      .post(format!("{CRAWL4AI_URL}/md"))
+      .json(&MdRequest { url, f: "fit" })
+      .send()
+      .await?;
 
-fn collapse_whitespace(text: &str) -> String {
-  let mut out = String::with_capacity(text.len());
-  let mut blank_run = 0;
-  for line in text.lines() {
-    let trimmed = line.trim_end();
-    if trimmed.is_empty() {
-      blank_run += 1;
-      if blank_run <= 1 {
-        out.push('\n');
-      }
-    } else {
-      blank_run = 0;
-      out.push_str(trimmed);
-      out.push('\n');
+    if !response.status().is_success() {
+      return Err(WebFetchError::HttpStatus(response.status().as_u16()));
     }
+
+    let body: MdResponse = response.json().await?;
+    if !body.success {
+      let msg = body.error.unwrap_or_else(|| "unknown error".to_string());
+      return Err(WebFetchError::Scrape(msg));
+    }
+
+    let markdown = body.markdown.ok_or(WebFetchError::NoMarkdown)?;
+    let (markdown, truncated) = truncate_chars(&markdown, max_chars);
+    Ok(WebFetchOutput {
+      url: url.to_string(),
+      markdown,
+      truncated,
+    })
   }
-  out
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> (String, bool) {
