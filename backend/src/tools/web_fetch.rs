@@ -13,7 +13,7 @@
 //! raw HTML; in practice 60-90% reduction on real-world articles.
 
 use crate::event_log::EventLog;
-use crate::models::{RoomEventKind, RowStatus};
+use crate::models::RoomEventKind;
 use dom_smoothie::{Config, Readability};
 use reqwest::Client;
 use rig::completion::ToolDefinition;
@@ -160,7 +160,7 @@ impl Tool for WebFetchTool {
             format!("URL: {}\n\n{preview}", output.url),
           )
           .await;
-        row.finish(RowStatus::Done).await;
+        row.finish().await;
         Ok(output)
       }
       Err(error) => {
@@ -170,7 +170,7 @@ impl Tool for WebFetchTool {
             format!("URL: {}\n\n{error}", args.url),
           )
           .await;
-        row.finish(RowStatus::Failed).await;
+        row.finish().await;
         Err(error)
       }
     }

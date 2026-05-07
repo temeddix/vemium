@@ -16,14 +16,6 @@ export type RoomState = "active" | "deactivated";
  */
 export type DebateState = "running" | "paused";
 
-/**
- * Lifecycle of one row in the room timeline. Every row starts `streaming`
- * (or `done` if it had no body to stream), accumulates content via row
- * deltas, and transitions exactly once to `done` or `failed`. Reused for
- * leader reports - they go through the same lifecycle.
- */
-export type RowStatus = "streaming" | "done" | "failed";
-
 export type ApiType = "ollama" | "openRouter";
 
 export interface ProviderConfig {
@@ -75,8 +67,8 @@ export interface Room {
  * (`agentChat`/`leaderNote`/`userChat`) render as full chat bubbles with
  * `content` always visible. Side-row kinds (`thinking`, `inlineNote`)
  * render as dim breadcrumbs next to the author's avatar; their `detail`
- * body shows inline only while `status === "streaming"` and is hidden
- * behind a click-to-open dialog once `done`.
+ * body shows inline only while `completedAt === null` (streaming) and is
+ * hidden behind a click-to-open dialog once done.
  */
 export type RoomEventKind =
   | "agent_chat"
@@ -88,7 +80,8 @@ export type RoomEventKind =
 /**
  * One row in `room_events`. The same shape covers chat bubbles, thinking
  * rows, and tool inline notes - they only differ by `kind` and which of
- * `content` / `detail` carries the body.
+ * `content` / `detail` carries the body. `completedAt === null` means the
+ * row is still streaming (held in-memory on the server).
  */
 export interface RoomEvent {
   id: number | null;
@@ -100,10 +93,9 @@ export interface RoomEvent {
   content: string;
   /** Click-to-reveal body for thinking / inline notes. Empty for bubbles. */
   detail: string;
-  status: RowStatus;
-  /** Wall-clock when this row was first inserted. */
+  /** Wall-clock when this row was first created. */
   timestamp: string;
-  /** Wall-clock when the row finished streaming. `null` while streaming. */
+  /** Wall-clock when the row finished. `null` while streaming. */
   completedAt: string | null;
 }
 
@@ -114,16 +106,14 @@ export interface RoomReport {
   content: string;
   startedAt: string;
   completedAt: string | null;
-  status: RowStatus;
 }
 
 // -- WebSocket events -----------------------------------------------------
 
 /**
  * First frame on every connect. Carries the room state, the persisted
- * event log (including any rows still streaming - their `status` is
- * `streaming` and clients reattach to them with subsequent row deltas),
- * and the report list.
+ * event log (only finalized rows; in-flight rows are not in the DB), and
+ * the report list.
  */
 export interface WsSnapshot {
   type: "snapshot";
@@ -167,7 +157,6 @@ export interface WsRowFinished {
   id: number;
   content: string;
   detail: string;
-  status: RowStatus;
   completedAt: string;
 }
 
@@ -188,7 +177,6 @@ export interface WsReportCompleted {
   reportId: string;
   sequence: number;
   content: string;
-  status: RowStatus;
   completedAt: string;
 }
 
@@ -234,7 +222,7 @@ export interface ReportBuffer {
   reportId: string;
   sequence: number;
   content: string;
-  status: RowStatus;
+  /** `null` while the report is still streaming (in-memory on the server). */
   completedAt: string | null;
 }
 
@@ -245,9 +233,8 @@ export interface ReportBuffer {
  */
 export interface RoomView {
   room: Room;
-  /** Every row in the timeline, sorted by `sequence`. Includes streaming
-   * rows: their `status` is `streaming` until the matching `rowFinished`
-   * frame arrives. */
+  /** Every row in the timeline, sorted by `sequence`. Streaming rows have
+   * `completedAt === null` until the matching `rowFinished` frame arrives. */
   events: RoomEvent[];
   reports: ReportBuffer[];
 }

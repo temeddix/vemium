@@ -16,7 +16,7 @@
 //! returning to the model.
 
 use crate::event_log::{EventLog, RowHandle};
-use crate::models::{RoomEventKind, RowStatus};
+use crate::models::RoomEventKind;
 use crate::workspace::RoomWorkspace;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -52,12 +52,12 @@ async fn open_row(log: &EventLog, author: &str, label: String) -> RowHandle {
 
 async fn finish_ok(row: &RowHandle, label: String, detail: String) {
   row.replace_body(label, detail).await;
-  row.finish(RowStatus::Done).await;
+  row.finish().await;
 }
 
 async fn finish_err(row: &RowHandle, label: String, detail: String) {
   row.replace_body(label, detail).await;
-  row.finish(RowStatus::Failed).await;
+  row.finish().await;
 }
 
 // -- list_subject_folders --------------------------------------------------

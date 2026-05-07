@@ -16,10 +16,7 @@
 //! authoritative `room_events` table — including streaming bodies — so no
 //! draft state is ever lost.
 
-use crate::models::{
-  DebateState, ReportStatus, RoomEvent, RoomReport, RoomState, RoomView,
-  RowStatus,
-};
+use crate::models::{DebateState, RoomEvent, RoomReport, RoomState, RoomView};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::sync::Mutex;
@@ -46,6 +43,9 @@ pub struct RoomStream {
 #[derive(Default)]
 struct RoomStreamInner {
   subscribers: Vec<mpsc::Sender<WsEvent>>,
+  /// Rows currently streaming (no DB entry yet). Included in the WS
+  /// snapshot so clients that reconnect mid-stream can see them.
+  inflight: Vec<RoomEvent>,
 }
 
 impl RoomStream {
@@ -53,10 +53,25 @@ impl RoomStream {
     Self::default()
   }
 
-  pub fn subscribe(&self) -> RoomReceiver {
+  /// Subscribes and atomically captures the inflight row list. The caller
+  /// receives every event queued after this point, and the snapshot is
+  /// consistent with exactly that starting point — no double-counts, no gaps.
+  pub fn subscribe_with_inflight(&self) -> (RoomReceiver, Vec<RoomEvent>) {
+    let mut inner = self.lock();
     let (tx, rx) = mpsc::channel(BUFFER_DEPTH);
-    self.lock().subscribers.push(tx);
-    RoomReceiver { events: rx }
+    inner.subscribers.push(tx);
+    let inflight = inner.inflight.clone();
+    (RoomReceiver { events: rx }, inflight)
+  }
+
+  /// Registers an in-flight row. Call after broadcasting `RowAdded`.
+  pub fn register_inflight(&self, event: RoomEvent) {
+    self.lock().inflight.push(event);
+  }
+
+  /// Removes an in-flight row. Call before the DB insert in `finish`.
+  pub fn deregister_inflight(&self, transient_id: i64) {
+    self.lock().inflight.retain(|e| e.id != Some(transient_id));
   }
 
   /// Routes `event` to every live subscriber. Subscribers whose channel
@@ -85,11 +100,15 @@ pub type ReportId = String;
 /// One frame of the WebSocket wire format. Variants are tagged with `type`
 /// in the JSON output, e.g. `{"type":"rowDelta","id":42,"contentDelta":"hi"}`.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+  tag = "type",
+  rename_all = "camelCase",
+  rename_all_fields = "camelCase"
+)]
 pub enum WsEvent {
-  /// First message after a successful connect. Carries the room metadata
-  /// plus every persisted row (including any `Streaming` rows still in
-  /// flight, so reconnects converge without losing draft content).
+  /// First message after a successful connect. Carries the room metadata,
+  /// every finalized row from the database, and any rows currently streaming
+  /// (held in the inflight registry) so a reconnecting client misses nothing.
   Snapshot {
     room: Box<RoomView>,
     events: Vec<RoomEvent>,
@@ -125,7 +144,6 @@ pub enum WsEvent {
     id: i64,
     content: String,
     detail: String,
-    status: RowStatus,
     completed_at: DateTime<Utc>,
   },
 
@@ -139,14 +157,12 @@ pub enum WsEvent {
     report_id: ReportId,
     sequence: u64,
     content: String,
-    status: ReportStatus,
     completed_at: DateTime<Utc>,
   },
 }
 
-/// Builds a [`ReportId`] for an in-flight report. Once the report is
-/// persisted, the same string (the row's database id) is used in
-/// [`WsEvent::ReportCompleted`].
-pub fn report_id_for(database_id: i64) -> ReportId {
-  database_id.to_string()
+/// Builds a [`ReportId`] from a report's sequence number. Consistent
+/// between the live WS stream and the snapshot's `toReportBuffer`.
+pub fn report_id_for(sequence: u64) -> ReportId {
+  sequence.to_string()
 }

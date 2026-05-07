@@ -16,7 +16,7 @@
 //!   timeline before the final exit code lands.
 
 use crate::event_log::{EventLog, RowHandle};
-use crate::models::{RoomEventKind, RowStatus};
+use crate::models::RoomEventKind;
 use crate::python_runner::{
   PythonRunResult, PythonRunner, StageResult, StageSink,
 };
@@ -161,7 +161,7 @@ impl Tool for RunPythonTool {
       row
         .replace_body(INLINE_NOTE_FAIL.to_string(), error.0.clone())
         .await;
-      row.finish(RowStatus::Failed).await;
+      row.finish().await;
       return Err(error);
     }
 
@@ -176,7 +176,7 @@ impl Tool for RunPythonTool {
         row
           .replace_body(INLINE_NOTE_FAIL.to_string(), error.0.clone())
           .await;
-        row.finish(RowStatus::Failed).await;
+        row.finish().await;
         return Err(error);
       }
     };
@@ -187,13 +187,8 @@ impl Tool for RunPythonTool {
       INLINE_NOTE_FAIL
     };
     let detail = format_run_detail(&result);
-    let final_status = if result.overall_ok {
-      RowStatus::Done
-    } else {
-      RowStatus::Failed
-    };
     row.replace_body(label.to_string(), detail).await;
-    row.finish(final_status).await;
+    row.finish().await;
 
     Ok(RunPythonOutput {
       script_path: relative.to_string_lossy().replace('\\', "/"),

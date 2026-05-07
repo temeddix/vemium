@@ -449,7 +449,6 @@ export class DashboardStore {
             ...row,
             content: event.content,
             detail: event.detail,
-            status: event.status,
             completedAt: event.completedAt,
           }))
         );
@@ -460,7 +459,6 @@ export class DashboardStore {
             reportId: event.reportId,
             sequence: event.sequence,
             content: "",
-            status: "streaming",
             completedAt: null,
           })
         );
@@ -478,7 +476,6 @@ export class DashboardStore {
           mapReport(view, event.reportId, (report) => ({
             ...report,
             content: event.content,
-            status: event.status,
             completedAt: event.completedAt,
           }))
         );
@@ -621,10 +618,9 @@ function extractErrorMessage(body: string, status: number): string {
 
 function toReportBuffer(report: RoomReport): ReportBuffer {
   return {
-    reportId: `${report.id}`,
+    reportId: `${report.sequence}`,
     sequence: report.sequence,
     content: report.content,
-    status: report.status,
     completedAt: report.completedAt,
   };
 }

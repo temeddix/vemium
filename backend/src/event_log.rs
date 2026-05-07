@@ -1,27 +1,32 @@
 //! Streaming append-only log over `room_events`.
 //!
-//! Every persona turn, every tool, and the orchestrator itself produce
-//! [`RowHandle`]s through this log. A row is born `Streaming` (via
-//! [`EventLog::start_row`]), accumulates content via
-//! [`RowHandle::append_content`] / [`RowHandle::append_detail`], and is
-//! retired exactly once via [`RowHandle::finish`]. Each call broadcasts a
-//! matching WebSocket frame on the room's [`RoomStream`] and persists to
-//! the database, so connected clients converge on the live state and
-//! reconnects refetch the in-flight body from the table.
+//! Rows are held entirely in memory while streaming. The database sees them
+//! only once: at [`RowHandle::finish`], which does a single INSERT with
+//! `completed_at` set. This eliminates zombie `streaming` rows left in the
+//! database when the server is forcibly restarted.
 //!
-//! The handle deliberately does *not* implement `Drop` finalization:
-//! callers must explicitly finish their rows so the failure path
-//! (`RowStatus::Failed`) is always intentional.
+//! While in flight each row carries a negative *transient id* (allocated
+//! from a process-global counter) so WebSocket clients can correlate
+//! `RowAdded` → `RowDelta` → `RowFinished` frames. In-flight rows are
+//! also kept in the [`RoomStream`] inflight registry so reconnecting
+//! clients receive them in the snapshot and can pick up streaming where
+//! it left off.
 
 use crate::app_state::{AppState, RoomHandle};
 use crate::db;
 use crate::error::ReportError;
-use crate::models::{RoomEvent, RoomEventKind, RowStatus};
+use crate::models::{RoomEvent, RoomEventKind};
 use crate::streaming::{RoomStream, WsEvent};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::Mutex;
+
+static NEXT_TRANSIENT_ID: AtomicI64 = AtomicI64::new(-1);
+
+fn alloc_transient_id() -> i64 {
+  NEXT_TRANSIENT_ID.fetch_sub(1, Ordering::Relaxed)
+}
 
 /// Per-room append-only event log. Cheap to clone; threads through the
 /// orchestrator and into every tool that wants to record a row.
@@ -48,8 +53,10 @@ impl EventLog {
     }
   }
 
-  /// Inserts a fresh row in `Streaming` state and broadcasts a `RowAdded`
-  /// frame. The returned handle owns the row's lifecycle from here on.
+  /// Opens a new streaming row. No database write happens here; the row
+  /// lives in memory until [`RowHandle::finish`] is called. Broadcasts a
+  /// `RowAdded` frame with a transient negative id so clients can begin
+  /// rendering immediately.
   pub async fn start_row(
     &self,
     kind: RoomEventKind,
@@ -57,29 +64,31 @@ impl EventLog {
     initial_content: String,
     initial_detail: String,
   ) -> RowHandle {
+    let transient_id = alloc_transient_id();
     let timestamp = Utc::now();
     let event = RoomEvent {
-      id: None,
+      id: Some(transient_id),
       room_code: self.room_code.clone(),
       sequence: self.handle.allocate_event_sequence(),
       kind,
-      agent,
+      agent: agent.clone(),
       content: initial_content.clone(),
       detail: initial_detail.clone(),
-      status: RowStatus::Streaming,
       timestamp,
       completed_at: None,
     };
-    let stored = db::insert_event(&self.state.db, &event)
-      .await
-      .report()
-      .unwrap_or_else(|| event.clone());
     self.stream.send(WsEvent::RowAdded {
-      event: stored.clone(),
+      event: event.clone(),
     });
+    self.stream.register_inflight(event.clone());
     RowHandle {
       log: self.clone(),
-      id: stored.id,
+      transient_id,
+      room_code: self.room_code.clone(),
+      sequence: event.sequence,
+      kind,
+      agent,
+      timestamp,
       state: Arc::new(Mutex::new(RowState {
         content: initial_content,
         detail: initial_detail,
@@ -88,9 +97,9 @@ impl EventLog {
     }
   }
 
-  /// Inserts a row that is already `Done` (e.g. a user-authored message
-  /// or a one-shot inline note that has nothing to stream). Broadcasts a
-  /// single `RowAdded` frame; no further deltas will follow.
+  /// Inserts a row that is already done (e.g. a user message or a
+  /// one-shot inline note). Broadcasts a single `RowAdded` frame with
+  /// the real database id.
   pub async fn record_finalized(
     &self,
     kind: RoomEventKind,
@@ -107,7 +116,6 @@ impl EventLog {
       agent,
       content,
       detail,
-      status: RowStatus::Done,
       timestamp,
       completed_at: Some(timestamp),
     };
@@ -127,132 +135,101 @@ struct RowState {
   detail: String,
 }
 
-/// Live handle to a streaming row. Cheap to clone - all clones share the
-/// same backing state, the same database row, and the same finalization
-/// flag. `finish` is idempotent: only the first call writes the
-/// terminal state and emits the `RowFinished` frame.
+/// Live handle to a streaming row. Cheap to clone — all clones share the
+/// same backing state and the same finalization flag. [`finish`] is
+/// idempotent: only the first call writes to the database and emits the
+/// `RowFinished` frame.
 #[derive(Clone)]
 pub struct RowHandle {
   log: EventLog,
-  /// `None` only if the initial insert returned no id (database error
-  /// already reported); subsequent operations become no-ops in that case.
-  id: Option<i64>,
+  /// Negative transient id used in WS frames while the row is in flight.
+  transient_id: i64,
+  // Fields needed to build the RoomEvent for the DB insert at finish time.
+  room_code: String,
+  sequence: u64,
+  kind: RoomEventKind,
+  agent: Option<String>,
+  timestamp: DateTime<Utc>,
   state: Arc<Mutex<RowState>>,
   finished: Arc<AtomicBool>,
 }
 
 impl RowHandle {
-  /// Appends to the row's `content` (the bubble text or breadcrumb
-  /// label). No-op if `delta` is empty or the row is already finished.
+  /// Appends to the row's `content`. No-op if `delta` is empty or the
+  /// row is already finished.
   pub async fn append_content(&self, delta: &str) {
     if delta.is_empty() || self.is_finished() {
       return;
     }
-    let Some(id) = self.id else {
-      return;
-    };
     let mut state = self.state.lock().await;
     state.content.push_str(delta);
-    db::update_event_body(
-      &self.log.state.db,
-      id,
-      &state.content,
-      &state.detail,
-    )
-    .await
-    .report();
     self.log.stream.send(WsEvent::RowDelta {
-      id,
+      id: self.transient_id,
       content_delta: delta.to_string(),
       detail_delta: String::new(),
     });
   }
 
-  /// Appends to the row's `detail` (the click-to-reveal body). No-op if
-  /// `delta` is empty or the row is already finished.
+  /// Appends to the row's `detail`. No-op if `delta` is empty or the
+  /// row is already finished.
   pub async fn append_detail(&self, delta: &str) {
     if delta.is_empty() || self.is_finished() {
       return;
     }
-    let Some(id) = self.id else {
-      return;
-    };
     let mut state = self.state.lock().await;
     state.detail.push_str(delta);
-    db::update_event_body(
-      &self.log.state.db,
-      id,
-      &state.content,
-      &state.detail,
-    )
-    .await
-    .report();
     self.log.stream.send(WsEvent::RowDelta {
-      id,
+      id: self.transient_id,
       content_delta: String::new(),
       detail_delta: delta.to_string(),
     });
   }
 
-  /// Replaces the row's body verbatim and broadcasts the resulting state
-  /// as a delta against the previously known content. Used by tools that
-  /// only know the final body once the call returns.
+  /// Replaces the row's body verbatim and broadcasts deltas. Used by
+  /// tools that only know the final body once their call returns.
   pub async fn replace_body(&self, content: String, detail: String) {
     if self.is_finished() {
       return;
     }
-    let Some(id) = self.id else {
-      return;
-    };
     let mut state = self.state.lock().await;
     let content_delta = diff_suffix(&state.content, &content);
     let detail_delta = diff_suffix(&state.detail, &detail);
     state.content = content;
     state.detail = detail;
-    db::update_event_body(
-      &self.log.state.db,
-      id,
-      &state.content,
-      &state.detail,
-    )
-    .await
-    .report();
     if !content_delta.is_empty() || !detail_delta.is_empty() {
       self.log.stream.send(WsEvent::RowDelta {
-        id,
+        id: self.transient_id,
         content_delta,
         detail_delta,
       });
     }
   }
 
-  /// Finalizes the row at `status`, persisting the latest body and
-  /// stamping `completed_at`. Idempotent across clones - only the first
-  /// caller actually writes the terminal state.
-  pub async fn finish(&self, status: RowStatus) {
+  /// Persists the row to the database and broadcasts `RowFinished`.
+  /// Idempotent across clones — only the first call acts.
+  pub async fn finish(&self) {
     if self.finished.swap(true, Ordering::SeqCst) {
       return;
     }
-    let Some(id) = self.id else {
-      return;
-    };
     let completed_at = Utc::now();
     let state = self.state.lock().await;
-    db::finish_event(
-      &self.log.state.db,
-      id,
-      &state.content,
-      &state.detail,
-      status,
-      completed_at,
-    )
-    .await
-    .report();
-    self.log.stream.send(WsEvent::RowFinished {
-      id,
+    let event = RoomEvent {
+      id: None,
+      room_code: self.room_code.clone(),
+      sequence: self.sequence,
+      kind: self.kind,
+      agent: self.agent.clone(),
       content: state.content.clone(),
       detail: state.detail.clone(),
-      status,
+      timestamp: self.timestamp,
+      completed_at: Some(completed_at),
+    };
+    self.log.stream.deregister_inflight(self.transient_id);
+    db::insert_event(&self.log.state.db, &event).await.report();
+    self.log.stream.send(WsEvent::RowFinished {
+      id: self.transient_id,
+      content: state.content.clone(),
+      detail: state.detail.clone(),
       completed_at,
     });
   }

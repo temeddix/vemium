@@ -1,6 +1,6 @@
 import type { ReportBuffer } from "@/app/types";
 import { formatTimestamp } from "@/app/utils";
-import { css, html, LitElement, nothing } from "lit";
+import { css, html, LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
@@ -92,33 +92,19 @@ export class RoomReportsDialog extends LitElement {
             <li class="report-item">
               <div class="report-meta">
                 <strong>Report #${report.sequence}</strong>
-                ${this.#renderStatus(report.status)} ${report.completedAt
+                ${report.completedAt === null
                   ? html`
-                    <span>- ${formatTimestamp(report.completedAt)}</span>
+                    <wa-badge size="small">streaming</wa-badge>
                   `
-                  : nothing}
+                  : html`
+                    <span>- ${formatTimestamp(report.completedAt)}</span>
+                  `}
               </div>
               ${renderMarkdown(report.content || "...")}
             </li>
           `
         )}
       </ul>
-    `;
-  }
-
-  #renderStatus(status: ReportBuffer["status"]) {
-    if (status === "streaming") {
-      return html`
-        <wa-badge size="small">streaming</wa-badge>
-      `;
-    }
-    if (status === "failed") {
-      return html`
-        <wa-badge size="small">failed</wa-badge>
-      `;
-    }
-    return html`
-      <wa-badge size="small">done</wa-badge>
     `;
   }
 }

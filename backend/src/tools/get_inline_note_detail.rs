@@ -6,7 +6,7 @@
 use crate::app_state::AppState;
 use crate::db;
 use crate::event_log::EventLog;
-use crate::models::{RoomEventKind, RowStatus};
+use crate::models::RoomEventKind;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -112,7 +112,7 @@ impl Tool for GetInlineNoteDetailTool {
         row
           .replace_body(row_label(args.id), event.detail.clone())
           .await;
-        row.finish(RowStatus::Done).await;
+        row.finish().await;
         Ok(GetInlineNoteDetailOutput {
           id: args.id,
           agent: event.agent,
@@ -128,7 +128,7 @@ impl Tool for GetInlineNoteDetailTool {
             format!("inline note #{} not found in this room", args.id),
           )
           .await;
-        row.finish(RowStatus::Failed).await;
+        row.finish().await;
         Err(GetInlineNoteDetailError::NotFound(args.id))
       }
       Err(error) => {
@@ -138,7 +138,7 @@ impl Tool for GetInlineNoteDetailTool {
             error.to_string(),
           )
           .await;
-        row.finish(RowStatus::Failed).await;
+        row.finish().await;
         Err(error)
       }
     }

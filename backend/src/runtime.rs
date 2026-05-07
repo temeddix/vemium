@@ -31,8 +31,8 @@ use crate::llm::{
   build_chat_client,
 };
 use crate::models::{
-  DebateState, ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind,
-  RoomState, RowStatus,
+  DebateState, ProviderConfig, Room, RoomEvent, RoomEventKind, RoomReport,
+  RoomState,
 };
 use crate::python_runner::PythonRunner;
 use crate::streaming::{ReportId, RoomStream, WsEvent, report_id_for};
@@ -211,7 +211,7 @@ impl TurnSession {
       return;
     }
     if let Some(ActiveRow::Bubble(row)) = active.take() {
-      row.finish(RowStatus::Done).await;
+      row.finish().await;
     }
     let row = self
       .log
@@ -237,7 +237,7 @@ impl TurnSession {
       return;
     }
     if let Some(ActiveRow::Thinking(row)) = active.take() {
-      row.finish(RowStatus::Done).await;
+      row.finish().await;
     }
     let row = self
       .log
@@ -254,24 +254,17 @@ impl TurnSession {
   /// Closes any open row before a tool call begins, so the tool's
   /// inline-note row appears after the model's pre-tool output.
   pub async fn close_active(&self) {
-    let mut active = self.active.lock().await;
-    if let Some(row) = active.take() {
-      let handle = match row {
-        ActiveRow::Thinking(row) | ActiveRow::Bubble(row) => row,
-      };
-      handle.finish(RowStatus::Done).await;
-    }
+    self.finish().await;
   }
 
-  /// Closes any open row at turn end. Idempotent; safe to call multiple
-  /// times. `status` applies only to the in-flight row, if any.
-  pub async fn finish(&self, status: RowStatus) {
+  /// Closes any open row at turn end. Idempotent; safe to call multiple times.
+  pub async fn finish(&self) {
     let mut active = self.active.lock().await;
     if let Some(row) = active.take() {
       let handle = match row {
         ActiveRow::Thinking(row) | ActiveRow::Bubble(row) => row,
       };
-      handle.finish(status).await;
+      handle.finish().await;
     }
   }
 }
@@ -463,11 +456,7 @@ async fn run_chat_turn(
     })
     .await;
 
-  let status = match &outcome {
-    Ok(_) => RowStatus::Done,
-    Err(_) => RowStatus::Failed,
-  };
-  session.finish(status).await;
+  session.finish().await;
   outcome.map(|_| ())
 }
 
@@ -587,11 +576,7 @@ async fn evaluate_scheduled_resume(
       session: session.clone(),
     })
     .await;
-  let status = match &outcome {
-    Ok(_) => RowStatus::Done,
-    Err(_) => RowStatus::Failed,
-  };
-  session.finish(status).await;
+  session.finish().await;
   outcome
 }
 
@@ -739,11 +724,7 @@ async fn run_leader_turn(
     })
     .await;
 
-  let status = match &outcome {
-    Ok(_) => RowStatus::Done,
-    Err(_) => RowStatus::Failed,
-  };
-  session.finish(status).await;
+  session.finish().await;
   outcome.map(|_| ())
 }
 
@@ -824,9 +805,7 @@ async fn run_leader_report(
 
   let sequence = handle.allocate_report_sequence();
   let started_at = Utc::now();
-  let report =
-    db::start_report(&state.db, &room.code, sequence, started_at).await?;
-  let report_id = report_id_for(report.id);
+  let report_id = report_id_for(sequence);
 
   let stream = state.ensure_room_stream(&room.code).await;
   stream.send(WsEvent::ReportStarted {
@@ -840,47 +819,33 @@ async fn run_leader_report(
   let outcome = stream_leader_report(&high, &system, user, hook).await;
   let completed_at = Utc::now();
 
-  match outcome {
-    Ok(content) => {
-      let final_content = content.trim().to_string();
-      db::finish_report(
-        &state.db,
-        report.id,
-        &final_content,
-        ReportStatus::Done,
-        completed_at,
-      )
-      .await
-      .report();
-      stream.send(WsEvent::ReportCompleted {
-        report_id,
-        sequence,
-        content: final_content,
-        status: ReportStatus::Done,
-        completed_at,
-      });
-      Ok(())
-    }
-    Err(error) => {
-      db::finish_report(
-        &state.db,
-        report.id,
-        "",
-        ReportStatus::Failed,
-        completed_at,
-      )
-      .await
-      .report();
-      stream.send(WsEvent::ReportCompleted {
-        report_id,
-        sequence,
-        content: String::new(),
-        status: ReportStatus::Failed,
-        completed_at,
-      });
-      Err(error)
-    }
-  }
+  let (content, result) = match outcome {
+    Ok(raw) => (raw.trim().to_string(), Ok(())),
+    Err(error) => (String::new(), Err(error)),
+  };
+
+  db::insert_report(
+    &state.db,
+    &RoomReport {
+      id: 0,
+      room_code: room.code.clone(),
+      sequence,
+      content: content.clone(),
+      started_at,
+      completed_at: Some(completed_at),
+    },
+  )
+  .await
+  .report();
+
+  stream.send(WsEvent::ReportCompleted {
+    report_id,
+    sequence,
+    content,
+    completed_at,
+  });
+
+  result
 }
 
 async fn stream_leader_report(

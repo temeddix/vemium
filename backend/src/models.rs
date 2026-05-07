@@ -329,48 +329,17 @@ impl RoomEventKind {
   }
 }
 
-/// Lifecycle of a [`RoomEvent`]. Every row is born `Streaming` (or
-/// `Done` if it had no body to stream), accumulates content via row-delta
-/// frames, then transitions exactly once to `Done` or `Failed`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RowStatus {
-  Streaming,
-  Done,
-  Failed,
-}
-
-impl RowStatus {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::Streaming => "streaming",
-      Self::Done => "done",
-      Self::Failed => "failed",
-    }
-  }
-
-  pub fn parse(value: &str) -> anyhow::Result<Self> {
-    match value {
-      "streaming" => Ok(Self::Streaming),
-      "done" => Ok(Self::Done),
-      "failed" => Ok(Self::Failed),
-      other => Err(anyhow::anyhow!("unknown row status: {other}")),
-    }
-  }
-}
-
 /// One row in `room_events`. Unified across bubbles, thinking bursts, and
 /// tool inline notes - they only differ by `kind` and which of
-/// `content` / `detail` carries the body. `status` reflects the row's
-/// lifecycle; the row is INSERTed at start (`Streaming`), UPDATEd as
-/// content accumulates, and finalized to `Done` / `Failed` when the
-/// producer is finished.
+/// `content` / `detail` carries the body. Rows are only persisted to the
+/// database when they finish, so `completed_at` is always set on rows
+/// read from the DB. On the wire, `completed_at: null` signals a row
+/// that is still streaming (held in-memory only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomEvent {
-  /// Database primary key. `None` only for events constructed in memory
-  /// before [`crate::db::insert_event`] returns; populated on every row
-  /// read back from the database and reflected on the wire.
+  /// Database primary key. `None` for in-flight (not yet persisted) rows
+  /// and for rows constructed before [`crate::db::insert_event`] returns.
   #[serde(default)]
   pub id: Option<i64>,
   pub room_code: String,
@@ -384,48 +353,17 @@ pub struct RoomEvent {
   /// `InlineNote` (tool args/result). Empty for bubble kinds.
   #[serde(default)]
   pub detail: String,
-  pub status: RowStatus,
-  /// Wall-clock when this row was first inserted.
+  /// Wall-clock when this row was first created.
   pub timestamp: DateTime<Utc>,
   /// Wall-clock when the row finished streaming. `None` while the row is
-  /// still `Streaming`.
+  /// still in-flight (not yet in the database).
   #[serde(default)]
   pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Lifecycle state of a [`RoomReport`]. Reports are streamed token-by-token
-/// while `Streaming` and finalized to `Done` (or `Failed`) once the high
-/// model returns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReportStatus {
-  Streaming,
-  Done,
-  Failed,
-}
-
-impl ReportStatus {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::Streaming => "streaming",
-      Self::Done => "done",
-      Self::Failed => "failed",
-    }
-  }
-
-  pub fn parse(value: &str) -> anyhow::Result<Self> {
-    match value {
-      "streaming" => Ok(Self::Streaming),
-      "done" => Ok(Self::Done),
-      "failed" => Ok(Self::Failed),
-      other => Err(anyhow::anyhow!("unknown report status: {other}")),
-    }
-  }
-}
-
 /// A persisted leader report. `content` is the full markdown body once the
-/// stream completes; while streaming, the live deltas are broadcast over
-/// WebSocket only.
+/// stream completes. Reports are only inserted into the database when they
+/// finish, so `completed_at` is always set on rows read from the DB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomReport {
@@ -435,7 +373,6 @@ pub struct RoomReport {
   pub content: String,
   pub started_at: DateTime<Utc>,
   pub completed_at: Option<DateTime<Utc>>,
-  pub status: ReportStatus,
 }
 
 // -- Request DTOs ----------------------------------------------------------

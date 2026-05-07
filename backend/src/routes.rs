@@ -43,8 +43,8 @@ use crate::error::ReportError;
 use crate::event_log::EventLog;
 use crate::models::{
   AppSettings, CloneRoomRequest, CreateMessageRequest, CreateRoomRequest,
-  DebateState, ProviderConfig, REDACTED_API_KEY_SENTINEL, Room, RoomEventKind,
-  RoomState, UpdateAppSettingsRequest, UpdateRoomRequest,
+  DebateState, ProviderConfig, REDACTED_API_KEY_SENTINEL, Room, RoomEvent,
+  RoomEventKind, RoomState, UpdateAppSettingsRequest, UpdateRoomRequest,
 };
 use crate::provider_models;
 use crate::runtime;
@@ -846,19 +846,29 @@ async fn stream_room_events(
     return not_found("room");
   }
   let stream = state.ensure_room_stream(&code).await;
-  let receiver = stream.subscribe();
-  ws.on_upgrade(move |socket| handle_socket(socket, state, code, receiver))
+  let (receiver, inflight) = stream.subscribe_with_inflight();
+  ws.on_upgrade(move |socket| {
+    handle_socket(socket, state, code, receiver, inflight)
+  })
 }
 
 /// Builds the snapshot frame sent right after a successful upgrade so the
 /// client starts from the persisted state. Returns `None` if the room was
 /// deleted between connection acceptance and snapshot construction.
-async fn build_snapshot(state: &AppState, room_code: &str) -> Option<WsEvent> {
+async fn build_snapshot(
+  state: &AppState,
+  room_code: &str,
+  inflight: Vec<RoomEvent>,
+) -> Option<WsEvent> {
   let room_view = state.rooms.read().await.get(room_code).map(Room::view)?;
-  let events = db::load_room_events(&state.db, room_code)
+  let mut events = db::load_room_events(&state.db, room_code)
     .await
     .report()
     .unwrap_or_default();
+  if !inflight.is_empty() {
+    events.extend(inflight);
+    events.sort_by_key(|e| e.sequence);
+  }
   let reports = db::load_room_reports(&state.db, room_code)
     .await
     .report()
@@ -875,8 +885,9 @@ async fn handle_socket(
   state: AppState,
   room_code: String,
   mut receiver: RoomReceiver,
+  inflight: Vec<RoomEvent>,
 ) {
-  let Some(initial) = build_snapshot(&state, &room_code).await else {
+  let Some(initial) = build_snapshot(&state, &room_code, inflight).await else {
     return;
   };
   if !send_event(&mut socket, &initial).await {
