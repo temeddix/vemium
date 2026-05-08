@@ -102,8 +102,8 @@ export class ChatMessage extends LitElement {
     }
 
     .row.is-self .bubble {
-      margin-left: 0;
-      max-width: min(36rem, 100%);
+      margin-left: var(--content-indent);
+      max-width: min(36rem, calc(100% - var(--content-indent)));
       background: var(--wa-color-brand-fill-loud);
       color: var(--wa-color-brand-on-loud);
     }
