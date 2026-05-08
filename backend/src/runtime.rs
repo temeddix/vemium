@@ -77,6 +77,7 @@ const DEBATE_PERSONAS: [DebatePersona; 3] = [
 
 const CHAT_FORMAT_GUARDRAIL: &str =
   include_str!("prompts/chat_format_guardrail.md");
+const PYTHON_STYLE_GUIDE: &str = include_str!("prompts/python_style.md");
 
 /// Reminder injected into every persona system prompt that consumes the
 /// transcript. Explains the inline-note breadcrumb syntax and the
@@ -948,10 +949,11 @@ pub(crate) async fn current_provider_configs(
 
 fn build_chat_system_prompt(room: &Room, persona: DebatePersona) -> String {
   format!(
-    "{persona_prompt}\n\n{preamble}\n\n{guardrail}\n\n{hint}",
+    "{persona_prompt}\n\n{preamble}\n\n{guardrail}\n\n{python_style}\n\n{hint}",
     persona_prompt = persona.system_prompt,
     preamble = build_room_preamble(room),
     guardrail = CHAT_FORMAT_GUARDRAIL,
+    python_style = PYTHON_STYLE_GUIDE,
     hint = INLINE_NOTE_TOOL_HINT,
   )
 }
