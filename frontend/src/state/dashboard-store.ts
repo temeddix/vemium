@@ -12,6 +12,7 @@ import type {
   RoomEvent,
   RoomReport,
   RoomsListResponse,
+  RoomState,
   RoomView,
   SettingsEnvelope,
   UpdateAppSettingsRequest,
@@ -361,12 +362,9 @@ export class DashboardStore {
     return `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files/download`;
   }
 
-  async activateRoom(roomCode: string): Promise<void> {
-    await this.#postRoomStateAction(roomCode, "activate");
-  }
-
-  async deactivateRoom(roomCode: string): Promise<void> {
-    await this.#postRoomStateAction(roomCode, "deactivate");
+  async toggleRoomActivation(room: Room): Promise<void> {
+    const action = room.roomState === "deactivated" ? "activate" : "deactivate";
+    await this.#postRoomStateAction(room.code, action);
   }
 
   async deleteRoom(roomCode: string): Promise<void> {
@@ -405,6 +403,11 @@ export class DashboardStore {
       if (!response.ok) {
         this.#patch({ errorMessage: `${action} failed.` });
         return;
+      }
+      const payload = (await response.json()) as { roomState: RoomState };
+      const room = this.#state.rooms.find((r) => r.code === roomCode);
+      if (room !== undefined) {
+        this.#mergeRoom({ ...room, roomState: payload.roomState });
       }
     } catch {
       this.#patch({ errorMessage: `Network error during ${action}.` });

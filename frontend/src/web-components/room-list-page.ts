@@ -324,8 +324,8 @@ export class RoomListPage extends LitElement {
                     <wa-switch
                       size="small"
                       ?checked="${room.roomState === "active"}"
-                      @wa-change="${(): Promise<void> =>
-                        this.#onToggleActivation(room)}"
+                      @change="${(): Promise<void> =>
+                        this.store.toggleRoomActivation(room)}"
                     ></wa-switch>
                   </span>
                 </span>
@@ -371,14 +371,6 @@ export class RoomListPage extends LitElement {
     const url = `/room/${code}`;
     globalThis.history.pushState({}, "", url);
     globalThis.dispatchEvent(new PopStateEvent("popstate"));
-  }
-
-  async #onToggleActivation(room: Room): Promise<void> {
-    if (room.roomState === "deactivated") {
-      await this.store.activateRoom(room.code);
-    } else {
-      await this.store.deactivateRoom(room.code);
-    }
   }
 
   #openCreate = (): void => {

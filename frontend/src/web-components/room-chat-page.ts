@@ -277,7 +277,8 @@ export class RoomChatPage extends LitElement {
           <wa-switch
             size="small"
             ?checked="${room.roomState === "active"}"
-            @wa-change="${(): Promise<void> => this.#onToggleActivation(room)}"
+            @change="${(): Promise<void> =>
+              this.store.toggleRoomActivation(room)}"
           ></wa-switch>
           <wa-dropdown placement="bottom-end">
             <wa-button
@@ -464,14 +465,6 @@ export class RoomChatPage extends LitElement {
   };
 
   // -- Actions ------------------------------------------------------------
-
-  async #onToggleActivation(room: Room): Promise<void> {
-    if (room.roomState === "deactivated") {
-      await this.store.activateRoom(room.code);
-    } else {
-      await this.store.deactivateRoom(room.code);
-    }
-  }
 
   #onBack(): void {
     globalThis.history.pushState({}, "", "/");
