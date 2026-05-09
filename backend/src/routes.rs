@@ -571,46 +571,17 @@ async fn resume_room(
   Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  let updated_at = Utc::now();
-  let already_running = {
-    let mut rooms = state.rooms.write().await;
-    let Some(room) = rooms.get_mut(&code) else {
-      return not_found("room");
-    };
-    if matches!(room.debate_state, DebateState::Running) {
-      true
-    } else {
-      room.debate_state = DebateState::Running;
-      room.updated_at = updated_at;
-      false
+  let handle = {
+    let handles = state.room_handles.read().await;
+    match handles.get(&code).cloned() {
+      Some(h) => h,
+      None => return not_found("room"),
     }
   };
-
-  if already_running {
-    return (
-      StatusCode::OK,
-      Json(json!({"debateState": DebateState::Running.as_str()})),
-    )
-      .into_response();
-  }
-
-  if let Err(error) =
-    db::update_debate_state(&state.db, &code, DebateState::Running, updated_at)
-      .await
-  {
-    tracing::warn!(%error, "failed to persist debate state change");
+  if let Err(error) = runtime::resume_debate(&state, &handle, &code).await {
+    tracing::warn!(%code, %error, "failed to resume room");
     return internal("failed to update debate state");
   }
-
-  if let Some(handle) = state.room_handles.read().await.get(&code) {
-    handle.request_resume_debate();
-  }
-
-  let stream = state.ensure_room_stream(&code).await;
-  stream.send(WsEvent::DebateState {
-    state: DebateState::Running,
-  });
-
   (
     StatusCode::OK,
     Json(json!({"debateState": DebateState::Running.as_str()})),

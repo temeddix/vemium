@@ -369,10 +369,6 @@ export class DashboardStore {
     await this.#postRoomStateAction(roomCode, "deactivate");
   }
 
-  async resumeRoom(roomCode: string): Promise<void> {
-    await this.#postRoomStateAction(roomCode, "resume");
-  }
-
   async deleteRoom(roomCode: string): Promise<void> {
     try {
       await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomCode}`, {
@@ -399,7 +395,7 @@ export class DashboardStore {
 
   async #postRoomStateAction(
     roomCode: string,
-    action: "activate" | "deactivate" | "resume",
+    action: "activate" | "deactivate",
   ): Promise<void> {
     try {
       const response = await fetch(

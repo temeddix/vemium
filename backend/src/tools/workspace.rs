@@ -481,7 +481,8 @@ impl Tool for EditFileTool {
       return Err(error);
     }
 
-    let updated = contents.replacen(args.old_string.as_str(), &args.new_string, 1);
+    let updated =
+      contents.replacen(args.old_string.as_str(), &args.new_string, 1);
     let bytes_written = updated.len();
     match self
       .workspace
