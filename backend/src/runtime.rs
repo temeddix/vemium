@@ -637,6 +637,40 @@ fn next_cron_tick(cron: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
 
 // -- Leader user-chat response ---------------------------------------------
 
+/// Flips the debate to `Running`, persists to DB, signals the orchestrator,
+/// and broadcasts the state change via WebSocket. Idempotent when already
+/// running.
+pub(crate) async fn resume_debate(
+  state: &AppState,
+  handle: &RoomHandle,
+  code: &str,
+) -> Result<()> {
+  let updated_at = Utc::now();
+  let already_running = {
+    let mut rooms = state.rooms.write().await;
+    let room = rooms
+      .get_mut(code)
+      .ok_or_else(|| anyhow::anyhow!("room not found"))?;
+    if matches!(room.debate_state, DebateState::Running) {
+      true
+    } else {
+      room.debate_state = DebateState::Running;
+      room.updated_at = updated_at;
+      false
+    }
+  };
+  if !already_running {
+    db::update_debate_state(&state.db, code, DebateState::Running, updated_at)
+      .await?;
+    handle.request_resume_debate();
+    let stream = state.ensure_room_stream(code).await;
+    stream.send(WsEvent::DebateState {
+      state: DebateState::Running,
+    });
+  }
+  Ok(())
+}
+
 async fn run_user_chat_loop(
   state: AppState,
   handle: RoomHandle,
@@ -647,7 +681,13 @@ async fn run_user_chat_loop(
       _ = handle.user_message_notify.notified() => {}
       _ = handle.stop_notify.notified() => return,
     }
-    if handle.is_stopped() || handle.is_blocked() {
+    if handle.is_stopped() || handle.is_deactivated() {
+      continue;
+    }
+    if handle.is_debate_paused()
+      && let Err(error) = resume_debate(&state, &handle, &room_code).await
+    {
+      tracing::warn!(%room_code, %error, "failed to resume debate on user message");
       continue;
     }
     let Some(room) = load_room_snapshot(&state, &room_code).await else {

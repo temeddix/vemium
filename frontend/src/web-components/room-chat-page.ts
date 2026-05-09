@@ -202,7 +202,6 @@ export class RoomChatPage extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 0.5rem;
       padding: 0.2rem 0;
       font-size: 0.75rem;
       color: var(--wa-color-text-quiet);
@@ -211,24 +210,6 @@ export class RoomChatPage extends LitElement {
     .paused-banner-countdown {
       font-family: var(--wa-font-family-code, ui-monospace, monospace);
       font-variant-numeric: tabular-nums;
-    }
-
-    .paused-banner-resume {
-      background: none;
-      border: none;
-      padding: 0;
-      margin: 0;
-      font: inherit;
-      color: var(--wa-color-brand-on-quiet);
-      cursor: pointer;
-      text-decoration: underline;
-      text-underline-offset: 0.15rem;
-    }
-
-    .paused-banner-resume:hover,
-    .paused-banner-resume:focus-visible {
-      color: var(--wa-color-text-normal);
-      outline: none;
     }
 
     .detail-dialog-author {
@@ -445,20 +426,13 @@ export class RoomChatPage extends LitElement {
         <span>
           ${countdownText === null
             ? html`
-              Leader will come back at the next scheduled check.
+              Paused - the leader will check back at the next scheduled time.
             `
             : html`
-              Leader will come back after
-              <span class="paused-banner-countdown">${countdownText}</span>
+              Paused - the leader will come back after
+              <span class="paused-banner-countdown">${countdownText}</span>.
             `}
         </span>
-        <button
-          type="button"
-          class="paused-banner-resume"
-          @click="${(): Promise<void> => this.store.resumeRoom(room.code)}"
-        >
-          Resume now
-        </button>
       </div>
     `;
   }
