@@ -280,7 +280,12 @@ export class RoomChatPage extends LitElement {
             @wa-change="${(): Promise<void> => this.#onToggleActivation(room)}"
           ></wa-switch>
           <wa-dropdown placement="bottom-end">
-            <wa-button slot="trigger" size="small" title="More actions">
+            <wa-button
+              slot="trigger"
+              size="small"
+              appearance="plain"
+              title="More actions"
+            >
               <wa-icon name="ellipsis-vertical"></wa-icon>
             </wa-button>
             <wa-dropdown-item
