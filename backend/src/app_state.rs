@@ -62,6 +62,9 @@ pub struct RoomHandle {
   /// HTTP API). Lets in-progress sleeps wake early so loops re-read fresh
   /// config instead of blocking on the previous interval value.
   pub config_notify: Arc<Notify>,
+  /// Signal fired when a user posts a chat message to this room. Wakes the
+  /// leader user-chat loop so it can respond immediately.
+  pub user_message_notify: Arc<Notify>,
   /// Monotonic counter for the next event sequence number for this room.
   /// Seeded from the database on orchestrator startup, then owned in
   /// memory.
@@ -79,6 +82,7 @@ impl RoomHandle {
       stopped: Arc::new(AtomicBool::new(false)),
       stop_notify: Arc::new(Notify::new()),
       config_notify: Arc::new(Notify::new()),
+      user_message_notify: Arc::new(Notify::new()),
       next_event_sequence: Arc::new(AtomicU64::new(seed_event_seq + 1)),
       next_report_sequence: Arc::new(AtomicU64::new(seed_report_seq + 1)),
     }
@@ -135,6 +139,13 @@ impl RoomHandle {
   /// settings update.
   pub fn notify_config_changed(&self) {
     self.config_notify.notify_waiters();
+  }
+
+  /// Wakes the leader user-chat loop to respond to a new user message.
+  /// Uses `notify_one` so the permit is stored if the loop is busy, ensuring
+  /// the message is not silently dropped.
+  pub fn notify_user_message(&self) {
+    self.user_message_notify.notify_one();
   }
 
   /// True while either gate is engaged. The orchestrator must not advance

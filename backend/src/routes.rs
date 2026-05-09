@@ -648,7 +648,7 @@ async fn post_user_message(
   };
 
   let stream = state.ensure_room_stream(&code).await;
-  let log = EventLog::new(state.clone(), code.clone(), handle, stream);
+  let log = EventLog::new(state.clone(), code.clone(), handle.clone(), stream);
   let event = log
     .record_finalized(
       RoomEventKind::UserChat,
@@ -657,6 +657,7 @@ async fn post_user_message(
       String::new(),
     )
     .await;
+  handle.notify_user_message();
 
   (StatusCode::CREATED, Json(json!({"message": event}))).into_response()
 }
