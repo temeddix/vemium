@@ -9,7 +9,7 @@
 use crate::app_state::AppState;
 use crate::db;
 use crate::event_log::EventLog;
-use crate::models::{DebateState, RoomEventKind, RowStatus};
+use crate::models::{DebateState, RoomEventKind};
 use crate::streaming::WsEvent;
 use chrono::Utc;
 use rig::completion::ToolDefinition;
@@ -128,7 +128,7 @@ impl Tool for PauseRoomTool {
           "room handle missing".to_string(),
         )
         .await;
-      row.finish(RowStatus::Failed).await;
+      row.finish(false).await;
       return Err(PauseRoomError::HandleMissing);
     };
 
@@ -151,7 +151,7 @@ impl Tool for PauseRoomTool {
       row
         .replace_body(INLINE_NOTE_FAIL_TEXT.to_string(), error.to_string())
         .await;
-      row.finish(RowStatus::Failed).await;
+      row.finish(false).await;
       return Err(PauseRoomError::Persist(error.to_string()));
     }
 
@@ -161,7 +161,7 @@ impl Tool for PauseRoomTool {
       state: DebateState::Paused,
     });
 
-    row.finish(RowStatus::Done).await;
+    row.finish(true).await;
     Ok(PauseRoomOutput { acknowledged: true })
   }
 }

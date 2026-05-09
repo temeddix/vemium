@@ -182,7 +182,7 @@ export class ChatMessage extends LitElement {
     super.connectedCallback();
     this.nowMillis = Date.now();
     this.#tickerInterval = setInterval((): void => {
-      if (this.event?.status === "streaming") {
+      if (this.event?.completedAt === null) {
         this.nowMillis = Date.now();
       }
     }, 500);
@@ -197,7 +197,7 @@ export class ChatMessage extends LitElement {
   }
 
   override updated(): void {
-    if (this.event?.status === "streaming") {
+    if (this.event?.completedAt === null) {
       const body = this.renderRoot.querySelector<HTMLElement>(".body");
       if (body !== null) {
         body.scrollTop = body.scrollHeight;
@@ -213,7 +213,7 @@ export class ChatMessage extends LitElement {
     const isSelf = event.kind === "user_chat";
     const isInline = event.kind === "thinking" ||
       event.kind === "inline_note";
-    const streaming = event.status === "streaming";
+    const streaming = event.completedAt === null;
     const color = resolveAvatarColor(event.kind, event.agent);
     const rowClasses = ["row", isSelf ? "is-self" : ""].filter(Boolean).join(
       " ",
@@ -307,7 +307,7 @@ export class ChatMessage extends LitElement {
     if (event === null) {
       return;
     }
-    if (event.status === "streaming" && event.detail === "") {
+    if (event.completedAt === null && event.detail === "") {
       return;
     }
     this.dispatchEvent(

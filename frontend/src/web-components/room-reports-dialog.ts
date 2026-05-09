@@ -92,7 +92,7 @@ export class RoomReportsDialog extends LitElement {
             <li class="report-item">
               <div class="report-meta">
                 <strong>Report #${report.sequence}</strong>
-                ${this.#renderStatus(report.status)} ${report.completedAt
+                ${this.#renderStatus(report)} ${report.completedAt
                   ? html`
                     <span>- ${formatTimestamp(report.completedAt)}</span>
                   `
@@ -106,13 +106,13 @@ export class RoomReportsDialog extends LitElement {
     `;
   }
 
-  #renderStatus(status: ReportBuffer["status"]) {
-    if (status === "streaming") {
+  #renderStatus(report: ReportBuffer) {
+    if (report.completedAt === null) {
       return html`
         <wa-badge size="small">streaming</wa-badge>
       `;
     }
-    if (status === "failed") {
+    if (!report.success) {
       return html`
         <wa-badge size="small">failed</wa-badge>
       `;

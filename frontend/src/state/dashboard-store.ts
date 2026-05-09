@@ -449,7 +449,7 @@ export class DashboardStore {
             ...row,
             content: event.content,
             detail: event.detail,
-            status: event.status,
+            success: event.success,
             completedAt: event.completedAt,
           }))
         );
@@ -460,7 +460,7 @@ export class DashboardStore {
             reportId: event.reportId,
             sequence: event.sequence,
             content: "",
-            status: "streaming",
+            success: false,
             completedAt: null,
           })
         );
@@ -478,7 +478,7 @@ export class DashboardStore {
           mapReport(view, event.reportId, (report) => ({
             ...report,
             content: event.content,
-            status: event.status,
+            success: event.success,
             completedAt: event.completedAt,
           }))
         );
@@ -624,7 +624,7 @@ function toReportBuffer(report: RoomReport): ReportBuffer {
     reportId: `${report.id}`,
     sequence: report.sequence,
     content: report.content,
-    status: report.status,
+    success: report.success,
     completedAt: report.completedAt,
   };
 }

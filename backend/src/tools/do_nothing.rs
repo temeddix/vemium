@@ -4,7 +4,7 @@
 //! creates and finalizes its own inline-note row through [`EventLog`].
 
 use crate::event_log::EventLog;
-use crate::models::{RoomEventKind, RowStatus};
+use crate::models::RoomEventKind;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -97,7 +97,7 @@ impl Tool for DoNothingTool {
         reason,
       )
       .await;
-    row.finish(RowStatus::Done).await;
+    row.finish(true).await;
     Ok(DoNothingOutput { acknowledged: true })
   }
 }

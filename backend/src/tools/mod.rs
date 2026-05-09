@@ -8,8 +8,8 @@
 //! Each tool owns the lifecycle of its own inline-note row: it opens a
 //! [`crate::event_log::RowHandle`] on entry, streams body content as the
 //! work progresses (notably [`python::RunPythonTool`] which forwards
-//! stdout line-by-line), and finalizes with `RowStatus::Done` /
-//! `RowStatus::Failed` when it returns. The orchestrator hook only
+//! stdout line-by-line), and finalizes with `success = true/false` when
+//! it returns. The orchestrator hook only
 //! handles balloon and thinking rows on the active turn; tool inline
 //! notes appear as side rows around them.
 //!

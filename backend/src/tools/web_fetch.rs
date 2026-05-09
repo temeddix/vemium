@@ -5,7 +5,7 @@
 //! and returns clean Markdown in a single synchronous request.
 
 use crate::event_log::EventLog;
-use crate::models::{RoomEventKind, RowStatus};
+use crate::models::RoomEventKind;
 use reqwest::Client;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -145,7 +145,7 @@ impl Tool for WebFetchTool {
             format!("URL: {}\n\n{preview}", output.url),
           )
           .await;
-        row.finish(RowStatus::Done).await;
+        row.finish(true).await;
         Ok(output)
       }
       Err(error) => {
@@ -155,7 +155,7 @@ impl Tool for WebFetchTool {
             format!("URL: {}\n\n{error}", args.url),
           )
           .await;
-        row.finish(RowStatus::Failed).await;
+        row.finish(false).await;
         Err(error)
       }
     }

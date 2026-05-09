@@ -11,12 +11,12 @@
 //!
 //! The handle deliberately does *not* implement `Drop` finalization:
 //! callers must explicitly finish their rows so the failure path
-//! (`RowStatus::Failed`) is always intentional.
+//! (`success = false`) is always intentional.
 
 use crate::app_state::{AppState, RoomHandle};
 use crate::db;
 use crate::error::ReportError;
-use crate::models::{RoomEvent, RoomEventKind, RowStatus};
+use crate::models::{RoomEvent, RoomEventKind};
 use crate::streaming::{RoomStream, WsEvent};
 use chrono::Utc;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ impl EventLog {
       agent,
       content: initial_content.clone(),
       detail: initial_detail.clone(),
-      status: RowStatus::Streaming,
+      success: false,
       timestamp,
       completed_at: None,
     };
@@ -107,7 +107,7 @@ impl EventLog {
       agent,
       content,
       detail,
-      status: RowStatus::Done,
+      success: true,
       timestamp,
       completed_at: Some(timestamp),
     };
@@ -226,10 +226,11 @@ impl RowHandle {
     }
   }
 
-  /// Finalizes the row at `status`, persisting the latest body and
-  /// stamping `completed_at`. Idempotent across clones - only the first
-  /// caller actually writes the terminal state.
-  pub async fn finish(&self, status: RowStatus) {
+  /// Finalizes the row, persisting the latest body and stamping
+  /// `completed_at`. `success` distinguishes a clean finish from a failure.
+  /// Idempotent across clones - only the first caller actually writes the
+  /// terminal state.
+  pub async fn finish(&self, success: bool) {
     if self.finished.swap(true, Ordering::SeqCst) {
       return;
     }
@@ -243,7 +244,7 @@ impl RowHandle {
       id,
       &state.content,
       &state.detail,
-      status,
+      success,
       completed_at,
     )
     .await
@@ -252,7 +253,7 @@ impl RowHandle {
       id,
       content: state.content.clone(),
       detail: state.detail.clone(),
-      status,
+      success,
       completed_at,
     });
   }

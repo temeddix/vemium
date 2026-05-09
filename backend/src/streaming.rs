@@ -17,8 +17,7 @@
 //! draft state is ever lost.
 
 use crate::models::{
-  DebateState, ReportStatus, RoomEvent, RoomReport, RoomState, RoomView,
-  RowStatus,
+  DebateState, RoomEvent, RoomReport, RoomState, RoomView,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -129,7 +128,7 @@ pub enum WsEvent {
     id: i64,
     content: String,
     detail: String,
-    status: RowStatus,
+    success: bool,
     completed_at: DateTime<Utc>,
   },
 
@@ -143,7 +142,7 @@ pub enum WsEvent {
     report_id: ReportId,
     sequence: u64,
     content: String,
-    status: ReportStatus,
+    success: bool,
     completed_at: DateTime<Utc>,
   },
 }

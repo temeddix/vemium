@@ -16,14 +16,6 @@ export type RoomState = "active" | "deactivated";
  */
 export type DebateState = "running" | "paused";
 
-/**
- * Lifecycle of one row in the room timeline. Every row starts `streaming`
- * (or `done` if it had no body to stream), accumulates content via row
- * deltas, and transitions exactly once to `done` or `failed`. Reused for
- * leader reports - they go through the same lifecycle.
- */
-export type RowStatus = "streaming" | "done" | "failed";
-
 export type ApiType = "ollama" | "openRouter";
 
 export interface ProviderConfig {
@@ -89,6 +81,9 @@ export type RoomEventKind =
  * One row in `room_events`. The same shape covers chat bubbles, thinking
  * rows, and tool inline notes - they only differ by `kind` and which of
  * `content` / `detail` carries the body.
+ *
+ * `completedAt === null` means the row is still streaming. Once set,
+ * `success` distinguishes a clean finish (`true`) from a failure (`false`).
  */
 export interface RoomEvent {
   id: number | null;
@@ -100,7 +95,8 @@ export interface RoomEvent {
   content: string;
   /** Click-to-reveal body for thinking / inline notes. Empty for bubbles. */
   detail: string;
-  status: RowStatus;
+  /** `true` once the row finished successfully; `false` while streaming or failed. */
+  success: boolean;
   /** Wall-clock when this row was first inserted. */
   timestamp: string;
   /** Wall-clock when the row finished streaming. `null` while streaming. */
@@ -114,15 +110,15 @@ export interface RoomReport {
   content: string;
   startedAt: string;
   completedAt: string | null;
-  status: RowStatus;
+  success: boolean;
 }
 
 // -- WebSocket events -----------------------------------------------------
 
 /**
  * First frame on every connect. Carries the room state, the persisted
- * event log (including any rows still streaming - their `status` is
- * `streaming` and clients reattach to them with subsequent row deltas),
+ * event log (including any rows still streaming - their `completedAt` is
+ * `null` and clients reattach to them with subsequent row deltas),
  * and the report list.
  */
 export interface WsSnapshot {
@@ -144,9 +140,8 @@ export interface WsDebateState {
 
 /**
  * A new row appeared. The full row is sent so the client renders it
- * without waiting for any deltas. May arrive already `done` (e.g. a
- * one-shot user message) or `streaming` (the body fills via subsequent
- * row deltas).
+ * without waiting for any deltas. May arrive already finished (e.g. a
+ * one-shot user message) or still streaming (`completedAt === null`).
  */
 export interface WsRowAdded {
   type: "rowAdded";
@@ -167,7 +162,7 @@ export interface WsRowFinished {
   id: number;
   content: string;
   detail: string;
-  status: RowStatus;
+  success: boolean;
   completedAt: string;
 }
 
@@ -188,7 +183,7 @@ export interface WsReportCompleted {
   reportId: string;
   sequence: number;
   content: string;
-  status: RowStatus;
+  success: boolean;
   completedAt: string;
 }
 
@@ -234,7 +229,7 @@ export interface ReportBuffer {
   reportId: string;
   sequence: number;
   content: string;
-  status: RowStatus;
+  success: boolean;
   completedAt: string | null;
 }
 
@@ -246,7 +241,7 @@ export interface ReportBuffer {
 export interface RoomView {
   room: Room;
   /** Every row in the timeline, sorted by `sequence`. Includes streaming
-   * rows: their `status` is `streaming` until the matching `rowFinished`
+   * rows: their `completedAt` is `null` until the matching `rowFinished`
    * frame arrives. */
   events: RoomEvent[];
   reports: ReportBuffer[];

@@ -6,7 +6,7 @@
 use crate::app_state::AppState;
 use crate::event_log::EventLog;
 use crate::llm::{LeaderDecisionTurnInputs, build_chat_client};
-use crate::models::{ProviderConfig, RoomEventKind, RowStatus};
+use crate::models::{ProviderConfig, RoomEventKind};
 use crate::runtime::TurnSession;
 use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
@@ -151,7 +151,7 @@ impl Tool for RequestLeaderDecisionTool {
         row
           .replace_body(INLINE_NOTE_FAIL_TEXT.to_string(), error.to_string())
           .await;
-        row.finish(RowStatus::Failed).await;
+        row.finish(false).await;
         return Err(LeaderDecisionError::Config(error.to_string()));
       }
     };
@@ -164,23 +164,19 @@ impl Tool for RequestLeaderDecisionTool {
         session: leader_session.clone(),
       })
       .await;
-    let session_status = match &outcome {
-      Ok(_) => RowStatus::Done,
-      Err(_) => RowStatus::Failed,
-    };
-    leader_session.finish(session_status).await;
+    leader_session.finish(outcome.is_ok()).await;
 
     match outcome {
       Ok(answer) => {
         let answer = answer.trim().to_string();
-        row.finish(RowStatus::Done).await;
+        row.finish(true).await;
         Ok(LeaderDecisionOutput { answer })
       }
       Err(error) => {
         row
           .replace_body(INLINE_NOTE_FAIL_TEXT.to_string(), error.to_string())
           .await;
-        row.finish(RowStatus::Failed).await;
+        row.finish(false).await;
         Err(LeaderDecisionError::Call(error.to_string()))
       }
     }

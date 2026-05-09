@@ -11,8 +11,8 @@
 //! [`max_report_sequence`] seed those counters.
 
 use crate::models::{
-  AppSettings, DebateState, ProviderConfig, ReportStatus, Room, RoomEvent,
-  RoomEventKind, RoomReport, RoomState, RowStatus,
+  AppSettings, DebateState, ProviderConfig, Room, RoomEvent, RoomEventKind,
+  RoomReport, RoomState,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -297,11 +297,10 @@ pub async fn update_app_settings(
 
 // -- Events ----------------------------------------------------------------
 
-/// Inserts a row at the start of its lifecycle. Callers typically pass
-/// `status = Streaming` and an empty body; subsequent
-/// [`update_event_body`] calls accumulate content, then [`finish_event`]
-/// flips `status` and sets `completed_at`. For pre-finalized rows (e.g.
-/// a user message inserted in one shot) pass `status = Done` and a
+/// Inserts a row at the start of its lifecycle. Streaming rows start with
+/// `success = false` and `completed_at = None`; [`finish_event`] stamps
+/// `completed_at` and sets `success` when the row is done. Pre-finalized
+/// rows (e.g. user messages) are inserted with `success = true` and a
 /// matching `completed_at`.
 pub async fn insert_event(
   pool: &SqlitePool,
@@ -309,7 +308,7 @@ pub async fn insert_event(
 ) -> Result<RoomEvent> {
   let result = sqlx::query(
     "INSERT INTO room_events
-        (room_code, sequence, kind, agent, content, detail, status, timestamp, completed_at)
+        (room_code, sequence, kind, agent, content, detail, success, timestamp, completed_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(&event.room_code)
@@ -318,7 +317,7 @@ pub async fn insert_event(
   .bind(event.agent.as_deref())
   .bind(&event.content)
   .bind(&event.detail)
-  .bind(event.status.as_str())
+  .bind(event.success)
   .bind(event.timestamp.to_rfc3339())
   .bind(event.completed_at.map(|t| t.to_rfc3339()))
   .execute(pool)
@@ -347,24 +346,24 @@ pub async fn update_event_body(
   Ok(())
 }
 
-/// Finalizes a streaming row: stamps the body one last time, flips
-/// `status`, and records `completed_at`.
+/// Finalizes a streaming row: stamps the body one last time, sets `success`,
+/// and records `completed_at`.
 pub async fn finish_event(
   pool: &SqlitePool,
   id: i64,
   content: &str,
   detail: &str,
-  status: RowStatus,
+  success: bool,
   completed_at: DateTime<Utc>,
 ) -> Result<()> {
   sqlx::query(
     "UPDATE room_events
-     SET content = ?, detail = ?, status = ?, completed_at = ?
+     SET content = ?, detail = ?, success = ?, completed_at = ?
      WHERE id = ?",
   )
   .bind(content)
   .bind(detail)
-  .bind(status.as_str())
+  .bind(success)
   .bind(completed_at.to_rfc3339())
   .bind(id)
   .execute(pool)
@@ -378,7 +377,7 @@ pub async fn load_room_events(
   room_code: &str,
 ) -> Result<Vec<RoomEvent>> {
   let rows = sqlx::query(
-    "SELECT id, room_code, sequence, kind, agent, content, detail, status, timestamp, completed_at
+    "SELECT id, room_code, sequence, kind, agent, content, detail, success, timestamp, completed_at
      FROM room_events
      WHERE room_code = ?
      ORDER BY sequence ASC",
@@ -399,7 +398,7 @@ pub async fn load_inline_note(
   id: i64,
 ) -> Result<Option<RoomEvent>> {
   let row = sqlx::query(
-    "SELECT id, room_code, sequence, kind, agent, content, detail, status, timestamp, completed_at
+    "SELECT id, room_code, sequence, kind, agent, content, detail, success, timestamp, completed_at
      FROM room_events
      WHERE id = ? AND kind = 'inline_note'",
   )
@@ -422,8 +421,8 @@ pub async fn clone_room_events(
   let mut tx = pool.begin().await.context("failed to begin clone tx")?;
   sqlx::query(
     "INSERT INTO room_events
-        (room_code, sequence, kind, agent, content, detail, status, timestamp, completed_at)
-     SELECT ?, sequence, kind, agent, content, detail, status, timestamp, completed_at
+        (room_code, sequence, kind, agent, content, detail, success, timestamp, completed_at)
+     SELECT ?, sequence, kind, agent, content, detail, success, timestamp, completed_at
      FROM room_events
      WHERE room_code = ?
      ORDER BY sequence ASC",
@@ -464,9 +463,9 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     .context("room_events.sequence missing")?;
   let kind_str: String =
     row.try_get("kind").context("room_events.kind missing")?;
-  let status_str: String = row
-    .try_get("status")
-    .context("room_events.status missing")?;
+  let success: bool = row
+    .try_get("success")
+    .context("room_events.success missing")?;
   let completed_at_str: Option<String> = row
     .try_get("completed_at")
     .context("room_events.completed_at missing")?;
@@ -489,7 +488,7 @@ fn parse_event_row(row: SqliteRow) -> Result<RoomEvent> {
     detail: row
       .try_get("detail")
       .context("room_events.detail missing")?,
-    status: RowStatus::parse(&status_str)?,
+    success,
     timestamp: parse_timestamp(&row, "timestamp")?,
     completed_at,
   })
@@ -508,14 +507,14 @@ pub async fn start_report(
 ) -> Result<RoomReport> {
   let result = sqlx::query(
     "INSERT INTO room_reports
-        (room_code, sequence, content, started_at, completed_at, status)
+        (room_code, sequence, content, started_at, completed_at, success)
      VALUES (?, ?, ?, ?, NULL, ?)",
   )
   .bind(room_code)
   .bind(sequence as i64)
   .bind("")
   .bind(started_at.to_rfc3339())
-  .bind(ReportStatus::Streaming.as_str())
+  .bind(false)
   .execute(pool)
   .await
   .context("failed to start report")?;
@@ -527,7 +526,7 @@ pub async fn start_report(
     content: String::new(),
     started_at,
     completed_at: None,
-    status: ReportStatus::Streaming,
+    success: false,
   })
 }
 
@@ -538,16 +537,16 @@ pub async fn finish_report(
   pool: &SqlitePool,
   id: i64,
   content: &str,
-  status: ReportStatus,
+  success: bool,
   completed_at: DateTime<Utc>,
 ) -> Result<()> {
   sqlx::query(
     "UPDATE room_reports
-     SET content = ?, status = ?, completed_at = ?
+     SET content = ?, success = ?, completed_at = ?
      WHERE id = ?",
   )
   .bind(content)
-  .bind(status.as_str())
+  .bind(success)
   .bind(completed_at.to_rfc3339())
   .bind(id)
   .execute(pool)
@@ -561,7 +560,7 @@ pub async fn load_room_reports(
   room_code: &str,
 ) -> Result<Vec<RoomReport>> {
   let rows = sqlx::query(
-    "SELECT id, room_code, sequence, content, started_at, completed_at, status
+    "SELECT id, room_code, sequence, content, started_at, completed_at, success
      FROM room_reports WHERE room_code = ? ORDER BY sequence ASC",
   )
   .bind(room_code)
@@ -578,7 +577,7 @@ pub async fn load_room_report(
   sequence: u64,
 ) -> Result<Option<RoomReport>> {
   let row = sqlx::query(
-    "SELECT id, room_code, sequence, content, started_at, completed_at, status
+    "SELECT id, room_code, sequence, content, started_at, completed_at, success
      FROM room_reports WHERE room_code = ? AND sequence = ?",
   )
   .bind(room_code)
@@ -611,10 +610,9 @@ fn parse_report_row(row: SqliteRow) -> Result<RoomReport> {
   let sequence: i64 = row
     .try_get("sequence")
     .context("room_reports.sequence missing")?;
-  let status_str: String = row
-    .try_get("status")
-    .context("room_reports.status missing")?;
-  let status = ReportStatus::parse(&status_str)?;
+  let success: bool = row
+    .try_get("success")
+    .context("room_reports.success missing")?;
   let completed_at_str: Option<String> = row
     .try_get("completed_at")
     .context("room_reports.completed_at missing")?;
@@ -635,7 +633,7 @@ fn parse_report_row(row: SqliteRow) -> Result<RoomReport> {
       .context("room_reports.content missing")?,
     started_at: parse_timestamp(&row, "started_at")?,
     completed_at,
-    status,
+    success,
   })
 }
 

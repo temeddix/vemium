@@ -31,8 +31,7 @@ use crate::llm::{
   build_chat_client,
 };
 use crate::models::{
-  DebateState, ProviderConfig, ReportStatus, Room, RoomEvent, RoomEventKind,
-  RoomState, RowStatus,
+  DebateState, ProviderConfig, Room, RoomEvent, RoomEventKind, RoomState,
 };
 use crate::python_runner::PythonRunner;
 use crate::streaming::{ReportId, RoomStream, WsEvent, report_id_for};
@@ -212,7 +211,7 @@ impl TurnSession {
       return;
     }
     if let Some(ActiveRow::Bubble(row)) = active.take() {
-      row.finish(RowStatus::Done).await;
+      row.finish(true).await;
     }
     let row = self
       .log
@@ -238,7 +237,7 @@ impl TurnSession {
       return;
     }
     if let Some(ActiveRow::Thinking(row)) = active.take() {
-      row.finish(RowStatus::Done).await;
+      row.finish(true).await;
     }
     let row = self
       .log
@@ -260,19 +259,19 @@ impl TurnSession {
       let handle = match row {
         ActiveRow::Thinking(row) | ActiveRow::Bubble(row) => row,
       };
-      handle.finish(RowStatus::Done).await;
+      handle.finish(true).await;
     }
   }
 
   /// Closes any open row at turn end. Idempotent; safe to call multiple
-  /// times. `status` applies only to the in-flight row, if any.
-  pub async fn finish(&self, status: RowStatus) {
+  /// times. `success` applies only to the in-flight row, if any.
+  pub async fn finish(&self, success: bool) {
     let mut active = self.active.lock().await;
     if let Some(row) = active.take() {
       let handle = match row {
         ActiveRow::Thinking(row) | ActiveRow::Bubble(row) => row,
       };
-      handle.finish(status).await;
+      handle.finish(success).await;
     }
   }
 }
@@ -464,11 +463,7 @@ async fn run_chat_turn(
     })
     .await;
 
-  let status = match &outcome {
-    Ok(_) => RowStatus::Done,
-    Err(_) => RowStatus::Failed,
-  };
-  session.finish(status).await;
+  session.finish(outcome.is_ok()).await;
   outcome.map(|_| ())
 }
 
@@ -588,11 +583,7 @@ async fn evaluate_scheduled_resume(
       session: session.clone(),
     })
     .await;
-  let status = match &outcome {
-    Ok(_) => RowStatus::Done,
-    Err(_) => RowStatus::Failed,
-  };
-  session.finish(status).await;
+  session.finish(outcome.is_ok()).await;
   outcome
 }
 
@@ -740,11 +731,7 @@ async fn run_leader_turn(
     })
     .await;
 
-  let status = match &outcome {
-    Ok(_) => RowStatus::Done,
-    Err(_) => RowStatus::Failed,
-  };
-  session.finish(status).await;
+  session.finish(outcome.is_ok()).await;
   outcome.map(|_| ())
 }
 
@@ -844,39 +831,27 @@ async fn run_leader_report(
   match outcome {
     Ok(content) => {
       let final_content = content.trim().to_string();
-      db::finish_report(
-        &state.db,
-        report.id,
-        &final_content,
-        ReportStatus::Done,
-        completed_at,
-      )
-      .await
-      .report();
+      db::finish_report(&state.db, report.id, &final_content, true, completed_at)
+        .await
+        .report();
       stream.send(WsEvent::ReportCompleted {
         report_id,
         sequence,
         content: final_content,
-        status: ReportStatus::Done,
+        success: true,
         completed_at,
       });
       Ok(())
     }
     Err(error) => {
-      db::finish_report(
-        &state.db,
-        report.id,
-        "",
-        ReportStatus::Failed,
-        completed_at,
-      )
-      .await
-      .report();
+      db::finish_report(&state.db, report.id, "", false, completed_at)
+        .await
+        .report();
       stream.send(WsEvent::ReportCompleted {
         report_id,
         sequence,
         content: String::new(),
-        status: ReportStatus::Failed,
+        success: false,
         completed_at,
       });
       Err(error)
