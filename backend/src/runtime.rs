@@ -709,7 +709,7 @@ async fn run_leader_on_user_chat(
   let history = load_effective_history(&state.db, &room.code).await?;
   let preamble = build_room_preamble(room);
   let system = format!(
-    "{LEADER_STEERING_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}"
+    "{LEADER_STEERING_PROMPT}\n\n{preamble}\n\n{CHAT_FORMAT_GUARDRAIL}\n\n{INLINE_NOTE_TOOL_HINT}"
   );
   let transcript = render_transcript_text(&history);
   let user = format!(
@@ -764,7 +764,7 @@ async fn run_leader_steering(
 
   let preamble = build_room_preamble(room);
   let system = format!(
-    "{LEADER_STEERING_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}"
+    "{LEADER_STEERING_PROMPT}\n\n{preamble}\n\n{CHAT_FORMAT_GUARDRAIL}\n\n{INLINE_NOTE_TOOL_HINT}"
   );
   let transcript = render_transcript_text(&history);
   let user = format!(
@@ -790,8 +790,9 @@ async fn run_leader_kickoff(
   history: &EffectiveHistory,
 ) -> Result<()> {
   let preamble = build_room_preamble(room);
-  let system =
-    format!("{LEADER_KICKOFF_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}");
+  let system = format!(
+    "{LEADER_KICKOFF_PROMPT}\n\n{preamble}\n\n{CHAT_FORMAT_GUARDRAIL}\n\n{INLINE_NOTE_TOOL_HINT}"
+  );
   let transcript = render_transcript_text(history);
   let user = if transcript.trim().is_empty() {
     "Start the room with an opening traffic-control note and a concrete plan for the next debate turns.".to_string()
