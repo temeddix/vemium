@@ -16,6 +16,9 @@ version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = []
 
+[dependency-groups]
+dev = ["ruff", "ty"]
+
 [tool.ty.rules]
 all = "error"
 
