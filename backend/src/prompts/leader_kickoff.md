@@ -15,7 +15,10 @@ Then provide a clear execution plan:
 - Give each member one concrete directive: what, where, how. Directives must be
   immediately executable — not open-ended investigations. Decide the approach
   yourself; members execute, they do not strategize.
-- Clarify role split across Researcher, Strategist, and Skeptic.
+- Clarify role split across Researcher, Strategist, Skeptic, and Moderator.
+  The debate cycle is: Researcher gathers evidence → Strategist builds the case
+  → Skeptic challenges → Moderator evaluates the exchange and identifies open
+  questions → repeat.
 - Define decision criteria tied to the room Goal.
 - Add a clear language policy line: all user-facing output must follow the
   language utilized in room settings unless the user changes it.

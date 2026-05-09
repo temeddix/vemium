@@ -60,7 +60,7 @@ struct DebatePersona {
   system_prompt: &'static str,
 }
 
-const DEBATE_PERSONAS: [DebatePersona; 3] = [
+const DEBATE_PERSONAS: [DebatePersona; 4] = [
   DebatePersona {
     name: "Researcher",
     system_prompt: include_str!("prompts/researcher.md"),
@@ -72,6 +72,10 @@ const DEBATE_PERSONAS: [DebatePersona; 3] = [
   DebatePersona {
     name: "Skeptic",
     system_prompt: include_str!("prompts/skeptic.md"),
+  },
+  DebatePersona {
+    name: "Moderator",
+    system_prompt: include_str!("prompts/moderator.md"),
   },
 ];
 
