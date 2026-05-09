@@ -75,7 +75,8 @@ export type RoomEventKind =
   | "leader_note"
   | "user_chat"
   | "thinking"
-  | "inline_note";
+  | "inline_note"
+  | "summary";
 
 /**
  * One row in `room_events`. The same shape covers chat bubbles, thinking

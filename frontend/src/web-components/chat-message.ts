@@ -212,7 +212,8 @@ export class ChatMessage extends LitElement {
     }
     const isSelf = event.kind === "user_chat";
     const isInline = event.kind === "thinking" ||
-      event.kind === "inline_note";
+      event.kind === "inline_note" ||
+      event.kind === "summary";
     const streaming = event.completedAt === null;
     const color = resolveAvatarColor(event.kind, event.agent);
     const rowClasses = ["row", isSelf ? "is-self" : ""].filter(Boolean).join(
