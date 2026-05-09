@@ -130,7 +130,7 @@ export class ChatMessage extends LitElement {
       text-align: left;
       border-radius: 0.4rem;
       min-width: 0;
-      max-width: 36rem;
+      max-width: min(36rem, 100%);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;

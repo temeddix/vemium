@@ -91,6 +91,7 @@ export class RoomChatPage extends LitElement {
       min-height: 100vh;
       background: var(--wa-color-surface-default);
       box-sizing: border-box;
+      overflow-x: clip;
     }
 
     .container {
