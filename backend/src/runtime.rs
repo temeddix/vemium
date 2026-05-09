@@ -143,6 +143,11 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
     room_code.clone(),
     workspace.clone(),
   ));
+  tokio::spawn(run_user_chat_loop(
+    state.clone(),
+    handle.clone(),
+    room_code.clone(),
+  ));
   tokio::spawn(run_steering_loop(
     state.clone(),
     handle.clone(),
@@ -597,6 +602,48 @@ fn next_cron_tick(cron: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
   schedule.after(&now).next()
 }
 
+// -- Leader user-chat response ---------------------------------------------
+
+async fn run_user_chat_loop(
+  state: AppState,
+  handle: RoomHandle,
+  room_code: String,
+) {
+  loop {
+    tokio::select! {
+      _ = handle.user_message_notify.notified() => {}
+      _ = handle.stop_notify.notified() => return,
+    }
+    if handle.is_stopped() || handle.is_blocked() {
+      continue;
+    }
+    let Some(room) = load_room_snapshot(&state, &room_code).await else {
+      return;
+    };
+    if let Err(error) = run_leader_on_user_chat(&state, &handle, &room).await {
+      tracing::warn!(%room_code, %error, "leader user chat response failed");
+    }
+  }
+}
+
+async fn run_leader_on_user_chat(
+  state: &AppState,
+  handle: &RoomHandle,
+  room: &Room,
+) -> Result<()> {
+  let history = db::load_room_events(&state.db, &room.code).await?;
+  let preamble = build_room_preamble(room);
+  let system = format!(
+    "{LEADER_STEERING_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}"
+  );
+  let transcript = render_transcript_text(&history);
+  let user = format!(
+    "The user just sent a message. Here is the debate transcript:\n\n\
+     {transcript}\n\nAddress the user's message now."
+  );
+  run_leader_turn(state, handle, room, system, user, None).await
+}
+
 // -- Leader steering -------------------------------------------------------
 
 async fn run_steering_loop(
@@ -652,7 +699,7 @@ async fn run_leader_steering(
      your steering note now."
   );
 
-  run_leader_turn(state, handle, room, system, user, STEERING_INLINE_NOTE).await
+  run_leader_turn(state, handle, room, system, user, Some(STEERING_INLINE_NOTE)).await
 }
 
 async fn run_leader_kickoff(
@@ -673,32 +720,33 @@ async fn run_leader_kickoff(
     )
   };
 
-  run_leader_turn(state, handle, room, system, user, KICKOFF_INLINE_NOTE).await
+  run_leader_turn(state, handle, room, system, user, Some(KICKOFF_INLINE_NOTE)).await
 }
 
-/// Shared driver for leader-side streaming turns (steering, kickoff). Drops
-/// a context inline-note ahead of the turn so the user can tell why the
-/// leader spoke (steering tick vs. kickoff vs. on-demand) and then runs
-/// the standard streaming turn against the high model.
+/// Shared driver for leader-side streaming turns (steering, kickoff). When
+/// `context_label` is `Some`, drops an inline-note breadcrumb ahead of the
+/// turn so observers can see why the leader spoke.
 async fn run_leader_turn(
   state: &AppState,
   handle: &RoomHandle,
   room: &Room,
   system_prompt: String,
   user_prompt: String,
-  context_label: &str,
+  context_label: Option<&str>,
 ) -> Result<()> {
   let stream = state.ensure_room_stream(&room.code).await;
   let log =
     EventLog::new(state.clone(), room.code.clone(), handle.clone(), stream);
-  log
-    .record_finalized(
-      RoomEventKind::InlineNote,
-      Some(LEADER_AGENT.to_string()),
-      context_label.to_string(),
-      String::new(),
-    )
-    .await;
+  if let Some(label) = context_label {
+    log
+      .record_finalized(
+        RoomEventKind::InlineNote,
+        Some(LEADER_AGENT.to_string()),
+        label.to_string(),
+        String::new(),
+      )
+      .await;
+  }
 
   let session = Arc::new(TurnSession::new(
     log.clone(),
