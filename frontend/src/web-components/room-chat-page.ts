@@ -107,7 +107,7 @@ export class RoomChatPage extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.6rem;
-      padding: 0.8rem 0;
+      padding: 0.4rem 0;
       position: sticky;
       top: 0;
       background: var(--wa-color-surface-default);
@@ -144,12 +144,6 @@ export class RoomChatPage extends LitElement {
       white-space: nowrap;
     }
 
-    .room-code {
-      font-size: 0.78rem;
-      color: var(--wa-color-text-quiet);
-      font-family: var(--wa-font-family-code, ui-monospace, monospace);
-    }
-
     .scroll {
       padding: 0.4rem 0 1rem;
       display: flex;
@@ -174,7 +168,7 @@ export class RoomChatPage extends LitElement {
     }
 
     .composer-wrap {
-      padding: 0.4rem 0 0.8rem;
+      padding: 0.2rem 0 0.4rem;
       position: sticky;
       bottom: 0;
       background: var(--wa-color-surface-default);
@@ -278,7 +272,6 @@ export class RoomChatPage extends LitElement {
           </button>
           <div class="title">
             <div class="room-topic">${topicLabel}</div>
-            <div class="room-code">${room.code}</div>
           </div>
           <wa-switch
             size="small"
