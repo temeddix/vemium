@@ -6,7 +6,6 @@ import {
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
 import type { Room, RoomEvent, RoomView } from "@/app/types";
-import { roomBadgeText } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -151,13 +150,6 @@ export class RoomChatPage extends LitElement {
       font-family: var(--wa-font-family-code, ui-monospace, monospace);
     }
 
-    .badges {
-      display: flex;
-      gap: 0.4rem;
-      align-items: center;
-      flex-shrink: 0;
-    }
-
     .scroll {
       padding: 0.4rem 0 1rem;
       display: flex;
@@ -189,15 +181,6 @@ export class RoomChatPage extends LitElement {
       z-index: 2;
     }
 
-    .error-banner {
-      padding: 0.5rem 0.75rem;
-      border-radius: 0.5rem;
-      background: var(--wa-color-danger-fill-quiet);
-      color: var(--wa-color-danger-on-quiet);
-      font-size: 0.85rem;
-      margin-top: 0.4rem;
-    }
-
     .paused-banner {
       display: flex;
       align-items: center;
@@ -210,6 +193,15 @@ export class RoomChatPage extends LitElement {
     .paused-banner-countdown {
       font-family: var(--wa-font-family-code, ui-monospace, monospace);
       font-variant-numeric: tabular-nums;
+    }
+
+    .error-banner {
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.5rem;
+      background: var(--wa-color-danger-fill-quiet);
+      color: var(--wa-color-danger-on-quiet);
+      font-size: 0.85rem;
+      margin-top: 0.4rem;
     }
 
     .detail-dialog-author {
@@ -288,21 +280,15 @@ export class RoomChatPage extends LitElement {
             <div class="room-topic">${topicLabel}</div>
             <div class="room-code">${room.code}</div>
           </div>
-          <div class="badges">
-            <wa-badge size="small" appearance="outlined">
-              ${this.dashboardState?.wsConnected
-                ? "Connected"
-                : `Reconnecting #${this.dashboardState?.reconnectAttempt ?? 0}`}
-            </wa-badge>
-            <wa-badge size="small" appearance="outlined">
-              ${roomBadgeText(room.roomState, room.debateState)}
-            </wa-badge>
-          </div>
+          <wa-switch
+            size="small"
+            ?checked="${room.roomState === "active"}"
+            @wa-change="${(): Promise<void> => this.#onToggleActivation(room)}"
+          ></wa-switch>
           <wa-dropdown placement="bottom-end">
             <wa-button slot="trigger" size="small" title="More actions">
               <wa-icon name="ellipsis-vertical"></wa-icon>
             </wa-button>
-            ${this.#renderActivationItem(room)}
             <wa-dropdown-item
               @click="${(): void => this.#settingsDialogRef.value?.show(room)}"
             >
@@ -388,25 +374,6 @@ export class RoomChatPage extends LitElement {
           </wa-button>
         </p>
       </div>
-    `;
-  }
-
-  #renderActivationItem(room: Room) {
-    if (room.roomState === "deactivated") {
-      return html`
-        <wa-dropdown-item
-          @click="${(): Promise<void> => this.store.activateRoom(room.code)}"
-        >
-          Activate
-        </wa-dropdown-item>
-      `;
-    }
-    return html`
-      <wa-dropdown-item
-        @click="${(): Promise<void> => this.store.deactivateRoom(room.code)}"
-      >
-        Deactivate
-      </wa-dropdown-item>
     `;
   }
 
@@ -499,6 +466,14 @@ export class RoomChatPage extends LitElement {
 
   // -- Actions ------------------------------------------------------------
 
+  async #onToggleActivation(room: Room): Promise<void> {
+    if (room.roomState === "deactivated") {
+      await this.store.activateRoom(room.code);
+    } else {
+      await this.store.deactivateRoom(room.code);
+    }
+  }
+
   #onBack(): void {
     globalThis.history.pushState({}, "", "/");
     globalThis.dispatchEvent(new PopStateEvent("popstate"));
@@ -589,11 +564,6 @@ function entryKey(event: RoomEvent): string {
   return event.id !== null ? `r-${event.id}` : `s-${event.sequence}`;
 }
 
-/**
- * Formats a remaining-time delta for the paused-room banner. Under 24
- * hours renders as `HH:MM:SS`; 24 hours or more prepends `N day(s) and`.
- * Negative inputs clamp to zero.
- */
 function formatCountdown(milliseconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const days = Math.floor(totalSeconds / 86400);

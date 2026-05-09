@@ -1,7 +1,7 @@
 import { dashboardContext } from "@/app/context";
 import type { DashboardState, DashboardStore } from "@/app/state";
 import type { Room } from "@/app/types";
-import { formatTimestamp, roomBadgeText } from "@/app/utils";
+import { formatTimestamp } from "@/app/utils";
 import { consume } from "@lit/context";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -318,7 +318,16 @@ export class RoomListPage extends LitElement {
                   <span class="room-time">${formatTimestamp(
                     room.createdAt,
                   )}</span>
-                  ${this.#renderStatusBadge(room)}
+                  <span
+                    @click="${(e: MouseEvent): void => e.stopPropagation()}"
+                  >
+                    <wa-switch
+                      size="small"
+                      ?checked="${room.roomState === "active"}"
+                      @wa-change="${(): Promise<void> =>
+                        this.#onToggleActivation(room)}"
+                    ></wa-switch>
+                  </span>
                 </span>
               </a>
               <span class="room-card-menu">
@@ -350,14 +359,6 @@ export class RoomListPage extends LitElement {
     `;
   }
 
-  #renderStatusBadge(room: Room) {
-    return html`
-      <wa-badge size="small" appearance="outlined">
-        ${roomBadgeText(room.roomState, room.debateState)}
-      </wa-badge>
-    `;
-  }
-
   #onRoomClick(event: MouseEvent, room: Room): void {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
@@ -370,6 +371,14 @@ export class RoomListPage extends LitElement {
     const url = `/room/${code}`;
     globalThis.history.pushState({}, "", url);
     globalThis.dispatchEvent(new PopStateEvent("popstate"));
+  }
+
+  async #onToggleActivation(room: Room): Promise<void> {
+    if (room.roomState === "deactivated") {
+      await this.store.activateRoom(room.code);
+    } else {
+      await this.store.deactivateRoom(room.code);
+    }
   }
 
   #openCreate = (): void => {
