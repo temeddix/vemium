@@ -40,10 +40,7 @@ use crate::tools::pause_room::PauseRoomTool;
 use crate::tools::python::RunPythonTool;
 use crate::tools::resume_room::ResumeRoomTool;
 use crate::tools::web_fetch::WebFetchTool;
-use crate::tools::workspace::{
-  CreateSubjectFolderTool, ListFilesTool, ListSubjectFoldersTool, ReadFileTool,
-  WriteFileTool,
-};
+use crate::tools::workspace::{ListFilesTool, ReadFileTool, WriteFileTool};
 use crate::workspace::RoomWorkspace;
 
 /// Tool-call iteration safety net. The LLM may keep requesting tools forever
@@ -391,16 +388,6 @@ where
     .tool(RunPythonTool::new(
       workspace.clone(),
       inputs.runner,
-      log.clone(),
-      author.clone(),
-    ))
-    .tool(ListSubjectFoldersTool::new(
-      workspace.clone(),
-      log.clone(),
-      author.clone(),
-    ))
-    .tool(CreateSubjectFolderTool::new(
-      workspace.clone(),
       log.clone(),
       author.clone(),
     ))

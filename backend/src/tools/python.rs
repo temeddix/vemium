@@ -4,7 +4,7 @@
 //!
 //! Important behaviors:
 //!
-//! - The script lives at `<subject_folder>/<filename>` so artifacts produced
+//! - The script lives at `<path>` (workspace-relative) so artifacts produced
 //!   by previous tool calls remain accessible.
 //! - Lint and type-check failures abort *before* execution. The agent gets
 //!   a structured `PythonRunResult` explaining which stage failed and what
@@ -60,10 +60,7 @@ impl RunPythonTool {
 
 #[derive(Debug, Deserialize)]
 pub struct RunPythonArgs {
-  /// Subject folder name (must already exist; create it via
-  /// `create_subject_folder` first).
-  pub subject_folder: String,
-  /// Script filename inside the subject folder. Defaults to `script.py`.
+  /// Workspace-relative path for the script. Defaults to `src/script.py`.
   #[serde(default = "default_script_name")]
   pub script_name: String,
   /// Source code to write before running.
@@ -90,7 +87,7 @@ impl RunPythonError {
 }
 
 fn default_script_name() -> String {
-  "script.py".to_string()
+  "src/script.py".to_string()
 }
 
 impl Tool for RunPythonTool {
@@ -102,28 +99,21 @@ impl Tool for RunPythonTool {
   async fn definition(&self, _prompt: String) -> ToolDefinition {
     ToolDefinition {
       name: NAME.to_string(),
-      description: "Writes a Python script into a subject folder and \
+      description: "Writes a Python script into the room workspace and \
                     executes it. The script runs after passing `ruff \
                     format`, `ruff check`, and `ty check`. If any of those \
                     fail, execution is aborted and the failures are \
-                    reported back. Use `create_subject_folder` first if you \
-                    need a new folder. Edit `pyproject.toml` (via \
-                    `write_file` at the workspace root) to add Python \
-                    dependencies."
+                    reported back. Edit `pyproject.toml` (via `write_file` \
+                    at the workspace root) to add Python dependencies."
         .to_string(),
       parameters: json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "subject_folder": {
-            "type": "string",
-            "description": "Existing subject folder name, e.g. \
-              '2026-05-03_14-23-05 (CPI categories)'."
-          },
           "script_name": {
             "type": "string",
-            "description": "Filename inside the subject folder. Defaults to \
-              'script.py'."
+            "description": "Workspace-relative path for the script. Defaults \
+              to 'src/script.py'."
           },
           "source": {
             "type": "string",
@@ -137,14 +127,13 @@ impl Tool for RunPythonTool {
             "description": "Optional command-line arguments."
           }
         },
-        "required": ["subject_folder", "source"]
+        "required": ["source"]
       }),
     }
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let relative: PathBuf =
-      PathBuf::from(&args.subject_folder).join(&args.script_name);
+    let relative: PathBuf = PathBuf::from(&args.script_name);
     let row = self
       .log
       .start_row(

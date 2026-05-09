@@ -1,20 +1,8 @@
 //! Per-room filesystem workspace.
 //!
 //! Each room owns a directory at `<data_root>/debate/<room-slug>/`. Inside it
-//! lives a Python project (`pyproject.toml`, `.venv`) shared by every
-//! subject folder, plus any number of "subject" subfolders the agents
-//! create to organize their work:
-//!
-//! ```text
-//! /data/debate/recent-inflation/
-//! ├── pyproject.toml
-//! ├── .venv/
-//! ├── 2026-05-03_14-23-05 (CPI categories)/
-//! │   ├── extract.py
-//! │   └── data.csv
-//! └── 2026-05-04_09-11-02 (energy weights)/
-//!     └── analyze.py
-//! ```
+//! lives a Python project: `pyproject.toml`, `.venv/`, a `src/` directory for
+//! Python scripts, and a `basket/` directory for other files.
 //!
 //! [`RoomWorkspace`] is the only public entry point. All filesystem
 //! operations it exposes are sandboxed under the room root: callers can
@@ -22,16 +10,11 @@
 //! reject any path that escapes via `..`, symlinks, or absolute paths.
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::Utc;
 use std::io::{BufReader, Cursor};
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
-
-/// Subject-folder timestamp prefix format: `YYYY-MM-DD_HH-MM-SS`. Filesystem
-/// safe on every supported platform (no `:` or spaces in the timestamp).
-const SUBJECT_FOLDER_TIMESTAMP: &str = "%Y-%m-%d_%H-%M-%S";
 
 /// Maximum bytes returned by [`RoomWorkspace::read_file`]. Files larger
 /// than this are truncated to keep tool outputs in a sane token budget.
@@ -82,18 +65,6 @@ pub struct RoomWorkspace {
   pub root: PathBuf,
 }
 
-/// Description of a subject folder at the room root, returned by
-/// [`RoomWorkspace::list_subject_folders`].
-#[derive(Debug, Clone)]
-pub struct SubjectFolder {
-  /// Folder name as it appears on disk (e.g. `2026-05-03_14-23-05 (CPI)`).
-  pub name: String,
-  /// `true` if this folder follows the `<datetime> (<subject>)` convention.
-  /// Folders the agents created via the workspace tools always do; folders
-  /// created by other means (e.g. an agent calling `mkdir`) may not.
-  pub structured: bool,
-}
-
 /// Description of a regular file inside the workspace, returned by
 /// [`RoomWorkspace::list_files`].
 #[derive(Debug, Clone)]
@@ -131,58 +102,7 @@ impl RoomWorkspace {
     Ok(self.root.join(relative))
   }
 
-  /// Lists immediate children of the room root that look like subject
-  /// folders. Sorted by name (so timestamped folders are sorted by time).
-  pub async fn list_subject_folders(&self) -> Result<Vec<SubjectFolder>> {
-    let mut entries = fs::read_dir(&self.root)
-      .await
-      .with_context(|| format!("failed to read {}", self.root.display()))?;
-
-    let mut out = Vec::new();
-    while let Some(entry) = entries
-      .next_entry()
-      .await
-      .context("failed to walk workspace root")?
-    {
-      let file_type = entry.file_type().await?;
-      if !file_type.is_dir() {
-        continue;
-      }
-      let name = entry.file_name().to_string_lossy().into_owned();
-      if name.starts_with('.') {
-        continue; // skip `.venv`, dotfiles
-      }
-      let structured = looks_like_subject_folder(&name);
-      out.push(SubjectFolder { name, structured });
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(out)
-  }
-
-  /// Creates a new `<datetime> (<subject>)` subject folder and returns the
-  /// folder name. The timestamp is generated server-side so the agent
-  /// does not have to know the wall clock.
-  pub async fn create_subject_folder(&self, subject: &str) -> Result<String> {
-    let cleaned = subject.trim();
-    if cleaned.is_empty() {
-      bail!("subject folder name cannot be empty");
-    }
-    if cleaned.contains('/') || cleaned.contains('\\') {
-      bail!("subject names cannot contain path separators");
-    }
-
-    let timestamp = Utc::now().format(SUBJECT_FOLDER_TIMESTAMP);
-    let folder_name = format!("{timestamp} ({cleaned})");
-    let target = self.resolve(Path::new(&folder_name))?;
-    fs::create_dir_all(&target).await.with_context(|| {
-      format!("failed to create subject folder {}", target.display())
-    })?;
-    Ok(folder_name)
-  }
-
-  /// Lists files in the given relative directory (recursive). Convenient
-  /// for an agent surveying what artifacts already exist in a subject
-  /// folder.
+  /// Lists files in the given relative directory (recursive).
   pub async fn list_files(
     &self,
     relative_dir: &Path,
@@ -342,11 +262,3 @@ fn is_valid_code(code: &str) -> bool {
   code.chars().all(|c| c.is_ascii_lowercase() || c == '-')
 }
 
-fn looks_like_subject_folder(name: &str) -> bool {
-  // Cheap structural check, not a full parse: starts with a digit (year),
-  // contains a space and an opening paren.
-  name.chars().next().is_some_and(|c| c.is_ascii_digit())
-    && name.contains(' ')
-    && name.contains('(')
-    && name.contains(')')
-}
