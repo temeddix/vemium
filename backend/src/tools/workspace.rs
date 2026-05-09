@@ -370,6 +370,150 @@ impl Tool for WriteFileTool {
   }
 }
 
+// -- edit_file -------------------------------------------------------------
+
+pub const EDIT_FILE_NAME: &str = "edit_file";
+
+#[derive(Clone)]
+pub struct EditFileTool {
+  workspace: RoomWorkspace,
+  log: EventLog,
+  author: String,
+}
+
+impl EditFileTool {
+  pub fn new(workspace: RoomWorkspace, log: EventLog, author: String) -> Self {
+    Self {
+      workspace,
+      log,
+      author,
+    }
+  }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EditFileArgs {
+  pub path: String,
+  pub old_string: String,
+  pub new_string: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EditFileOutput {
+  pub path: String,
+  pub bytes_written: usize,
+}
+
+impl Tool for EditFileTool {
+  const NAME: &'static str = EDIT_FILE_NAME;
+  type Args = EditFileArgs;
+  type Output = EditFileOutput;
+  type Error = WorkspaceToolError;
+
+  async fn definition(&self, _prompt: String) -> ToolDefinition {
+    ToolDefinition {
+      name: EDIT_FILE_NAME.to_string(),
+      description: "Replaces the first occurrence of `old_string` with \
+                    `new_string` inside an existing workspace file. The \
+                    match must be unique — if `old_string` appears more \
+                    than once the call fails with a count so you can add \
+                    more context. Use `write_file` to create new files; \
+                    use `edit_file` to patch existing ones."
+        .to_string(),
+      parameters: json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative path."
+          },
+          "old_string": {
+            "type": "string",
+            "description": "Exact text to find. Must appear exactly once."
+          },
+          "new_string": {
+            "type": "string",
+            "description": "Replacement text."
+          }
+        },
+        "required": ["path", "old_string", "new_string"]
+      }),
+    }
+  }
+
+  async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    let row = open_row(
+      &self.log,
+      &self.author,
+      format!("Editing file {}", args.path),
+    )
+    .await;
+
+    let contents = match self.workspace.read_file(Path::new(&args.path)).await {
+      Ok(c) => c,
+      Err(error) => {
+        let error = WorkspaceToolError::from_anyhow(error);
+        finish_err(
+          &row,
+          "File edit failed".to_string(),
+          format!("Path: {}\n\n{}", args.path, error.0),
+        )
+        .await;
+        return Err(error);
+      }
+    };
+
+    let count = contents.matches(args.old_string.as_str()).count();
+    if count == 0 {
+      let error =
+        WorkspaceToolError(format!("`old_string` not found in {}", args.path));
+      finish_err(&row, "File edit failed".to_string(), error.0.clone()).await;
+      return Err(error);
+    }
+    if count > 1 {
+      let error = WorkspaceToolError(format!(
+        "`old_string` is ambiguous: found {count} occurrences in {}; add \
+         more surrounding context to make it unique",
+        args.path
+      ));
+      finish_err(&row, "File edit failed".to_string(), error.0.clone()).await;
+      return Err(error);
+    }
+
+    let updated = contents.replacen(args.old_string.as_str(), &args.new_string, 1);
+    let bytes_written = updated.len();
+    match self
+      .workspace
+      .write_file(Path::new(&args.path), &updated)
+      .await
+    {
+      Ok(()) => {
+        finish_ok(
+          &row,
+          format!("Edited file {}", args.path),
+          format!("{bytes_written} bytes written"),
+        )
+        .await;
+        Ok(EditFileOutput {
+          path: args.path,
+          bytes_written,
+        })
+      }
+      Err(error) => {
+        let error = WorkspaceToolError::from_anyhow(error);
+        finish_err(
+          &row,
+          "File edit failed".to_string(),
+          format!("Path: {}\n\n{}", args.path, error.0),
+        )
+        .await;
+        Err(error)
+      }
+    }
+  }
+}
+
 fn preview_chars(text: &str, max_chars: usize) -> String {
   if text.chars().count() <= max_chars {
     return text.to_string();

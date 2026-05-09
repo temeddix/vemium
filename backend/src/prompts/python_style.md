@@ -27,6 +27,13 @@ select = ["ALL"]
 ignore = []
 ```
 
+## File Management
+
+- Use `write_file` to create a new file. Use `edit_file` to improve an existing
+  one.
+- Edit the file in place. Do not create versioned copies (`_v2`, `_v3`,
+  `_final`, `_new`, etc.)
+
 ## Code Structure
 
 - Use the `logging` module for output. Do not use `print()`.
