@@ -30,6 +30,7 @@ use rig::providers::{
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde_json::{Value, json};
 
+use crate::error::ReportError;
 use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
 
@@ -635,19 +636,17 @@ where
 /// Fetches the context window size for the given provider configuration.
 /// Results are not cached here — callers are expected to cache via
 /// [`crate::app_state::AppState::context_size_cache`]. Falls back to
-/// [`CONTEXT_SIZE_FALLBACK`] and logs a warning when the API call fails.
+/// [`CONTEXT_SIZE_FALLBACK`] and logs an error when the API call fails.
 pub async fn fetch_context_size(config: &ProviderConfig) -> u64 {
   match config.api_type {
-    ApiType::Ollama => fetch_ollama_context_size(config).await.unwrap_or_else(|e| {
-      tracing::warn!(error = %e, model = %config.model, "failed to fetch Ollama context size; using fallback");
-      CONTEXT_SIZE_FALLBACK
-    }),
-    ApiType::OpenRouter => {
-      fetch_openrouter_context_size(config).await.unwrap_or_else(|e| {
-        tracing::warn!(error = %e, model = %config.model, "failed to fetch OpenRouter context size; using fallback");
-        CONTEXT_SIZE_FALLBACK
-      })
-    }
+    ApiType::Ollama => fetch_ollama_context_size(config)
+      .await
+      .report()
+      .unwrap_or(CONTEXT_SIZE_FALLBACK),
+    ApiType::OpenRouter => fetch_openrouter_context_size(config)
+      .await
+      .report()
+      .unwrap_or(CONTEXT_SIZE_FALLBACK),
   }
 }
 

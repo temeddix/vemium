@@ -355,30 +355,31 @@ async fn run_debate_loop(
       continue;
     }
 
-    let Some(snapshot) = load_room_snapshot(&state, &room_code).await else {
-      tracing::warn!(%room_code, "room vanished from state; ending debate loop");
+    let Some(snapshot) = load_room_snapshot(&state, &room_code)
+      .await
+      .with_context(|| format!("room {room_code} vanished from state"))
+      .report()
+    else {
       return;
     };
 
-    let history = match load_effective_history(&state.db, &room_code).await {
-      Ok(value) => value,
-      Err(error) => {
-        tracing::warn!(%room_code, %error, "failed to load room history");
-        tokio::select! {
-          _ = sleep(Duration::from_secs(1)) => {}
-          _ = handle.stop_notify.notified() => return,
-          _ = handle.config_notify.notified() => continue,
+    let history =
+      match load_effective_history(&state.db, &room_code).await.report() {
+        Some(value) => value,
+        None => {
+          tokio::select! {
+            _ = sleep(Duration::from_secs(1)) => {}
+            _ = handle.stop_notify.notified() => return,
+            _ = handle.config_notify.notified() => continue,
+          }
+          continue;
         }
-        continue;
-      }
-    };
+      };
 
     if needs_leader_kickoff(&history) {
-      if let Err(error) =
-        run_leader_kickoff(&state, &handle, &snapshot, &history).await
-      {
-        tracing::warn!(%room_code, %error, "leader kickoff failed");
-      }
+      run_leader_kickoff(&state, &handle, &snapshot, &history)
+        .await
+        .report();
       sleep_until_next_turn(&handle, snapshot.chat_interval_seconds).await;
       if handle.is_stopped() {
         return;
@@ -389,12 +390,9 @@ async fn run_debate_loop(
     let persona = DEBATE_PERSONAS[persona_index % DEBATE_PERSONAS.len()];
     persona_index = persona_index.wrapping_add(1);
 
-    if let Err(error) =
-      run_chat_turn(&state, &handle, &snapshot, persona, workspace.clone())
-        .await
-    {
-      tracing::warn!(%room_code, persona = %persona.name, %error, "chat turn failed");
-    }
+    run_chat_turn(&state, &handle, &snapshot, persona, workspace.clone())
+      .await
+      .report();
 
     sleep_until_next_turn(&handle, snapshot.chat_interval_seconds).await;
     if handle.is_stopped() {
@@ -530,8 +528,11 @@ async fn run_resume_schedule_loop(
 
     let now = Utc::now();
     let Some(next_tick) = next_cron_tick(&room.resume_schedule_cron, now)
+      .with_context(|| {
+        format!("unparsable resume cron: {}", room.resume_schedule_cron)
+      })
+      .report()
     else {
-      tracing::warn!(%room_code, cron = %room.resume_schedule_cron, "unparsable resume cron; skipping wake check");
       tokio::select! {
         _ = sleep(Duration::from_secs(300)) => {}
         _ = handle.stop_notify.notified() => return,
@@ -559,10 +560,9 @@ async fn run_resume_schedule_loop(
     let Some(room) = load_room_snapshot(&state, &room_code).await else {
       return;
     };
-    if let Err(error) = evaluate_scheduled_resume(&state, &handle, &room).await
-    {
-      tracing::warn!(%room_code, %error, "scheduled resume gate failed");
-    }
+    evaluate_scheduled_resume(&state, &handle, &room)
+      .await
+      .report();
   }
 }
 
@@ -685,17 +685,19 @@ async fn run_user_chat_loop(
       continue;
     }
     if handle.is_debate_paused()
-      && let Err(error) = resume_debate(&state, &handle, &room_code).await
+      && resume_debate(&state, &handle, &room_code)
+        .await
+        .report()
+        .is_none()
     {
-      tracing::warn!(%room_code, %error, "failed to resume debate on user message");
       continue;
     }
     let Some(room) = load_room_snapshot(&state, &room_code).await else {
       return;
     };
-    if let Err(error) = run_leader_on_user_chat(&state, &handle, &room).await {
-      tracing::warn!(%room_code, %error, "leader user chat response failed");
-    }
+    run_leader_on_user_chat(&state, &handle, &room)
+      .await
+      .report();
   }
 }
 
@@ -746,9 +748,7 @@ async fn run_steering_loop(
       return;
     };
 
-    if let Err(error) = run_leader_steering(&state, &handle, &room).await {
-      tracing::warn!(%room_code, %error, "leader steering failed");
-    }
+    run_leader_steering(&state, &handle, &room).await.report();
   }
 }
 
@@ -883,12 +883,11 @@ async fn run_report_loop(
 
     let now = Utc::now();
     let Some(next_tick) = next_cron_tick(&room.report_schedule_cron, now)
+      .with_context(|| {
+        format!("unparsable report cron: {}", room.report_schedule_cron)
+      })
+      .report()
     else {
-      tracing::warn!(
-        %room_code,
-        cron = %room.report_schedule_cron,
-        "unparsable report cron; backing off 5 minutes"
-      );
       tokio::select! {
         _ = sleep(Duration::from_secs(300)) => {}
         _ = handle.stop_notify.notified() => return,
@@ -916,9 +915,7 @@ async fn run_report_loop(
       return;
     };
 
-    if let Err(error) = run_leader_report(&state, &handle, &room).await {
-      tracing::warn!(%room_code, %error, "leader report failed");
-    }
+    run_leader_report(&state, &handle, &room).await.report();
   }
 }
 
@@ -1099,12 +1096,12 @@ fn build_chat_user_prompt(
 async fn list_shared_workspace_files(workspace: &RoomWorkspace) -> Vec<String> {
   const MAX_LISTED: usize = 50;
   const SKIP: &[&str] = &["pyproject.toml", "uv.lock", ".python-version"];
-  let files = match workspace.list_files(std::path::Path::new(".")).await {
-    Ok(files) => files,
-    Err(error) => {
-      tracing::warn!(%error, "failed to list workspace files for prompt");
-      return Vec::new();
-    }
+  let Some(files) = workspace
+    .list_files(std::path::Path::new("."))
+    .await
+    .report()
+  else {
+    return Vec::new();
   };
   files
     .into_iter()
@@ -1329,12 +1326,10 @@ async fn compact_room_history(
   }
   let _guard = Guard(&handle.compaction_in_progress);
 
-  let history = match load_effective_history(&state.db, &room_code).await {
-    Ok(h) => h,
-    Err(error) => {
-      tracing::warn!(%room_code, %error, "compaction: failed to load history");
-      return;
-    }
+  let Some(history) =
+    load_effective_history(&state.db, &room_code).await.report()
+  else {
+    return;
   };
 
   let transcript = render_transcript_text(&history);
@@ -1343,15 +1338,16 @@ async fn compact_room_history(
   }
 
   let (_low, high) = current_provider_configs(&state).await;
-  let summary = match run_compact_transcript(&high, &transcript).await {
-    Ok(s) => s,
-    Err(error) => {
-      tracing::warn!(%room_code, %error, "compaction: summarization failed");
-      return;
-    }
+  let Some(summary) = run_compact_transcript(&high, &transcript).await.report()
+  else {
+    return;
   };
 
-  let limiting = if low_context <= high_context { "low" } else { "high" };
+  let limiting = if low_context <= high_context {
+    "low"
+  } else {
+    "high"
+  };
   let detail = format!(
     "Low model context: {low_context} tokens\n\
      High model context: {high_context} tokens\n\

@@ -137,10 +137,10 @@ async fn update_settings(
   }
   updated.updated_at = Utc::now();
 
-  if let Err(error) = db::update_app_settings(&state.db, &updated).await {
-    tracing::warn!(%error, "failed to persist app settings");
+  let Some(_) = db::update_app_settings(&state.db, &updated).await.report()
+  else {
     return internal("failed to persist settings");
-  }
+  };
   *state.app_settings.write().await = updated.clone();
 
   // Re-tick every active room so any in-flight wait wakes up and the next
@@ -236,12 +236,8 @@ async fn create_room(
     return bad_request("goal", "must not be empty");
   }
 
-  let code = match unique_code(&state).await {
-    Ok(value) => value,
-    Err(error) => {
-      tracing::warn!(%error, "failed to allocate room code");
-      return internal("could not allocate room code");
-    }
+  let Some(code) = unique_code(&state).await.report() else {
+    return internal("could not allocate room code");
   };
 
   let now = Utc::now();
@@ -288,15 +284,16 @@ async fn create_room(
     updated_at: now,
   };
 
-  if let Err(error) = db::insert_room(&state.db, &room).await {
-    tracing::warn!(%error, "failed to insert room");
+  let Some(_) = db::insert_room(&state.db, &room).await.report() else {
     return internal("failed to persist room");
-  }
+  };
 
-  if let Err(error) = runtime::spawn_room(state.clone(), room.clone()).await {
-    tracing::warn!(%error, "failed to spawn room runtime");
+  let Some(_) = runtime::spawn_room(state.clone(), room.clone())
+    .await
+    .report()
+  else {
     return internal("room created but failed to start runtime");
-  }
+  };
 
   let view = room.view();
   (StatusCode::CREATED, Json(json!({"room": view}))).into_response()
@@ -393,10 +390,9 @@ async fn update_room(
   }
   updated.updated_at = Utc::now();
 
-  if let Err(error) = db::update_room(&state.db, &updated).await {
-    tracing::warn!(%error, "failed to update room");
+  let Some(_) = db::update_room(&state.db, &updated).await.report() else {
     return internal("failed to persist room update");
-  }
+  };
 
   {
     let mut rooms = state.rooms.write().await;
@@ -427,12 +423,8 @@ async fn clone_room(
     }
   };
 
-  let new_code = match unique_code(&state).await {
-    Ok(value) => value,
-    Err(error) => {
-      tracing::warn!(%error, "failed to allocate room code");
-      return internal("could not allocate room code");
-    }
+  let Some(new_code) = unique_code(&state).await.report() else {
+    return internal("could not allocate room code");
   };
 
   let now = Utc::now();
@@ -454,27 +446,26 @@ async fn clone_room(
     updated_at: now,
   };
 
-  if let Err(error) = db::insert_room(&state.db, &new_room).await {
-    tracing::warn!(%error, "failed to insert cloned room");
+  let Some(_) = db::insert_room(&state.db, &new_room).await.report() else {
     return internal("failed to persist room");
-  }
+  };
 
   if payload.include_history
-    && let Err(error) =
-      db::clone_room_events(&state.db, &source.code, &new_room.code).await
+    && db::clone_room_events(&state.db, &source.code, &new_room.code)
+      .await
+      .report()
+      .is_none()
   {
-    tracing::warn!(%error, "failed to copy events into cloned room");
-    if let Err(cleanup) = db::delete_room(&state.db, &new_room.code).await {
-      tracing::warn!(%cleanup, "failed to roll back partial clone");
-    }
+    db::delete_room(&state.db, &new_room.code).await.report();
     return internal("failed to copy chat history");
   }
 
-  if let Err(error) = runtime::spawn_room(state.clone(), new_room.clone()).await
-  {
-    tracing::warn!(%error, "failed to spawn cloned room runtime");
+  let Some(_) = runtime::spawn_room(state.clone(), new_room.clone())
+    .await
+    .report()
+  else {
     return internal("room created but failed to start runtime");
-  }
+  };
 
   let view = new_room.view();
   (StatusCode::CREATED, Json(json!({"room": view}))).into_response()
@@ -491,10 +482,9 @@ async fn delete_room(
   if let Some(handle) = handle {
     handle.request_stop();
   }
-  if let Err(error) = db::delete_room(&state.db, &code).await {
-    tracing::warn!(%error, "failed to delete room from db");
+  let Some(_) = db::delete_room(&state.db, &code).await.report() else {
     return internal("failed to delete room");
-  }
+  };
   state.forget_room(&code).await;
   (StatusCode::NO_CONTENT, Json(json!({}))).into_response()
 }
@@ -535,12 +525,13 @@ async fn set_room_state(
     room.room_state = new_state;
     room.updated_at = updated_at;
   }
-  if let Err(error) =
-    db::update_room_state(&state.db, room_code, new_state, updated_at).await
-  {
-    tracing::warn!(%error, "failed to persist room state change");
+  let Some(_) =
+    db::update_room_state(&state.db, room_code, new_state, updated_at)
+      .await
+      .report()
+  else {
     return internal("failed to update room state");
-  }
+  };
 
   let handle = {
     let handles = state.room_handles.read().await;
@@ -578,10 +569,12 @@ async fn resume_room(
       None => return not_found("room"),
     }
   };
-  if let Err(error) = runtime::resume_debate(&state, &handle, &code).await {
-    tracing::warn!(%code, %error, "failed to resume room");
+  let Some(_) = runtime::resume_debate(&state, &handle, &code)
+    .await
+    .report()
+  else {
     return internal("failed to update debate state");
-  }
+  };
   (
     StatusCode::OK,
     Json(json!({"debateState": DebateState::Running.as_str()})),
@@ -637,14 +630,11 @@ async fn list_reports(
   Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  match db::load_room_reports(&state.db, &code).await {
-    Ok(reports) => {
+  match db::load_room_reports(&state.db, &code).await.report() {
+    Some(reports) => {
       (StatusCode::OK, Json(json!({"reports": reports}))).into_response()
     }
-    Err(error) => {
-      tracing::warn!(%error, "failed to load reports");
-      internal("failed to load reports")
-    }
+    None => internal("failed to load reports"),
   }
 }
 
@@ -657,8 +647,8 @@ async fn get_report(
       (StatusCode::OK, Json(json!({"report": report}))).into_response()
     }
     Ok(None) => not_found("report"),
-    Err(error) => {
-      tracing::warn!(%error, "failed to load report");
+    Err(e) => {
+      Err::<(), _>(e).report();
       internal("failed to load report")
     }
   }
@@ -680,20 +670,19 @@ async fn list_room_files(
   if !state.rooms.read().await.contains_key(&code) {
     return not_found("room");
   }
-  let workspace =
-    match DebateRoot::new(&state.data_root).workspace_for(&code).await {
-      Ok(value) => value,
-      Err(error) => {
-        tracing::warn!(%error, %code, "failed to open room workspace");
-        return internal("failed to open room workspace");
-      }
-    };
-  let entries = match workspace.list_files(std::path::Path::new("")).await {
-    Ok(value) => value,
-    Err(error) => {
-      tracing::warn!(%error, %code, "failed to list workspace files");
-      return internal("failed to list workspace files");
-    }
+  let Some(workspace) = DebateRoot::new(&state.data_root)
+    .workspace_for(&code)
+    .await
+    .report()
+  else {
+    return internal("failed to open room workspace");
+  };
+  let Some(entries) = workspace
+    .list_files(std::path::Path::new(""))
+    .await
+    .report()
+  else {
+    return internal("failed to list workspace files");
   };
   let files: Vec<_> = entries
     .into_iter()
@@ -718,21 +707,16 @@ async fn get_room_file(
   if !state.rooms.read().await.contains_key(&code) {
     return not_found("room");
   }
-  let workspace =
-    match DebateRoot::new(&state.data_root).workspace_for(&code).await {
-      Ok(value) => value,
-      Err(error) => {
-        tracing::warn!(%error, %code, "failed to open room workspace");
-        return internal("failed to open room workspace");
-      }
-    };
+  let Some(workspace) = DebateRoot::new(&state.data_root)
+    .workspace_for(&code)
+    .await
+    .report()
+  else {
+    return internal("failed to open room workspace");
+  };
   let relative = PathBuf::from(&params.path);
-  let bytes = match workspace.read_file_raw(&relative).await {
-    Ok(value) => value,
-    Err(error) => {
-      tracing::warn!(%error, %code, path = %params.path, "failed to read file");
-      return not_found("file");
-    }
+  let Some(bytes) = workspace.read_file_raw(&relative).await.report() else {
+    return not_found("file");
   };
   let mime = guess_mime(&relative);
   (
@@ -755,20 +739,15 @@ async fn download_room_files(
   if !state.rooms.read().await.contains_key(&code) {
     return not_found("room");
   }
-  let workspace =
-    match DebateRoot::new(&state.data_root).workspace_for(&code).await {
-      Ok(value) => value,
-      Err(error) => {
-        tracing::warn!(%error, %code, "failed to open room workspace");
-        return internal("failed to open room workspace");
-      }
-    };
-  let bytes = match workspace.archive_to_zip().await {
-    Ok(value) => value,
-    Err(error) => {
-      tracing::warn!(%error, %code, "failed to archive workspace");
-      return internal("failed to archive workspace");
-    }
+  let Some(workspace) = DebateRoot::new(&state.data_root)
+    .workspace_for(&code)
+    .await
+    .report()
+  else {
+    return internal("failed to open room workspace");
+  };
+  let Some(bytes) = workspace.archive_to_zip().await.report() else {
+    return internal("failed to archive workspace");
   };
   let disposition = format!("attachment; filename=\"{code}.zip\"");
   (
@@ -877,12 +856,11 @@ async fn handle_socket(
 }
 
 async fn send_event(socket: &mut WebSocket, event: &WsEvent) -> bool {
-  let payload = match serde_json::to_string(event) {
-    Ok(value) => value,
-    Err(error) => {
-      tracing::warn!(%error, "failed to serialize ws event");
-      return false;
-    }
+  let Some(payload) = serde_json::to_string(event)
+    .map_err(anyhow::Error::from)
+    .report()
+  else {
+    return false;
   };
   socket.send(Message::Text(payload)).await.is_ok()
 }

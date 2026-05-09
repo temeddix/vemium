@@ -48,9 +48,7 @@ async fn main() -> Result<()> {
   let app_settings = db::load_app_settings(&db).await?;
   let state = AppState::new(db, config.data_root.clone(), app_settings);
 
-  if let Err(error) = runtime::restore_rooms(state.clone()).await {
-    tracing::warn!(%error, "failed to restore rooms on startup");
-  }
+  runtime::restore_rooms(state.clone()).await.report();
 
   let app = build_router(state);
   let listener = TcpListener::bind(config.bind_addr).await?;

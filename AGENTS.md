@@ -123,6 +123,12 @@ Run Rust checks before completion:
 - Keep transport models (request/response DTOs) explicit and stable.
 - Always use `PathBuf` for representing file paths.
 
+## Error Handling with `ReportError`
+
+Our custom `ReportError` trait converts an `anyhow::Result<T>` into an
+`Option<T>`, logging via `tracing::error!` on failure. Use it when a failure
+should be logged and swallowed.
+
 ## API Conventions
 
 - REST-first resource design.
