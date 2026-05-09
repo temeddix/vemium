@@ -261,4 +261,3 @@ fn is_valid_code(code: &str) -> bool {
   }
   code.chars().all(|c| c.is_ascii_lowercase() || c == '-')
 }
-

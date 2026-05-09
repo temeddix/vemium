@@ -71,6 +71,10 @@ pub struct RoomHandle {
   pub next_event_sequence: Arc<AtomicU64>,
   /// Same idea as `next_event_sequence`, scoped to the report stream.
   pub next_report_sequence: Arc<AtomicU64>,
+  /// Set to `true` while a background compaction task is running for this
+  /// room. Prevents a second compaction from spawning before the first
+  /// finishes. Cleared by the task itself when it completes or errors.
+  pub compaction_in_progress: Arc<AtomicBool>,
 }
 
 impl RoomHandle {
@@ -85,6 +89,7 @@ impl RoomHandle {
       user_message_notify: Arc::new(Notify::new()),
       next_event_sequence: Arc::new(AtomicU64::new(seed_event_seq + 1)),
       next_report_sequence: Arc::new(AtomicU64::new(seed_report_seq + 1)),
+      compaction_in_progress: Arc::new(AtomicBool::new(false)),
     }
   }
 
@@ -175,6 +180,10 @@ pub struct AppState {
   pub rooms: Arc<RwLock<HashMap<String, Room>>>,
   pub room_streams: Arc<RwLock<HashMap<String, Arc<RoomStream>>>>,
   pub room_handles: Arc<RwLock<HashMap<String, RoomHandle>>>,
+  /// Cache of model context sizes keyed by `"{base_url}:{model}"`. Populated
+  /// lazily on first use; values are stable for the process lifetime since
+  /// a model's context length does not change without a settings update.
+  pub context_size_cache: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl AppState {
@@ -190,6 +199,7 @@ impl AppState {
       rooms: Arc::new(RwLock::new(HashMap::new())),
       room_streams: Arc::new(RwLock::new(HashMap::new())),
       room_handles: Arc::new(RwLock::new(HashMap::new())),
+      context_size_cache: Arc::new(RwLock::new(HashMap::new())),
     }
   }
 

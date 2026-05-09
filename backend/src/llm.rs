@@ -32,6 +32,15 @@ use serde_json::{Value, json};
 
 use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
+
+/// Fallback context length used when the provider API does not return one.
+const CONTEXT_SIZE_FALLBACK: u64 = 32_768;
+
+const COMPACTION_PROMPT: &str = "You are the room leader. Summarize the \
+  following debate transcript concisely. Capture key arguments, decisions, \
+  findings, tool outputs, and the current state of the discussion. The \
+  summary replaces the original transcript as context for future turns — \
+  make it self-contained. Write in past tense.";
 use crate::runtime::{DebateHook, ReportHook, TurnSession};
 use crate::tools::do_nothing::DoNothingTool;
 use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
@@ -40,7 +49,9 @@ use crate::tools::pause_room::PauseRoomTool;
 use crate::tools::python::RunPythonTool;
 use crate::tools::resume_room::ResumeRoomTool;
 use crate::tools::web_fetch::WebFetchTool;
-use crate::tools::workspace::{EditFileTool, ListFilesTool, ReadFileTool, WriteFileTool};
+use crate::tools::workspace::{
+  EditFileTool, ListFilesTool, ReadFileTool, WriteFileTool,
+};
 use crate::workspace::RoomWorkspace;
 
 /// Tool-call iteration safety net. The LLM may keep requesting tools forever
@@ -131,8 +142,13 @@ pub struct NoToolTurnInputs<H> {
 pub trait ChatClient: Send + Sync {
   /// Streaming debate turn with the full tool set. The hook receives token
   /// deltas, reasoning deltas, and tool-call lifecycle events as the model
-  /// streams; the returned String is the final assistant message.
-  async fn run_debate_turn(&self, inputs: DebateTurnInputs) -> Result<String>;
+  /// streams. Returns `(final_text, input_tokens)` where `input_tokens` is
+  /// the actual token count reported by the provider for this turn — used
+  /// by the caller to decide whether to trigger history compaction.
+  async fn run_debate_turn(
+    &self,
+    inputs: DebateTurnInputs,
+  ) -> Result<(String, u64)>;
 
   /// Streaming turn used for the periodic leader steering nudge. The hook
   /// receives token / reasoning deltas; the result is the final text. The
@@ -227,7 +243,10 @@ impl OllamaChatClient {
 
 #[async_trait]
 impl ChatClient for OllamaChatClient {
-  async fn run_debate_turn(&self, inputs: DebateTurnInputs) -> Result<String> {
+  async fn run_debate_turn(
+    &self,
+    inputs: DebateTurnInputs,
+  ) -> Result<(String, u64)> {
     let builder = self
       .client
       .agent(&self.model)
@@ -314,7 +333,10 @@ impl OpenRouterChatClient {
 
 #[async_trait]
 impl ChatClient for OpenRouterChatClient {
-  async fn run_debate_turn(&self, inputs: DebateTurnInputs) -> Result<String> {
+  async fn run_debate_turn(
+    &self,
+    inputs: DebateTurnInputs,
+  ) -> Result<(String, u64)> {
     let builder = self
       .client
       .agent(&self.model)
@@ -374,7 +396,7 @@ impl ChatClient for OpenRouterChatClient {
 async fn run_chat_turn_with_builder<M>(
   builder: AgentBuilder<M>,
   inputs: DebateTurnInputs,
-) -> Result<String>
+) -> Result<(String, u64)>
 where
   M: CompletionModel + 'static,
 {
@@ -401,7 +423,11 @@ where
       log.clone(),
       author.clone(),
     ))
-    .tool(WriteFileTool::new(workspace.clone(), log.clone(), author.clone()))
+    .tool(WriteFileTool::new(
+      workspace.clone(),
+      log.clone(),
+      author.clone(),
+    ))
     .tool(EditFileTool::new(workspace, log, author))
     .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
@@ -416,9 +442,11 @@ where
     .await;
 
   let mut final_text = String::new();
+  let mut input_tokens = 0u64;
   while let Some(item) = stream.next().await {
     match item.map_err(|e| anyhow!(e.to_string()))? {
       MultiTurnStreamItem::FinalResponse(final_response) => {
+        input_tokens = final_response.usage().input_tokens;
         final_text = final_response.response().to_string();
       }
       MultiTurnStreamItem::StreamAssistantItem(content) => {
@@ -429,7 +457,7 @@ where
       _ => {}
     }
   }
-  Ok(final_text)
+  Ok((final_text, input_tokens))
 }
 
 async fn run_steering_stream<M>(
@@ -577,4 +605,163 @@ where
     }
   }
   Ok(final_text)
+}
+
+/// Streaming no-tool, no-hook turn. Used for history compaction where the
+/// output is collected silently without broadcasting to the UI.
+async fn run_no_hook_stream<M>(
+  builder: AgentBuilder<M>,
+  system_prompt: &str,
+  user_prompt: String,
+) -> Result<String>
+where
+  M: CompletionModel + 'static,
+{
+  let agent = builder.preamble(system_prompt).build();
+  let mut stream = agent.stream_prompt(user_prompt).await;
+  let mut final_text = String::new();
+  while let Some(item) = stream.next().await {
+    if let MultiTurnStreamItem::FinalResponse(final_response) =
+      item.map_err(|e| anyhow!(e.to_string()))?
+    {
+      final_text = final_response.response().to_string();
+    }
+  }
+  Ok(final_text)
+}
+
+// -- Context size fetching -------------------------------------------------
+
+/// Fetches the context window size for the given provider configuration.
+/// Results are not cached here — callers are expected to cache via
+/// [`crate::app_state::AppState::context_size_cache`]. Falls back to
+/// [`CONTEXT_SIZE_FALLBACK`] and logs a warning when the API call fails.
+pub async fn fetch_context_size(config: &ProviderConfig) -> u64 {
+  match config.api_type {
+    ApiType::Ollama => fetch_ollama_context_size(config).await.unwrap_or_else(|e| {
+      tracing::warn!(error = %e, model = %config.model, "failed to fetch Ollama context size; using fallback");
+      CONTEXT_SIZE_FALLBACK
+    }),
+    ApiType::OpenRouter => {
+      fetch_openrouter_context_size(config).await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, model = %config.model, "failed to fetch OpenRouter context size; using fallback");
+        CONTEXT_SIZE_FALLBACK
+      })
+    }
+  }
+}
+
+async fn fetch_ollama_context_size(config: &ProviderConfig) -> Result<u64> {
+  let base = config.base_url.trim().trim_end_matches('/');
+  let base = base.strip_suffix("/v1").unwrap_or(base);
+  let url = format!("{base}/api/show");
+  let body = json!({ "model": config.model });
+  let resp: serde_json::Value = reqwest::Client::new()
+    .post(&url)
+    .json(&body)
+    .send()
+    .await
+    .context("Ollama /api/show request failed")?
+    .json()
+    .await
+    .context("Ollama /api/show response parse failed")?;
+
+  // model_info keys vary by architecture; look for any key ending in "context_length"
+  if let Some(ctx) = resp["model_info"].as_object().and_then(|m| {
+    m.iter()
+      .find(|(k, _)| k.ends_with("context_length"))
+      .and_then(|(_, v)| v.as_u64())
+  }) {
+    return Ok(ctx);
+  }
+  // Fallback: parse num_ctx from the parameters string
+  if let Some(params) = resp["parameters"].as_str() {
+    for line in params.lines() {
+      let mut parts = line.split_whitespace();
+      if parts.next() == Some("num_ctx")
+        && let Some(n) = parts.next().and_then(|s| s.parse::<u64>().ok())
+      {
+        return Ok(n);
+      }
+    }
+  }
+  bail!(
+    "context length not found in Ollama /api/show response for {}",
+    config.model
+  )
+}
+
+async fn fetch_openrouter_context_size(config: &ProviderConfig) -> Result<u64> {
+  let base = config.base_url.trim().trim_end_matches('/');
+  let base = if base.is_empty() {
+    "https://openrouter.ai/api/v1"
+  } else {
+    base
+  };
+  let url = format!("{base}/models");
+  let key = config
+    .api_key
+    .as_deref()
+    .filter(|k| !k.is_empty())
+    .ok_or_else(|| {
+      anyhow!("OpenRouter api_key required for context size fetch")
+    })?;
+  let resp: serde_json::Value = reqwest::Client::new()
+    .get(&url)
+    .bearer_auth(key)
+    .send()
+    .await
+    .context("OpenRouter /models request failed")?
+    .json()
+    .await
+    .context("OpenRouter /models response parse failed")?;
+  resp["data"]
+    .as_array()
+    .and_then(|arr| {
+      arr
+        .iter()
+        .find(|m| m["id"].as_str() == Some(&config.model))
+        .and_then(|m| m["context_length"].as_u64())
+    })
+    .ok_or_else(|| {
+      anyhow!("model {} not found in OpenRouter /models", config.model)
+    })
+}
+
+// -- History compaction ----------------------------------------------------
+
+/// Calls the high-tier model to summarize `transcript` and returns the
+/// summary text. Runs silently — no streaming to the UI. Called from the
+/// background compaction task in `crate::runtime`.
+pub async fn run_compact_transcript(
+  config: &ProviderConfig,
+  transcript: &str,
+) -> Result<String> {
+  let user_prompt = format!("Transcript to summarize:\n\n{transcript}");
+  match config.api_type {
+    ApiType::Ollama => {
+      let client = OllamaChatClient::new(config)?;
+      run_no_hook_stream(
+        client
+          .client
+          .agent(&client.model)
+          .additional_params(ollama_extra_params()),
+        COMPACTION_PROMPT,
+        user_prompt,
+      )
+      .await
+    }
+    ApiType::OpenRouter => {
+      let client = OpenRouterChatClient::new(config)?;
+      run_no_hook_stream(
+        client
+          .client
+          .agent(&client.model)
+          .additional_params(openrouter_extra_params()),
+        COMPACTION_PROMPT,
+        user_prompt,
+      )
+      .await
+    }
+  }
 }

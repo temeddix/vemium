@@ -28,7 +28,7 @@ use crate::error::ReportError;
 use crate::event_log::{EventLog, RowHandle};
 use crate::llm::{
   DebateTurnInputs, NoToolTurnInputs, ResumeGateInputs, SteeringTurnInputs,
-  build_chat_client,
+  build_chat_client, fetch_context_size, run_compact_transcript,
 };
 use crate::models::{
   DebateState, ProviderConfig, Room, RoomEvent, RoomEventKind, RoomState,
@@ -47,6 +47,7 @@ use cron::Schedule;
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
+use sqlx::SqlitePool;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,6 +100,19 @@ const LEADER_RESUME_GATE_USER_PROMPT: &str =
 
 const DEFAULT_WAKE_LABEL: &str = "Every hour";
 const THINKING_LABEL: &str = "Thinking";
+const SECRETARY_AGENT: &str = "Secretary";
+/// Compaction fires when input_tokens exceeds this fraction of the model's
+/// context window.
+const COMPACTION_THRESHOLD_RATIO: u64 = 8; // 80% = 8/10
+
+/// Effective debate history for one LLM turn. When a compaction checkpoint
+/// exists, `summary_text` holds the summarized text of everything before it
+/// and `tail` holds only the events that followed. When there is no checkpoint
+/// yet, `summary_text` is `None` and `tail` is the full event list.
+struct EffectiveHistory {
+  summary_text: Option<String>,
+  tail: Vec<RoomEvent>,
+}
 
 pub async fn restore_rooms(state: AppState) -> Result<()> {
   let rooms = db::load_all_rooms(&state.db).await?;
@@ -346,7 +360,7 @@ async fn run_debate_loop(
       return;
     };
 
-    let history = match db::load_room_events(&state.db, &room_code).await {
+    let history = match load_effective_history(&state.db, &room_code).await {
       Ok(value) => value,
       Err(error) => {
         tracing::warn!(%room_code, %error, "failed to load room history");
@@ -398,8 +412,11 @@ async fn sleep_until_next_turn(handle: &RoomHandle, seconds: u64) {
   }
 }
 
-fn needs_leader_kickoff(history: &[RoomEvent]) -> bool {
-  !history.iter().any(|event| {
+fn needs_leader_kickoff(history: &EffectiveHistory) -> bool {
+  if history.summary_text.is_some() {
+    return false;
+  }
+  !history.tail.iter().any(|event| {
     matches!(
       event.kind,
       RoomEventKind::AgentChat | RoomEventKind::LeaderNote
@@ -414,7 +431,7 @@ async fn run_chat_turn(
   persona: DebatePersona,
   workspace: RoomWorkspace,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, &room.code).await?;
+  let history = load_effective_history(&state.db, &room.code).await?;
   let history_messages = render_transcript_messages(&history);
   let system_prompt = build_chat_system_prompt(room, persona);
   let workspace_files = list_shared_workspace_files(&workspace).await;
@@ -468,7 +485,23 @@ async fn run_chat_turn(
     })
     .await;
 
+  let input_tokens = outcome.as_ref().map(|&(_, t)| t).unwrap_or(0);
   session.finish(outcome.is_ok()).await;
+
+  if input_tokens > 0 {
+    let (low_context, high_context, threshold) =
+      compaction_threshold(state, &low, &high).await;
+    maybe_trigger_compaction(
+      state,
+      handle,
+      &room.code,
+      input_tokens,
+      low_context,
+      high_context,
+      threshold,
+    );
+  }
+
   outcome.map(|_| ())
 }
 
@@ -538,8 +571,8 @@ async fn evaluate_scheduled_resume(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, &room.code).await?;
-  if history.is_empty() {
+  let history = load_effective_history(&state.db, &room.code).await?;
+  if history.summary_text.is_none() && history.tail.is_empty() {
     return Ok(());
   }
 
@@ -631,7 +664,7 @@ async fn run_leader_on_user_chat(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, &room.code).await?;
+  let history = load_effective_history(&state.db, &room.code).await?;
   let preamble = build_room_preamble(room);
   let system = format!(
     "{LEADER_STEERING_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}"
@@ -684,8 +717,8 @@ async fn run_leader_steering(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, &room.code).await?;
-  if history.is_empty() {
+  let history = load_effective_history(&state.db, &room.code).await?;
+  if history.summary_text.is_none() && history.tail.is_empty() {
     return Ok(());
   }
 
@@ -699,14 +732,22 @@ async fn run_leader_steering(
      your steering note now."
   );
 
-  run_leader_turn(state, handle, room, system, user, Some(STEERING_INLINE_NOTE)).await
+  run_leader_turn(
+    state,
+    handle,
+    room,
+    system,
+    user,
+    Some(STEERING_INLINE_NOTE),
+  )
+  .await
 }
 
 async fn run_leader_kickoff(
   state: &AppState,
   handle: &RoomHandle,
   room: &Room,
-  history: &[RoomEvent],
+  history: &EffectiveHistory,
 ) -> Result<()> {
   let preamble = build_room_preamble(room);
   let system =
@@ -720,7 +761,8 @@ async fn run_leader_kickoff(
     )
   };
 
-  run_leader_turn(state, handle, room, system, user, Some(KICKOFF_INLINE_NOTE)).await
+  run_leader_turn(state, handle, room, system, user, Some(KICKOFF_INLINE_NOTE))
+    .await
 }
 
 /// Shared driver for leader-side streaming turns (steering, kickoff). When
@@ -845,8 +887,8 @@ async fn run_leader_report(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = db::load_room_events(&state.db, &room.code).await?;
-  if history.is_empty() {
+  let history = load_effective_history(&state.db, &room.code).await?;
+  if history.summary_text.is_none() && history.tail.is_empty() {
     return Ok(());
   }
 
@@ -879,9 +921,15 @@ async fn run_leader_report(
   match outcome {
     Ok(content) => {
       let final_content = content.trim().to_string();
-      db::finish_report(&state.db, report.id, &final_content, true, completed_at)
-        .await
-        .report();
+      db::finish_report(
+        &state.db,
+        report.id,
+        &final_content,
+        true,
+        completed_at,
+      )
+      .await
+      .report();
       stream.send(WsEvent::ReportCompleted {
         report_id,
         sequence,
@@ -1051,29 +1099,41 @@ pub(crate) fn build_room_preamble(room: &Room) -> String {
 }
 
 fn render_transcript_messages(
-  events: &[RoomEvent],
+  history: &EffectiveHistory,
 ) -> Vec<rig::completion::Message> {
-  events
-    .iter()
-    .filter(|event| !matches!(event.kind, RoomEventKind::Thinking))
-    .map(|event| {
-      let body = format_transcript_line(event);
-      let assistant_content = AssistantContent::text(body);
-      rig::completion::Message::Assistant {
-        id: None,
-        content: rig::OneOrMany::one(assistant_content),
-      }
-    })
-    .collect()
+  let mut messages = Vec::new();
+  if let Some(summary) = &history.summary_text {
+    let body = format!("[Earlier history summary]\n{summary}");
+    messages.push(rig::completion::Message::Assistant {
+      id: None,
+      content: rig::OneOrMany::one(AssistantContent::text(body)),
+    });
+  }
+  for event in &history.tail {
+    if matches!(event.kind, RoomEventKind::Thinking | RoomEventKind::Summary) {
+      continue;
+    }
+    let body = format_transcript_line(event);
+    messages.push(rig::completion::Message::Assistant {
+      id: None,
+      content: rig::OneOrMany::one(AssistantContent::text(body)),
+    });
+  }
+  messages
 }
 
-fn render_transcript_text(events: &[RoomEvent]) -> String {
-  events
-    .iter()
-    .filter(|event| !matches!(event.kind, RoomEventKind::Thinking))
-    .map(format_transcript_line)
-    .collect::<Vec<_>>()
-    .join("\n\n")
+fn render_transcript_text(history: &EffectiveHistory) -> String {
+  let mut parts = Vec::new();
+  if let Some(summary) = &history.summary_text {
+    parts.push(format!("[Earlier history summary]\n{summary}"));
+  }
+  for event in &history.tail {
+    if matches!(event.kind, RoomEventKind::Thinking | RoomEventKind::Summary) {
+      continue;
+    }
+    parts.push(format_transcript_line(event));
+  }
+  parts.join("\n\n")
 }
 
 fn format_transcript_line(event: &RoomEvent) -> String {
@@ -1090,7 +1150,7 @@ fn format_transcript_line(event: &RoomEvent) -> String {
         event.content
       )
     }
-    RoomEventKind::Thinking => String::new(),
+    RoomEventKind::Thinking | RoomEventKind::Summary => String::new(),
     RoomEventKind::AgentChat
     | RoomEventKind::LeaderNote
     | RoomEventKind::UserChat => {
@@ -1113,4 +1173,170 @@ fn render_gate_user_prompt(
     .replace("{preamble}", preamble)
     .replace("{schedule_label}", schedule_label)
     .replace("{transcript}", transcript)
+}
+
+// -- Effective history loading ---------------------------------------------
+
+async fn load_effective_history(
+  pool: &SqlitePool,
+  room_code: &str,
+) -> anyhow::Result<EffectiveHistory> {
+  match db::load_compaction_checkpoint(pool, room_code).await? {
+    Some(checkpoint) => {
+      let tail =
+        db::load_room_events_after(pool, room_code, checkpoint.sequence)
+          .await?;
+      Ok(EffectiveHistory {
+        summary_text: Some(checkpoint.detail),
+        tail,
+      })
+    }
+    None => {
+      let tail = db::load_room_events(pool, room_code).await?;
+      Ok(EffectiveHistory {
+        summary_text: None,
+        tail,
+      })
+    }
+  }
+}
+
+// -- History compaction ----------------------------------------------------
+
+/// Returns `(low_context, high_context, threshold)` for compaction decisions.
+/// Context sizes are cached per model so provider APIs are only hit once.
+async fn compaction_threshold(
+  state: &AppState,
+  low: &ProviderConfig,
+  high: &ProviderConfig,
+) -> (u64, u64, u64) {
+  let low_size = context_size_cached(state, low).await;
+  let high_size = context_size_cached(state, high).await;
+  let threshold = low_size.min(high_size) * COMPACTION_THRESHOLD_RATIO / 10;
+  (low_size, high_size, threshold)
+}
+
+async fn context_size_cached(state: &AppState, config: &ProviderConfig) -> u64 {
+  let key = format!("{}:{}", config.base_url, config.model);
+  {
+    let cache = state.context_size_cache.read().await;
+    if let Some(&size) = cache.get(&key) {
+      return size;
+    }
+  }
+  let size = fetch_context_size(config).await;
+  state.context_size_cache.write().await.insert(key, size);
+  size
+}
+
+/// Spawns a background compaction task if input tokens exceed the threshold
+/// and no compaction is already running for this room. Non-blocking.
+fn maybe_trigger_compaction(
+  state: &AppState,
+  handle: &RoomHandle,
+  room_code: &str,
+  input_tokens: u64,
+  low_context: u64,
+  high_context: u64,
+  threshold: u64,
+) {
+  if input_tokens < threshold {
+    return;
+  }
+  if handle
+    .compaction_in_progress
+    .compare_exchange(
+      false,
+      true,
+      std::sync::atomic::Ordering::SeqCst,
+      std::sync::atomic::Ordering::SeqCst,
+    )
+    .is_err()
+  {
+    return;
+  }
+  let state = state.clone();
+  let handle = handle.clone();
+  let room_code = room_code.to_string();
+  tokio::spawn(async move {
+    compact_room_history(
+      state,
+      handle,
+      room_code,
+      input_tokens,
+      low_context,
+      high_context,
+      threshold,
+    )
+    .await;
+  });
+}
+
+async fn compact_room_history(
+  state: AppState,
+  handle: RoomHandle,
+  room_code: String,
+  input_tokens: u64,
+  low_context: u64,
+  high_context: u64,
+  threshold: u64,
+) {
+  struct Guard<'a>(&'a std::sync::Arc<std::sync::atomic::AtomicBool>);
+  impl Drop for Guard<'_> {
+    fn drop(&mut self) {
+      self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+  }
+  let _guard = Guard(&handle.compaction_in_progress);
+
+  let history = match load_effective_history(&state.db, &room_code).await {
+    Ok(h) => h,
+    Err(error) => {
+      tracing::warn!(%room_code, %error, "compaction: failed to load history");
+      return;
+    }
+  };
+
+  let transcript = render_transcript_text(&history);
+  if transcript.trim().is_empty() {
+    return;
+  }
+
+  let (_low, high) = current_provider_configs(&state).await;
+  let summary = match run_compact_transcript(&high, &transcript).await {
+    Ok(s) => s,
+    Err(error) => {
+      tracing::warn!(%room_code, %error, "compaction: summarization failed");
+      return;
+    }
+  };
+
+  let limiting = if low_context <= high_context { "low" } else { "high" };
+  let detail = format!(
+    "Low model context: {low_context} tokens\n\
+     High model context: {high_context} tokens\n\
+     Limiting model: {limiting} ({} tokens)\n\
+     Threshold: {threshold} tokens ({}%)\n\
+     Input tokens at trigger: {input_tokens}\n\
+     \n\
+     --- Summary ---\n\
+     \n\
+     {summary}",
+    low_context.min(high_context),
+    COMPACTION_THRESHOLD_RATIO * 10,
+  );
+
+  let stream = state.ensure_room_stream(&room_code).await;
+  let log =
+    EventLog::new(state.clone(), room_code.clone(), handle.clone(), stream);
+  log
+    .record_finalized(
+      RoomEventKind::Summary,
+      Some(SECRETARY_AGENT.to_string()),
+      "History compacted".to_string(),
+      detail,
+    )
+    .await;
+
+  tracing::info!(%room_code, "history compaction completed");
 }

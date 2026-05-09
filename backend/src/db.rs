@@ -436,6 +436,49 @@ pub async fn clone_room_events(
   Ok(())
 }
 
+/// Returns the latest `Summary` event for the given room, or `None` if no
+/// compaction has run yet. Used by the history loader to find the cutoff
+/// point beyond which events are loaded verbatim.
+pub async fn load_compaction_checkpoint(
+  pool: &SqlitePool,
+  room_code: &str,
+) -> Result<Option<RoomEvent>> {
+  let row = sqlx::query(
+    "SELECT id, room_code, sequence, kind, agent, content, detail, success, timestamp, completed_at
+     FROM room_events
+     WHERE room_code = ? AND kind = 'summary'
+     ORDER BY sequence DESC
+     LIMIT 1",
+  )
+  .bind(room_code)
+  .fetch_optional(pool)
+  .await
+  .context("failed to load compaction checkpoint")?;
+  row.map(parse_event_row).transpose()
+}
+
+/// Returns all events for the given room with `sequence` strictly greater
+/// than `after_sequence`, in ascending sequence order. Used to load only
+/// the tail after a compaction checkpoint.
+pub async fn load_room_events_after(
+  pool: &SqlitePool,
+  room_code: &str,
+  after_sequence: u64,
+) -> Result<Vec<RoomEvent>> {
+  let rows = sqlx::query(
+    "SELECT id, room_code, sequence, kind, agent, content, detail, success, timestamp, completed_at
+     FROM room_events
+     WHERE room_code = ? AND sequence > ?
+     ORDER BY sequence ASC",
+  )
+  .bind(room_code)
+  .bind(after_sequence as i64)
+  .fetch_all(pool)
+  .await
+  .context("failed to load room events after sequence")?;
+  rows.into_iter().map(parse_event_row).collect()
+}
+
 /// Returns the highest `sequence` for the given room, or 0 if the room has
 /// no events yet. Used to seed the orchestrator's per-room counter on
 /// startup.

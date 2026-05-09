@@ -16,9 +16,7 @@
 //! authoritative `room_events` table — including streaming bodies — so no
 //! draft state is ever lost.
 
-use crate::models::{
-  DebateState, RoomEvent, RoomReport, RoomState, RoomView,
-};
+use crate::models::{DebateState, RoomEvent, RoomReport, RoomState, RoomView};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::sync::Mutex;

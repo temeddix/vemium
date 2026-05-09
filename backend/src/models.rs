@@ -304,6 +304,12 @@ pub enum RoomEventKind {
   /// A short tool-call breadcrumb. `content` is the action label,
   /// `detail` carries the click-to-reveal expansion (args, result, etc.).
   InlineNote,
+  /// A history compaction checkpoint written by the leader. `content` is
+  /// the visible label `"History compacted"`; `detail` holds the summary
+  /// text that replaces all earlier events when building LLM context.
+  /// The event's own `sequence` is the cutoff — only events after it are
+  /// included in subsequent turns.
+  Summary,
 }
 
 impl RoomEventKind {
@@ -314,6 +320,7 @@ impl RoomEventKind {
       Self::UserChat => "user_chat",
       Self::Thinking => "thinking",
       Self::InlineNote => "inline_note",
+      Self::Summary => "summary",
     }
   }
 
@@ -324,6 +331,7 @@ impl RoomEventKind {
       "user_chat" => Ok(Self::UserChat),
       "thinking" => Ok(Self::Thinking),
       "inline_note" => Ok(Self::InlineNote),
+      "summary" => Ok(Self::Summary),
       other => Err(anyhow::anyhow!("unknown room event kind: {other}")),
     }
   }
