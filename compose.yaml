@@ -21,9 +21,12 @@ services:
       - 0.0.0.0
       - --allowed-hosts
       - "*"
+      # This gives every debate room its own browser so
+      # concurrent rooms cannot stomp on each other's navigation state.
+      - --isolated
     init: true
     restart: unless-stopped
-    shm_size: 1g
+    shm_size: 8g
     healthcheck:
       test: ["CMD", "bash", "-c", "</dev/tcp/localhost/8931"]
       interval: 30s

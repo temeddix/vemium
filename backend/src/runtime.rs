@@ -473,7 +473,10 @@ async fn run_chat_turn(
 
   let client =
     build_chat_client(&low).context("failed to construct low-tier client")?;
-  let mcp = state.mcp.clone();
+  // Open (or reuse) the room's MCP session. Each room gets its own
+  // session — and its own isolated browser context on the sidecar — so
+  // concurrent rooms cannot stomp on each other's navigation state.
+  let mcp = state.mcp.get_or_connect(&room.code).await;
   let outcome = client
     .run_debate_turn(DebateTurnInputs {
       system_prompt,

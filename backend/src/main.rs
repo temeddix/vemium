@@ -47,8 +47,9 @@ async fn main() -> Result<()> {
 
   let db = db::init_pool(&config.database_url).await?;
   let app_settings = db::load_app_settings(&db).await?;
-  let mcp = mcp_client::connect().await;
-  let state = AppState::new(db, config.data_root.clone(), app_settings, mcp);
+  // MCP sessions are opened lazily, per room, on first browser-tool use
+  // — see `McpRegistry` in `mcp_client.rs`. No upfront connect here.
+  let state = AppState::new(db, config.data_root.clone(), app_settings);
 
   runtime::restore_rooms(state.clone()).await.report();
 
@@ -65,9 +66,8 @@ fn init_tracing() {
   // and completion payloads attached as span fields. They drown out the
   // operational logs we actually care about, so demote them along with the
   // equally chatty provider modules.
-  let filter = tracing_subscriber::EnvFilter::new(
-    "info,html5ever=error,rig=warn",
-  );
+  let filter =
+    tracing_subscriber::EnvFilter::new("info,html5ever=error,rig=warn");
   tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
