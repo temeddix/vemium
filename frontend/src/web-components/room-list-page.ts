@@ -115,6 +115,7 @@ export class RoomListPage extends LitElement {
       border-radius: 0.6rem;
       background: var(--wa-color-surface-raised);
       border: var(--wa-border-width-s) solid var(--wa-color-border-normal);
+      min-width: 0;
     }
 
     .room-card:hover {
@@ -127,6 +128,7 @@ export class RoomListPage extends LitElement {
       text-decoration: none;
       color: inherit;
       cursor: pointer;
+      min-width: 0;
     }
 
     .room-card-menu {
@@ -156,6 +158,7 @@ export class RoomListPage extends LitElement {
       align-items: flex-start;
       gap: 0.5rem;
       padding-right: 1.6rem;
+      min-width: 0;
     }
 
     .room-meta {
