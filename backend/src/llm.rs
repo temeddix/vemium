@@ -28,9 +28,11 @@ use rig::providers::{
   openrouter,
 };
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
+use rig::tool::server::ToolServer;
 use serde_json::{Value, json};
 
 use crate::error::ReportError;
+use crate::mcp_client::McpHandle;
 use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
 
@@ -44,6 +46,8 @@ const COMPACTION_PROMPT: &str = "You are the room leader. Summarize the \
   make it self-contained. Write in past tense.";
 use crate::runtime::{DebateHook, ReportHook, TurnSession};
 use crate::tools::do_nothing::DoNothingTool;
+use crate::tools::document_to_md::DocumentToMdTool;
+use crate::tools::download_file::DownloadFileTool;
 use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::pause_room::PauseRoomTool;
@@ -90,6 +94,11 @@ pub struct DebateTurnInputs {
   pub do_nothing_tool: DoNothingTool,
   pub inline_note_tool: GetInlineNoteDetailTool,
   pub session: Arc<TurnSession>,
+  /// Singleton MCP setup for the Playwright sidecar. Always present.
+  /// When the sidecar was unreachable at startup, `mcp.peer()` returns
+  /// `None`: `build_chat_client` skips MCP tool registration entirely,
+  /// and `web_fetch`'s direct call returns a structured error.
+  pub mcp: McpHandle,
 }
 
 /// Inputs for the resume-gate tool loop. Used while a room is paused: the
@@ -405,9 +414,30 @@ where
   let log = session.log().clone();
   let author = session.author().to_string();
   let workspace = inputs.workspace;
-  let agent = builder
-    .preamble(&inputs.system_prompt)
-    .tool(WebFetchTool::new(log.clone(), author.clone()))
+  let mcp = inputs.mcp;
+  // rig-core 0.36's AgentBuilder makes `tool_server_handle()` and the
+  // `.tool()` chain mutually exclusive — a builder can be in only one of
+  // `WithToolServerHandle` or `WithBuilderTools` at a time. To expose
+  // both our native Rig tools AND the auto-imported Playwright `browser_*`
+  // tool set in the same agent, we build a single ToolServer that holds
+  // both, then hand it to the agent via `tool_server_handle`.
+  let mut server = ToolServer::new()
+    .tool(WebFetchTool::new(
+      workspace.clone(),
+      mcp.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(DownloadFileTool::new(
+      workspace.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(DocumentToMdTool::new(
+      workspace.clone(),
+      log.clone(),
+      author.clone(),
+    ))
     .tool(RunPythonTool::new(
       workspace.clone(),
       inputs.runner,
@@ -432,7 +462,26 @@ where
     .tool(EditFileTool::new(workspace, log, author))
     .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
-    .tool(inputs.inline_note_tool)
+    .tool(inputs.inline_note_tool);
+  if let Some(peer) = mcp.peer() {
+    match peer.list_all_tools().await {
+      Ok(tools) => {
+        for tool in tools {
+          server = server.rmcp_tool(tool, peer.clone());
+        }
+      }
+      Err(error) => {
+        tracing::warn!(
+          "failed to list Playwright MCP tools (continuing with native \
+           tools only): {error}"
+        );
+      }
+    }
+  }
+  let tool_server_handle = server.run();
+  let agent = builder
+    .preamble(&inputs.system_prompt)
+    .tool_server_handle(tool_server_handle)
     .build();
 
   let mut stream = agent

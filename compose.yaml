@@ -9,11 +9,17 @@ services:
       - vemium-data:/data
     restart: unless-stopped
     depends_on:
-      crawl4ai:
+      playwright:
         condition: service_started
 
-  crawl4ai:
-    image: unclecode/crawl4ai:latest
+  playwright:
+    image: mcr.microsoft.com/playwright/mcp:latest
+    command:
+      - --port
+      - "8931"
+      - --host
+      - 0.0.0.0
+    init: true
     restart: unless-stopped
     shm_size: 1g
 

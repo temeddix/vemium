@@ -15,7 +15,13 @@
 //!   lanes (lifecycle vs. token).
 //! - `room_handles`: a [`RoomHandle`] per room that owns the orchestrator's
 //!   pause/stop signals.
+//! - `mcp`: [`McpHandle`] for the singleton Playwright MCP connection.
+//!   The handle is always present, but its inner service is absent when
+//!   the sidecar was unreachable at startup; consumers (`web_fetch`, the
+//!   auto-imported `browser_*` set) gate on `mcp.peer()` and degrade to
+//!   a structured error when it returns `None`.
 
+use crate::mcp_client::McpHandle;
 use crate::models::{AppSettings, Room};
 use crate::streaming::RoomStream;
 use sqlx::SqlitePool;
@@ -184,6 +190,11 @@ pub struct AppState {
   /// lazily on first use; values are stable for the process lifetime since
   /// a model's context length does not change without a settings update.
   pub context_size_cache: Arc<RwLock<HashMap<String, u64>>>,
+  /// Singleton MCP setup for the Playwright sidecar. The handle is
+  /// always present even when the sidecar is unreachable; in that case
+  /// the tool-server is empty and direct MCP calls return an error so
+  /// callers can degrade.
+  pub mcp: McpHandle,
 }
 
 impl AppState {
@@ -191,6 +202,7 @@ impl AppState {
     db: SqlitePool,
     data_root: PathBuf,
     app_settings: AppSettings,
+    mcp: McpHandle,
   ) -> Self {
     Self {
       db,
@@ -200,6 +212,7 @@ impl AppState {
       room_streams: Arc::new(RwLock::new(HashMap::new())),
       room_handles: Arc::new(RwLock::new(HashMap::new())),
       context_size_cache: Arc::new(RwLock::new(HashMap::new())),
+      mcp,
     }
   }
 

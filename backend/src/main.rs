@@ -14,6 +14,7 @@ mod db;
 mod error;
 mod event_log;
 mod llm;
+mod mcp_client;
 mod models;
 mod provider_models;
 mod python_runner;
@@ -46,7 +47,8 @@ async fn main() -> Result<()> {
 
   let db = db::init_pool(&config.database_url).await?;
   let app_settings = db::load_app_settings(&db).await?;
-  let state = AppState::new(db, config.data_root.clone(), app_settings);
+  let mcp = mcp_client::connect().await;
+  let state = AppState::new(db, config.data_root.clone(), app_settings, mcp);
 
   runtime::restore_rooms(state.clone()).await.report();
 

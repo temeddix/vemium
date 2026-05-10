@@ -473,6 +473,7 @@ async fn run_chat_turn(
 
   let client =
     build_chat_client(&low).context("failed to construct low-tier client")?;
+  let mcp = state.mcp.clone();
   let outcome = client
     .run_debate_turn(DebateTurnInputs {
       system_prompt,
@@ -484,6 +485,7 @@ async fn run_chat_turn(
       do_nothing_tool,
       inline_note_tool,
       session: session.clone(),
+      mcp,
     })
     .await;
 

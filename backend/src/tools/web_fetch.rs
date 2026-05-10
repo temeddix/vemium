@@ -1,87 +1,115 @@
-//! `web_fetch` tool: fetch a URL via crawl4ai and return its content as
-//! Markdown.
+//! `web_fetch` tool: renders a URL through the Playwright sidecar, takes
+//! the resulting HTML, and converts it to Markdown via [`kreuzberg`].
 //!
-//! Uses the crawl4ai `/md` endpoint which renders JavaScript, strips noise,
-//! and returns clean Markdown in a single synchronous request.
+//! Pipeline:
+//!
+//! 1. `browser_navigate(url)` over the shared MCP connection (real Chrome,
+//!    so JavaScript-rendered pages and SPAs work).
+//! 2. `browser_wait_for({"time": POST_NAVIGATE_WAIT_SECS})` so that SPA
+//!    frameworks have a chance to fetch their data and render — `navigate`
+//!    only blocks until the `load` event, which fires on an empty shell
+//!    for client-rendered apps. A fixed wait is a deliberate trade-off
+//!    against per-page tuning: simpler than a `networkidle` heuristic and
+//!    covers ~all real-world SPAs.
+//! 3. `browser_evaluate(() => document.documentElement.outerHTML)` to
+//!    capture the page after JS has settled.
+//! 4. [`kreuzberg::extract_bytes`] with `text/html` MIME hint.
+//! 5. Save the full markdown to `basket/<url-hash>.md`. Small results are
+//!    inlined in the response; larger results return only the path plus a
+//!    preview, leaving the agent to read selectively via `workspace`.
+//!
+//! No content extraction / readability is applied: agents that are
+//! exploring a page (e.g. looking for a download button) need to see the
+//! whole page, not a Reader-View-stripped version. Token blow-up is
+//! mitigated by the file-on-disk + small-inline pattern, not by lossy
+//! filtering.
+//!
+//! When the MCP connection is unavailable (`McpHandle == None`), the tool
+//! returns a structured error rather than panicking, so the agent can
+//! degrade gracefully.
+
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::event_log::EventLog;
+use crate::mcp_client::McpHandle;
 use crate::models::RoomEventKind;
-use reqwest::Client;
+use crate::workspace::RoomWorkspace;
+use kreuzberg::{ExtractionConfig, extract_bytes};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
+use rmcp::model::{CallToolResult, Content, RawContent};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::time::Duration;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const NAME: &str = "web_fetch";
-pub const INLINE_NOTE_TEXT: &str = "Fetched URL";
-pub const INLINE_NOTE_FAIL_TEXT: &str = "Web fetch failed";
-/// Markdown preview cap for the inline-note `detail`.
-const NOTE_PREVIEW_CHARS: usize = 2_000;
-const DEFAULT_MAX_CHARS: usize = 12_000;
-const MIN_MAX_CHARS: usize = 256;
-const CRAWL4AI_URL: &str = "http://crawl4ai:11235";
-/// crawl4ai may need time to render JS-heavy pages.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub const INLINE_NOTE_OK: &str = "Fetched URL";
+pub const INLINE_NOTE_FAIL: &str = "Web fetch failed";
 
-/// Owns the shared `reqwest::Client`. Cheap to clone.
+const BASKET_DIR: &str = "basket";
+/// Char count above which the body is omitted from the tool result and
+/// the agent must read the saved file.
+const INLINE_THRESHOLD_CHARS: usize = 12_000;
+const PREVIEW_CHARS: usize = 2_000;
+/// Seconds to wait between `browser_navigate` and `browser_evaluate` so
+/// SPA frameworks can fetch data and render. Tuned to cover the common
+/// case (React/Vue/Lit apps fetching one or two XHRs after `load`)
+/// without dragging on simple static pages.
+const POST_NAVIGATE_WAIT_SECS: f64 = 2.0;
+
+const HTML_DUMP_SCRIPT: &str = "() => document.documentElement.outerHTML";
+
 #[derive(Clone)]
 pub struct WebFetchTool {
-  http: Client,
+  workspace: RoomWorkspace,
+  mcp: Arc<McpHandle>,
   log: EventLog,
   author: String,
 }
 
 impl WebFetchTool {
-  pub fn new(log: EventLog, author: String) -> Self {
-    let http = Client::builder()
-      .timeout(REQUEST_TIMEOUT)
-      .build()
-      .unwrap_or_else(|_| Client::new());
-    Self { http, log, author }
+  pub fn new(
+    workspace: RoomWorkspace,
+    mcp: McpHandle,
+    log: EventLog,
+    author: String,
+  ) -> Self {
+    Self {
+      workspace,
+      mcp: Arc::new(mcp),
+      log,
+      author,
+    }
   }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 pub struct WebFetchArgs {
   pub url: String,
-  #[serde(default)]
-  pub max_chars: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebFetchOutput {
   pub url: String,
-  pub markdown: String,
-  /// `true` when the body exceeded `max_chars` and was cut.
-  pub truncated: bool,
+  /// Workspace-relative path of the saved Markdown file (always written).
+  pub path: String,
+  pub total_chars: usize,
+  /// Inline body when small enough; `None` when above the threshold.
+  pub markdown: Option<String>,
 }
 
 #[derive(Debug, Error)]
 pub enum WebFetchError {
-  #[error("crawl4ai request failed: {0}")]
-  Request(#[from] reqwest::Error),
-  #[error("crawl4ai returned HTTP {0}")]
-  HttpStatus(u16),
-  #[error("crawl4ai scrape failed: {0}")]
-  Scrape(String),
-  #[error("crawl4ai returned no markdown content")]
-  NoMarkdown,
-}
-
-#[derive(Serialize)]
-struct MdRequest<'a> {
-  url: &'a str,
-  /// "fit" returns LLM-optimised markdown with noise removed.
-  f: &'a str,
-}
-
-#[derive(Deserialize)]
-struct MdResponse {
-  success: bool,
-  markdown: Option<String>,
-  error: Option<String>,
+  #[error("MCP call failed: {0}")]
+  Mcp(String),
+  #[error("Playwright returned no HTML for {0}")]
+  NoHtml(String),
+  #[error("kreuzberg failed: {0}")]
+  Kreuzberg(String),
+  #[error("workspace error: {0}")]
+  Workspace(String),
 }
 
 impl Tool for WebFetchTool {
@@ -93,10 +121,12 @@ impl Tool for WebFetchTool {
   async fn definition(&self, _prompt: String) -> ToolDefinition {
     ToolDefinition {
       name: NAME.to_string(),
-      description: "Fetches a URL and returns its main content as Markdown. \
-                    Uses a headless browser for JavaScript-rendered pages and \
-                    single-page applications. Output is pre-cleaned \
-                    (nav/ads/footer dropped) and token-efficient."
+      description: "Fetches an HTML page through a real browser \
+                    (JavaScript and SPAs work) and returns it as Markdown. \
+                    Full content is always saved to `basket/<url-hash>.md`. \
+                    Small pages also return the body inline; large pages \
+                    return only the path and a preview that you read or \
+                    grep through the workspace tools."
         .to_string(),
       parameters: json!({
         "type": "object",
@@ -105,12 +135,6 @@ impl Tool for WebFetchTool {
           "url": {
             "type": "string",
             "description": "Absolute http(s) URL to fetch."
-          },
-          "max_chars": {
-            "type": "integer",
-            "description": "Optional cap on the returned Markdown length. \
-                            Defaults to 12000.",
-            "minimum": 256
           }
         },
         "required": ["url"]
@@ -119,11 +143,6 @@ impl Tool for WebFetchTool {
   }
 
   async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-    let max_chars = args
-      .max_chars
-      .unwrap_or(DEFAULT_MAX_CHARS)
-      .max(MIN_MAX_CHARS);
-
     let row = self
       .log
       .start_row(
@@ -134,15 +153,20 @@ impl Tool for WebFetchTool {
       )
       .await;
 
-    let outcome = self.fetch_markdown(&args.url, max_chars).await;
-
-    match outcome {
+    let result = self.fetch(&args.url).await;
+    match result {
       Ok(output) => {
-        let (preview, _) = truncate_chars(&output.markdown, NOTE_PREVIEW_CHARS);
+        let preview = match &output.markdown {
+          Some(body) => truncate(body, PREVIEW_CHARS),
+          None => "(body too large to inline; read the saved file)".to_string(),
+        };
         row
           .replace_body(
-            INLINE_NOTE_TEXT.to_string(),
-            format!("URL: {}\n\n{preview}", output.url),
+            INLINE_NOTE_OK.to_string(),
+            format!(
+              "{} -> {} ({} chars)\n\n{preview}",
+              args.url, output.path, output.total_chars
+            ),
           )
           .await;
         row.finish(true).await;
@@ -151,8 +175,8 @@ impl Tool for WebFetchTool {
       Err(error) => {
         row
           .replace_body(
-            INLINE_NOTE_FAIL_TEXT.to_string(),
-            format!("URL: {}\n\n{error}", args.url),
+            INLINE_NOTE_FAIL.to_string(),
+            format!("{}\n\n{error}", args.url),
           )
           .await;
         row.finish(false).await;
@@ -163,43 +187,106 @@ impl Tool for WebFetchTool {
 }
 
 impl WebFetchTool {
-  async fn fetch_markdown(
-    &self,
-    url: &str,
-    max_chars: usize,
-  ) -> Result<WebFetchOutput, WebFetchError> {
-    let response = self
-      .http
-      .post(format!("{CRAWL4AI_URL}/md"))
-      .json(&MdRequest { url, f: "fit" })
-      .send()
-      .await?;
+  async fn fetch(&self, url: &str) -> Result<WebFetchOutput, WebFetchError> {
+    self
+      .mcp
+      .call_tool("browser_navigate", json!({ "url": url }))
+      .await
+      .map_err(|e| WebFetchError::Mcp(e.to_string()))?;
 
-    if !response.status().is_success() {
-      return Err(WebFetchError::HttpStatus(response.status().as_u16()));
-    }
+    self
+      .mcp
+      .call_tool(
+        "browser_wait_for",
+        json!({ "time": POST_NAVIGATE_WAIT_SECS }),
+      )
+      .await
+      .map_err(|e| WebFetchError::Mcp(e.to_string()))?;
 
-    let body: MdResponse = response.json().await?;
-    if !body.success {
-      let msg = body.error.unwrap_or_else(|| "unknown error".to_string());
-      return Err(WebFetchError::Scrape(msg));
-    }
+    let evaluate = self
+      .mcp
+      .call_tool("browser_evaluate", json!({ "function": HTML_DUMP_SCRIPT }))
+      .await
+      .map_err(|e| WebFetchError::Mcp(e.to_string()))?;
 
-    let markdown = body.markdown.ok_or(WebFetchError::NoMarkdown)?;
-    let (markdown, truncated) = truncate_chars(&markdown, max_chars);
+    let html = extract_html(&evaluate)
+      .ok_or_else(|| WebFetchError::NoHtml(url.to_string()))?;
+
+    let config = ExtractionConfig::default();
+    let result = extract_bytes(html.as_bytes(), "text/html", &config)
+      .await
+      .map_err(|e| WebFetchError::Kreuzberg(e.to_string()))?;
+    let markdown = result.content;
+    let total_chars = markdown.chars().count();
+
+    let target_relative = format!("{BASKET_DIR}/{}.md", url_hash(url));
+    self
+      .workspace
+      .write_file(Path::new(&target_relative), &markdown)
+      .await
+      .map_err(|e| WebFetchError::Workspace(e.to_string()))?;
+
+    let inline = if total_chars <= INLINE_THRESHOLD_CHARS {
+      Some(markdown)
+    } else {
+      None
+    };
+
     Ok(WebFetchOutput {
       url: url.to_string(),
-      markdown,
-      truncated,
+      path: target_relative,
+      total_chars,
+      markdown: inline,
     })
   }
 }
 
-fn truncate_chars(text: &str, max_chars: usize) -> (String, bool) {
+/// Pulls the HTML string out of a `browser_evaluate` MCP result.
+/// playwright-mcp delivers the evaluate return value as one or more
+/// `RawContent::Text` chunks; non-text variants (resource refs, image
+/// blobs) are not produced for `browser_evaluate` and are ignored if
+/// they ever appear. When the JS return value is a primitive string,
+/// the chunk content is JSON-encoded with surrounding quotes, so we
+/// concatenate the text chunks, unwrap the outer JSON-string layer
+/// when it parses, and otherwise hand the raw buffer to kreuzberg.
+fn extract_html(result: &CallToolResult) -> Option<String> {
+  let mut buffer = String::new();
+  for content in result.content.iter() {
+    if let Some(text) = content_text(content) {
+      buffer.push_str(text);
+    }
+  }
+  let trimmed = buffer.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+  // Playwright wraps the evaluate return in JSON quotes when it's a
+  // primitive string. If the buffer parses as a JSON string, unwrap it.
+  if let Ok(Value::String(inner)) = serde_json::from_str::<Value>(trimmed)
+    && !inner.is_empty()
+  {
+    return Some(inner);
+  }
+  Some(buffer)
+}
+
+fn content_text(content: &Content) -> Option<&str> {
+  match &content.raw {
+    RawContent::Text(text) => Some(text.text.as_str()),
+    _ => None,
+  }
+}
+
+fn url_hash(url: &str) -> String {
+  let digest = Sha256::digest(url.as_bytes());
+  digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
   if text.chars().count() <= max_chars {
-    return (text.to_string(), false);
+    return text.to_string();
   }
   let mut out: String = text.chars().take(max_chars).collect();
-  out.push_str("\n\n... (truncated)");
-  (out, true)
+  out.push_str("\n\n... (preview truncated)");
+  out
 }

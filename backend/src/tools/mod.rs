@@ -13,8 +13,19 @@
 //! handles balloon and thinking rows on the active turn; tool inline
 //! notes appear as side rows around them.
 //!
-//! - [`web_fetch`]: HTTP GET, content extraction, and HTML->Markdown
-//!   conversion for low-token-count consumption.
+//! - [`web_fetch`]: fetches a URL through the Playwright MCP sidecar,
+//!   converts the page to Markdown via [`kreuzberg`], and saves the full
+//!   content to `basket/<url-hash>.md`. Small pages also return the body
+//!   inline; large pages return a path plus preview that the agent reads
+//!   via [`workspace`].
+//! - [`download_file`]: saves an arbitrary HTTP response body to
+//!   `basket/` and returns the path. Filename comes from
+//!   `Content-Disposition`, the URL basename, or a hash. Streams progress
+//!   into the inline note row like [`python::RunPythonTool`] streams
+//!   stdout.
+//! - [`document_to_md`]: converts a local document (PDF, XLSX, DOCX,
+//!   image-with-text, …) into Markdown via [`kreuzberg`], saved next to
+//!   the source as `<basename>.md`.
 //! - [`python`]: write-and-run Python scripts inside the room workspace,
 //!   gated on `ruff` and `ty` checks. Streams stdout / stderr into the
 //!   inline note's body as the script runs.
@@ -33,6 +44,8 @@
 //!   `/v1/rooms/:code/{activate,deactivate}` HTTP routes instead.
 
 pub mod do_nothing;
+pub mod document_to_md;
+pub mod download_file;
 pub mod get_inline_note_detail;
 pub mod leader;
 pub mod pause_room;

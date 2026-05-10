@@ -176,16 +176,42 @@ impl RoomWorkspace {
     relative: &Path,
     contents: &str,
   ) -> Result<()> {
+    self.write_file_bytes(relative, contents.as_bytes()).await
+  }
+
+  /// Writes (or overwrites) an arbitrary byte buffer. Used by
+  /// `download_file` for binary payloads (PDF/XLSX/ZIP) where utf-8
+  /// validation is not appropriate.
+  pub async fn write_file_bytes(
+    &self,
+    relative: &Path,
+    contents: &[u8],
+  ) -> Result<()> {
     let path = self.resolve(relative)?;
     if let Some(parent) = path.parent() {
       fs::create_dir_all(parent).await.with_context(|| {
         format!("failed to ensure parent dir {}", parent.display())
       })?;
     }
-    fs::write(&path, contents.as_bytes())
+    fs::write(&path, contents)
       .await
       .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+  }
+
+  /// Creates (or truncates) a file under the workspace and returns the
+  /// open async handle. Used by `download_file` to stream large HTTP
+  /// bodies straight to disk instead of buffering them in memory.
+  pub async fn create_file(&self, relative: &Path) -> Result<fs::File> {
+    let path = self.resolve(relative)?;
+    if let Some(parent) = path.parent() {
+      fs::create_dir_all(parent).await.with_context(|| {
+        format!("failed to ensure parent dir {}", parent.display())
+      })?;
+    }
+    fs::File::create(&path)
+      .await
+      .with_context(|| format!("failed to create {}", path.display()))
   }
 }
 

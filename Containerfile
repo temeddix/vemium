@@ -8,11 +8,15 @@ COPY frontend/src ./src
 COPY frontend/dist ./dist
 RUN deno task bundle
 
-FROM rust:1.88-bookworm AS backend-build
+FROM rust:1.91-trixie AS backend-build
 WORKDIR /app/backend
 
 RUN apt-get update \
-  && apt-get install -y libsqlite3-dev && rm -rf /var/lib/apt/lists/*
+  && apt-get install -y --no-install-recommends \
+  libsqlite3-dev libtesseract-dev libleptonica-dev \
+  clang cmake \
+  pkg-config \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY backend/Cargo.toml backend/Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs \
@@ -24,7 +28,7 @@ RUN cargo build --release --offline
 
 COPY --from=frontend-build /app/frontend/dist ./dist
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 WORKDIR /app
 
 # Install Python (for `uv run python`), uv (for the project + venv mgmt),
@@ -34,11 +38,10 @@ WORKDIR /app
 # global ruff is handy as a sanity-check during image build.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-       libsqlite3-0 \
-       python3 \
-       python3-venv \
-       ca-certificates \
-       curl \
+  libsqlite3-0 \
+  libtesseract5 tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor tesseract-ocr-osd \
+  python3 python3-venv \
+  ca-certificates curl \
   && rm -rf /var/lib/apt/lists/* \
   && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
   && mkdir -p /data
