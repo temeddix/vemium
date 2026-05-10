@@ -14,7 +14,7 @@
 //! [`StageSink`], so callers (notably the `run_python` tool) can stream
 //! the script's output into the room timeline as it happens.
 
-use crate::workspace::{PYPROJECT_FILENAME, RoomWorkspace};
+use crate::workspace::RoomWorkspace;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -30,8 +30,6 @@ const LINT_STAGE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum captured bytes per stream (stdout / stderr) before truncation.
 const MAX_CAPTURED_BYTES: usize = 16 * 1024;
-
-const DEFAULT_PYPROJECT: &str = include_str!("python_workspace_template.toml");
 
 /// Async callback the runner invokes for every stdout / stderr line as a
 /// stage executes. Stage labels (e.g. `python`, `ruff format`) are
@@ -95,20 +93,6 @@ impl PythonRunner {
     }
   }
 
-  pub async fn ensure_pyproject(&self) -> Result<()> {
-    let pyproject = self.workspace.root.join(PYPROJECT_FILENAME);
-    if fs::try_exists(&pyproject)
-      .await
-      .context("failed to probe pyproject.toml")?
-    {
-      return Ok(());
-    }
-    fs::write(&pyproject, DEFAULT_PYPROJECT)
-      .await
-      .with_context(|| format!("failed to write {}", pyproject.display()))?;
-    Ok(())
-  }
-
   /// Runs the full pipeline against `script_relative_path` (must already
   /// exist on disk). When `sink` is `Some`, every captured line is
   /// forwarded as it arrives so the caller can stream stage output into
@@ -129,7 +113,6 @@ impl PythonRunner {
     let script_arg = script_relative_path
       .to_str()
       .context("script path is not valid UTF-8")?;
-    self.ensure_pyproject().await?;
 
     let mut stages = Vec::new();
 

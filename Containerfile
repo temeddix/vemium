@@ -31,19 +31,14 @@ COPY --from=frontend-build /app/frontend/dist ./dist
 FROM debian:trixie-slim AS runtime
 WORKDIR /app
 
-# Install Python (for `uv run python`), uv (for the project + venv mgmt),
-# ruff (formatter + linter), and ty (type checker). uv is fetched as a
-# static binary to keep the image small. ruff and ty come in as uv-managed
-# tools per project, so they don't need to be installed globally — but a
-# global ruff is handy as a sanity-check during image build.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
   libsqlite3-0 \
   libtesseract5 tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor tesseract-ocr-osd \
-  python3 python3-venv \
   ca-certificates curl \
   && rm -rf /var/lib/apt/lists/* \
   && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+  && uv python install 3.14 \
   && mkdir -p /data
 
 COPY --from=backend-build \

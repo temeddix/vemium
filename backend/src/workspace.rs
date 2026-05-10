@@ -20,9 +20,6 @@ use zip::write::{SimpleFileOptions, ZipWriter};
 /// than this are truncated to keep tool outputs in a sane token budget.
 const MAX_READ_BYTES: usize = 64 * 1024;
 
-/// Name of the Python dependency manifest expected at the room root.
-pub const PYPROJECT_FILENAME: &str = "pyproject.toml";
-
 /// Absolute path to the parent directory holding all room workspaces.
 /// Constructed once from [`crate::config::AppConfig::data_root`].
 #[derive(Debug, Clone)]
