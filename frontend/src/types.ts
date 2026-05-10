@@ -220,10 +220,6 @@ export interface CreateRoomRequest {
 
 export type UpdateRoomRequest = Partial<CreateRoomRequest>;
 
-export interface CloneRoomRequest {
-  includeHistory: boolean;
-}
-
 // -- Live in-memory state -------------------------------------------------
 
 export interface ReportBuffer {

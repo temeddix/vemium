@@ -57,7 +57,7 @@ function readInputValue(target: EventTarget | null): string {
  * draft form; the parent calls `show()` to open the dialog, which reseeds
  * the form to its empty defaults so leftover values from a prior aborted
  * creation don't bleed in. Emits `te-room-created` with the new room on
- * success so the parent can navigate to `/room/:code`.
+ * success so the parent can navigate to `/:code`.
  */
 @customElement("te-create-room-dialog")
 export class CreateRoomDialog extends LitElement {

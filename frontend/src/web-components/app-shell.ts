@@ -42,7 +42,7 @@ export class AppShell extends LitElement {
         `,
     },
     {
-      path: "/room/:code",
+      path: "/:code",
       render: (params) =>
         html`
           <te-room-chat-page code="${params["code"] ?? ""}"></te-room-chat-page>

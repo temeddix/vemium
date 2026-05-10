@@ -8,6 +8,7 @@
 //! readable `code`:
 //!
 //! ```text
+//! GET    /:code/files/*path
 //! GET    /v1/health
 //! GET    /v1/settings
 //! PUT    /v1/settings
@@ -25,7 +26,6 @@
 //! GET    /v1/rooms/:code/reports
 //! GET    /v1/rooms/:code/reports/:seq
 //! GET    /v1/rooms/:code/files
-//! GET    /v1/rooms/:code/files/raw?path=...
 //! GET    /v1/rooms/:code/files/download
 //! GET    /v1/rooms/:code/stream    (WebSocket)
 //! ```
@@ -52,7 +52,7 @@ use crate::streaming::{RoomReceiver, WsEvent};
 use crate::workspace::DebateRoot;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -60,7 +60,6 @@ use axum::{Json, Router};
 use chrono::Utc;
 use cron::Schedule;
 use rand::Rng;
-use serde::Deserialize;
 use serde_json::json;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -90,9 +89,9 @@ pub fn create_router(state: AppState) -> Router {
     .route("/v1/rooms/:code/reports", get(list_reports))
     .route("/v1/rooms/:code/reports/:sequence", get(get_report))
     .route("/v1/rooms/:code/files", get(list_room_files))
-    .route("/v1/rooms/:code/files/raw", get(get_room_file))
     .route("/v1/rooms/:code/files/download", get(download_room_files))
     .route("/v1/rooms/:code/stream", get(stream_room_events))
+    .route("/:code/files/*path", get(get_room_file))
     .fallback_service(
       ServeDir::new("dist")
         .not_found_service(ServeFile::new("dist/index.html")),
@@ -406,14 +405,14 @@ async fn update_room(
 }
 
 /// Creates a new room that copies every per-room setting from `code`. The
-/// clone always starts active with fresh timestamps and a freshly-allocated
-/// code. When `include_history` is true the source room's chat events are
-/// duplicated into the clone before the runtime spawns; reports and
-/// workspace artifacts are never carried over.
+/// clone always starts deactivated with fresh timestamps, a freshly
+/// allocated code, and an empty transcript. Chat history is never carried
+/// over because the workspace folder isn't duplicated, and copied messages
+/// would point at files that only exist on the source room's disk.
 async fn clone_room(
   Path(code): Path<String>,
   State(state): State<AppState>,
-  Json(payload): Json<CloneRoomRequest>,
+  Json(_payload): Json<CloneRoomRequest>,
 ) -> impl IntoResponse {
   let source = {
     let rooms = state.rooms.read().await;
@@ -449,16 +448,6 @@ async fn clone_room(
   let Some(_) = db::insert_room(&state.db, &new_room).await.report() else {
     return internal("failed to persist room");
   };
-
-  if payload.include_history
-    && db::clone_room_events(&state.db, &source.code, &new_room.code)
-      .await
-      .report()
-      .is_none()
-  {
-    db::delete_room(&state.db, &new_room.code).await.report();
-    return internal("failed to copy chat history");
-  }
 
   let Some(_) = runtime::spawn_room(state.clone(), new_room.clone())
     .await
@@ -656,11 +645,6 @@ async fn get_report(
 
 // -- Workspace files -------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct FilePathQuery {
-  path: String,
-}
-
 /// Lists every regular file under the room workspace (recursive). Hidden
 /// entries like `.venv` are filtered upstream by [`crate::workspace`].
 async fn list_room_files(
@@ -697,11 +681,11 @@ async fn list_room_files(
 }
 
 /// Streams a single workspace file back to the browser. The path comes in as
-/// a forward-slash relative string and is fed through
+/// the wildcard segment of `/:code/files/*path`; axum hands us the raw
+/// suffix with forward slashes preserved, which is fed through
 /// [`crate::workspace::RoomWorkspace::resolve`] for sandbox enforcement.
 async fn get_room_file(
-  Path(code): Path<String>,
-  Query(params): Query<FilePathQuery>,
+  Path((code, path)): Path<(String, String)>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
   if !state.rooms.read().await.contains_key(&code) {
@@ -714,7 +698,7 @@ async fn get_room_file(
   else {
     return internal("failed to open room workspace");
   };
-  let relative = PathBuf::from(&params.path);
+  let relative = PathBuf::from(&path);
   let Some(bytes) = workspace.read_file_raw(&relative).await.report() else {
     return not_found("file");
   };

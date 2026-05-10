@@ -15,10 +15,12 @@ interface DialogElement extends HTMLElement {
 }
 
 /**
- * Modal that confirms a room clone and lets the user opt into copying the
- * source room's chat history. Owns its own open state; the parent calls
- * `show(room)` to open the dialog. On success, emits `te-cloned` with the
- * newly created room so the parent can navigate to it.
+ * Modal that confirms a room clone. Owns its own open state; the parent
+ * calls `show(room)` to open the dialog. On success, emits `te-cloned` with
+ * the newly created room so the parent can navigate to it. The clone always
+ * starts with an empty chat log because the workspace folder (`basket/`,
+ * `src/`, etc.) is not duplicated and any messages referencing those files
+ * would be left dangling.
  */
 @customElement("te-clone-room-dialog")
 export class CloneRoomDialog extends LitElement {
@@ -27,9 +29,6 @@ export class CloneRoomDialog extends LitElement {
 
   @state()
   private accessor room: Room | null = null;
-
-  @state()
-  private accessor includeHistory = false;
 
   @state()
   private accessor busy = false;
@@ -104,7 +103,6 @@ export class CloneRoomDialog extends LitElement {
   /** Seeds the form for the given room and opens the dialog. */
   show(room: Room): void {
     this.room = room;
-    this.includeHistory = false;
     this.errorText = null;
     this.busy = false;
     const dialog = this.#dialogRef.value;
@@ -148,43 +146,10 @@ export class CloneRoomDialog extends LitElement {
       <div class="form-grid">
         <p class="summary">
           Create a new room with the same settings as
-          <span class="summary-topic">${sourceLabel}</span>. The duplicate starts active
-          with a freshly generated code; reports and workspace files are not carried
-          over.
+          <span class="summary-topic">${sourceLabel}</span>. The duplicate starts
+          deactivated with a freshly generated code and an empty chat log; reports and
+          workspace files are not carried over.
         </p>
-        <label class="form-field">
-          <span class="form-label">
-            <span>Include chat history</span>
-            <wa-icon
-              id="tip-clone-history"
-              class="help-icon"
-              name="circle-question"
-              tabindex="0"
-            ></wa-icon>
-          </span>
-          <wa-tooltip for="tip-clone-history" placement="top">
-            When enabled, every persisted message from the source room is copied into
-            the duplicate so the personas resume from the same transcript. Otherwise
-            the duplicate starts with an empty log.
-          </wa-tooltip>
-          <wa-select
-            size="small"
-            .value="${this.includeHistory ? "include" : "exclude"}"
-            @change="${(e: Event): void => {
-              const target = e.target;
-              if (
-                !(target instanceof HTMLElement) || !("value" in target)
-              ) {
-                return;
-              }
-              const value = (target as Record<string, unknown>)["value"];
-              this.includeHistory = value === "include";
-            }}"
-          >
-            <wa-option value="exclude">Start with empty chat log</wa-option>
-            <wa-option value="include">Copy every prior message</wa-option>
-          </wa-select>
-        </label>
       </div>
     `;
   }
@@ -196,9 +161,7 @@ export class CloneRoomDialog extends LitElement {
     }
     this.busy = true;
     this.errorText = null;
-    const cloned = await this.store.cloneRoom(room.code, {
-      includeHistory: this.includeHistory,
-    });
+    const cloned = await this.store.cloneRoom(room.code);
     this.busy = false;
     if (cloned === null) {
       this.errorText = "Duplicate failed. See the error banner for details.";

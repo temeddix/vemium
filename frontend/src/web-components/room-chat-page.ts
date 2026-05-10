@@ -33,7 +33,7 @@ declare global {
 }
 
 /**
- * Top-level page for `/room/:code`. Owns the chat-stream subscription
+ * Top-level page for `/:code`. Owns the chat-stream subscription
  * lifecycle (delegated to the store) and renders the timeline plus the
  * human composer. The timeline is a flat list of [`RoomEvent`] rows; all
  * kinds (bubbles, thinking, tool inline notes) render via
@@ -57,6 +57,9 @@ export class RoomChatPage extends LitElement {
   @state()
   private accessor detailDialog: DetailDialogState | null = null;
 
+  @state()
+  private accessor imageDialogSrc: string | null = null;
+
   /** Wall-clock tick used to redraw the paused-room countdown each second. */
   @state()
   private accessor nowMillis = Date.now();
@@ -64,6 +67,8 @@ export class RoomChatPage extends LitElement {
   #countdownInterval: ReturnType<typeof setInterval> | null = null;
 
   #detailDialogRef: Ref<HTMLElement & { open: boolean }> = createRef();
+
+  #imageDialogRef: Ref<HTMLElement & { open: boolean }> = createRef();
 
   #settingsDialogRef: Ref<HTMLElementTagNameMap["te-room-settings-dialog"]> =
     createRef();
@@ -220,6 +225,18 @@ export class RoomChatPage extends LitElement {
       overflow-wrap: anywhere;
       font-family: var(--wa-font-family-code, ui-monospace, monospace);
     }
+
+    wa-dialog.image-dialog {
+      --width: min(90vw, 64rem);
+    }
+
+    .image-dialog-img {
+      display: block;
+      max-width: 100%;
+      max-height: 75vh;
+      margin: 0 auto;
+      border-radius: 0.5rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -353,6 +370,19 @@ export class RoomChatPage extends LitElement {
           <div class="detail-dialog-body">${this.detailDialog.body}</div>
         `}
       </wa-dialog>
+      <wa-dialog
+        ${ref(this.#imageDialogRef)}
+        label="Image"
+        class="image-dialog"
+      >
+        ${this.imageDialogSrc === null ? nothing : html`
+          <img
+            class="image-dialog-img"
+            src="${this.imageDialogSrc}"
+            alt=""
+          />
+        `}
+      </wa-dialog>
     `;
   }
 
@@ -413,7 +443,11 @@ export class RoomChatPage extends LitElement {
       `;
     }
     return html`
-      <div class="scroll" @te-open-detail="${this.#onOpenDetail}">
+      <div
+        class="scroll"
+        @te-open-detail="${this.#onOpenDetail}"
+        @te-open-image="${this.#onOpenImage}"
+      >
         ${repeat(
           events,
           (event) => entryKey(event),
@@ -438,7 +472,10 @@ export class RoomChatPage extends LitElement {
       : nothing;
     return html`
       ${separator}
-      <te-chat-message .event="${event}"></te-chat-message>
+      <te-chat-message
+        .event="${event}"
+        room-code="${this.code}"
+      ></te-chat-message>
     `;
   }
 
@@ -459,6 +496,18 @@ export class RoomChatPage extends LitElement {
       duration: formatDuration(elapsedMs),
     };
     const dialog = this.#detailDialogRef.value;
+    if (dialog !== undefined) {
+      dialog.open = true;
+    }
+  };
+
+  #onOpenImage = (raw: Event): void => {
+    const src = (raw as CustomEvent<string>).detail;
+    if (typeof src !== "string" || src === "") {
+      return;
+    }
+    this.imageDialogSrc = src;
+    const dialog = this.#imageDialogRef.value;
     if (dialog !== undefined) {
       dialog.open = true;
     }

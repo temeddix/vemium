@@ -419,16 +419,12 @@ pub struct CreateMessageRequest {
 
 /// Input for `POST /v1/rooms/:code/clone`. The new room copies every
 /// per-room setting (topic, goal, schedules, etc.) but always starts
-/// deactivated
-/// with fresh timestamps. When `include_history` is true the source room's
-/// chat events are duplicated into the clone; reports and workspace
-/// artifacts are never carried over.
+/// deactivated with fresh timestamps. Chat events, reports, and workspace
+/// artifacts are never carried over: the clone shares only configuration
+/// with the source.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CloneRoomRequest {
-  #[serde(default)]
-  pub include_history: bool,
-}
+pub struct CloneRoomRequest {}
 
 /// Input for `PATCH /v1/rooms/:code`. Every field is optional; absent fields
 /// leave the room's current value unchanged.

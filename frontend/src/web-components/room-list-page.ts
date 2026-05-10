@@ -22,7 +22,7 @@ interface DialogElement extends HTMLElement {
 
 /**
  * Top-level page for `/`. Lists every loaded room and lets the user open
- * one (navigates to `/room/:code`), create a new one (opens the
+ * one (navigates to `/:code`), create a new one (opens the
  * create-room dialog), or jump to global settings.
  *
  * The room actions live behind a `...` dropdown so the header collapses
@@ -305,7 +305,7 @@ export class RoomListPage extends LitElement {
             <li class="room-card">
               <a
                 class="room-card-link"
-                href="/room/${room.code}"
+                href="/${room.code}"
                 @click="${(e: MouseEvent): void => this.#onRoomClick(e, room)}"
               >
                 ${room.topic !== ""
@@ -370,7 +370,7 @@ export class RoomListPage extends LitElement {
   }
 
   #navigateToRoom(code: string): void {
-    const url = `/room/${code}`;
+    const url = `/${code}`;
     globalThis.history.pushState({}, "", url);
     globalThis.dispatchEvent(new PopStateEvent("popstate"));
   }

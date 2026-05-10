@@ -3,6 +3,7 @@ import {
   type PersonaColor,
   resolveAvatarColor,
 } from "@/app/chat";
+import { BACKEND_BASE_URL } from "@/app/config";
 import type { RoomEvent } from "@/app/types";
 import { css, html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -33,6 +34,14 @@ const TICKER_THRESHOLD_MS = 3_000;
 export class ChatMessage extends LitElement {
   @property({ attribute: false })
   accessor event: RoomEvent | null = null;
+
+  /**
+   * Room code used to resolve workspace-relative paths (e.g.
+   * `basket/foo.png`) inside Markdown images. Without it, embedded images
+   * fall back to relative URLs that won't resolve against the SPA route.
+   */
+  @property({ type: String, attribute: "room-code" })
+  accessor roomCode = "";
 
   /** Wall-clock tick used to redraw the streaming "Took Ns" ticker. */
   @state()
@@ -116,6 +125,15 @@ export class ChatMessage extends LitElement {
 
     .markdown wa-markdown {
       display: block;
+    }
+
+    .markdown wa-markdown img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 0.5rem;
+      display: block;
+      margin: 0.4rem 0;
+      cursor: zoom-in;
     }
 
     .breadcrumb {
@@ -264,7 +282,7 @@ export class ChatMessage extends LitElement {
           ? html`
             <wa-spinner style="font-size: 0.85rem;"></wa-spinner>
           `
-          : renderMarkdown(event.content)}
+          : renderMarkdown(event.content, this.roomCode)}
       </div>
     `;
   }
@@ -330,16 +348,41 @@ export class ChatMessage extends LitElement {
   }
 }
 
-function renderMarkdown(content: string) {
+/**
+ * Stamped onto each `<wa-markdown>` we manage so we attach the
+ * MutationObserver exactly once per element instead of leaking a fresh one
+ * on every Lit re-render.
+ */
+const ENHANCEMENTS_ATTACHED = Symbol("imageEnhancementsAttached");
+
+/**
+ * Stamped onto each `<img>` after we wire the lightbox click listener,
+ * so MutationObserver re-runs don't pile up duplicate handlers.
+ */
+const LIGHTBOX_DATA_ATTR = "data-lightbox-wired";
+
+/** Custom event a chat-message dispatches when an embedded image is clicked. */
+export const OPEN_IMAGE_EVENT = "te-open-image";
+
+interface ManagedMarkdownEl extends HTMLElement {
+  [ENHANCEMENTS_ATTACHED]?: true;
+  renderMarkdown?: () => void;
+}
+
+function renderMarkdown(content: string, roomCode: string) {
   if (content === "") {
     return nothing;
   }
+  const base = roomCode === ""
+    ? null
+    : new URL(`/${roomCode}/files/`, BACKEND_BASE_URL).href;
   return html`
     <div class="markdown">
-      <wa-markdown ${ref((el) => {
-        if (el === undefined) {
+      <wa-markdown ${ref((raw) => {
+        if (raw === undefined) {
           return;
         }
+        const el = raw as ManagedMarkdownEl;
         let script = el.querySelector('script[type="text/markdown"]');
         if (script === null) {
           script = document.createElement("script");
@@ -348,9 +391,75 @@ function renderMarkdown(content: string) {
         }
         if (script.textContent !== content) {
           script.textContent = content;
-          (el as { renderMarkdown?: () => void }).renderMarkdown?.();
+          el.renderMarkdown?.();
         }
+        attachImageEnhancements(el, base);
       })}></wa-markdown>
     </div>
   `;
+}
+
+/**
+ * Watches `wa-markdown`'s rendered output and (a) rewrites
+ * workspace-relative image `src` attributes (e.g. `basket/foo.png`) to the
+ * live raw-file URL when a `base` is available, and (b) wires a click
+ * listener on each image so the chat page can show it in a lightbox.
+ * Doing this in the rendered DOM lets us delegate Markdown parsing to
+ * `wa-markdown` itself and skip writing our own image-syntax matcher.
+ */
+function attachImageEnhancements(
+  el: ManagedMarkdownEl,
+  base: string | null,
+): void {
+  if (el[ENHANCEMENTS_ATTACHED] === true) {
+    return;
+  }
+  el[ENHANCEMENTS_ATTACHED] = true;
+  const target = el.shadowRoot ?? el;
+  const apply = (): void => processImagesIn(target, base);
+  apply();
+  const observer = new MutationObserver(apply);
+  observer.observe(target, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["src"],
+  });
+}
+
+function processImagesIn(root: ParentNode, base: string | null): void {
+  for (const img of root.querySelectorAll<HTMLImageElement>("img[src]")) {
+    if (base !== null) {
+      rewriteIfRelative(img, base);
+    }
+    wireLightbox(img);
+  }
+}
+
+function rewriteIfRelative(img: HTMLImageElement, base: string): void {
+  const src = img.getAttribute("src");
+  if (
+    src === null || src === "" ||
+    src.startsWith("/") || src.startsWith("#") ||
+    URL.canParse(src)
+  ) {
+    return;
+  }
+  img.setAttribute("src", new URL(src, base).href);
+}
+
+function wireLightbox(img: HTMLImageElement): void {
+  if (img.getAttribute(LIGHTBOX_DATA_ATTR) !== null) {
+    return;
+  }
+  img.setAttribute(LIGHTBOX_DATA_ATTR, "");
+  img.addEventListener("click", () => {
+    img.dispatchEvent(
+      new CustomEvent<string>(OPEN_IMAGE_EVENT, {
+        detail: img.currentSrc !== "" ? img.currentSrc : img.src,
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  });
 }

@@ -1,7 +1,6 @@
 import { BACKEND_BASE_URL } from "@/app/config";
 import type {
   AppSettings,
-  CloneRoomRequest,
   CreateMessageRequest,
   CreateRoomRequest,
   ProviderConfig,
@@ -252,10 +251,7 @@ export class DashboardStore {
     }
   }
 
-  async cloneRoom(
-    roomCode: string,
-    request: CloneRoomRequest,
-  ): Promise<Room | null> {
+  async cloneRoom(roomCode: string): Promise<Room | null> {
     this.#patch({ errorMessage: null });
     try {
       const response = await fetch(
@@ -263,7 +259,7 @@ export class DashboardStore {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
+          body: "{}",
         },
       );
       if (!response.ok) {
@@ -354,8 +350,8 @@ export class DashboardStore {
   }
 
   workspaceFileUrl(roomCode: string, path: string): string {
-    const params = new URLSearchParams({ path });
-    return `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files/raw?${params.toString()}`;
+    const encoded = path.split("/").map(encodeURIComponent).join("/");
+    return `${BACKEND_BASE_URL}/${roomCode}/files/${encoded}`;
   }
 
   workspaceDownloadUrl(roomCode: string): string {
