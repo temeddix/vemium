@@ -8,6 +8,10 @@
 //! operations it exposes are sandboxed under the room root: callers can
 //! only refer to children by relative path, and the resolution helpers
 //! reject any path that escapes via `..`, symlinks, or absolute paths.
+//!
+//! Every directory we create here is chmodded to `0o777` on Unix because
+//! the Playwright sidecar shares this volume but runs as `node` (UID
+//! 1000).
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::io::{BufReader, Cursor};
@@ -48,7 +52,31 @@ impl DebateRoot {
     fs::create_dir_all(&path).await.with_context(|| {
       format!("failed to create room workspace at {}", path.display())
     })?;
+    apply_loose_perms(&path).await;
     Ok(RoomWorkspace { root: path })
+  }
+}
+
+/// Apply `0o777` perms to `path`. Unix-only; a no-op on other platforms.
+/// Logged at debug on failure so a missing capability does not abort the
+/// caller (we already own the file, so the only realistic failure is a
+/// read-only filesystem).
+async fn apply_loose_perms(path: &Path) {
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o777);
+    if let Err(error) = fs::set_permissions(path, perms).await {
+      tracing::debug!(
+        path = %path.display(),
+        ?error,
+        "failed to apply loose perms",
+      );
+    }
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = path;
   }
 }
 
@@ -186,9 +214,7 @@ impl RoomWorkspace {
   ) -> Result<()> {
     let path = self.resolve(relative)?;
     if let Some(parent) = path.parent() {
-      fs::create_dir_all(parent).await.with_context(|| {
-        format!("failed to ensure parent dir {}", parent.display())
-      })?;
+      ensure_loose_dir_chain(&self.root, parent).await?;
     }
     fs::write(&path, contents)
       .await
@@ -202,14 +228,47 @@ impl RoomWorkspace {
   pub async fn create_file(&self, relative: &Path) -> Result<fs::File> {
     let path = self.resolve(relative)?;
     if let Some(parent) = path.parent() {
-      fs::create_dir_all(parent).await.with_context(|| {
-        format!("failed to ensure parent dir {}", parent.display())
-      })?;
+      ensure_loose_dir_chain(&self.root, parent).await?;
     }
     fs::File::create(&path)
       .await
       .with_context(|| format!("failed to create {}", path.display()))
   }
+}
+
+/// Walks each component from `base` down to `target` (which must be a
+/// descendant of `base`), creating any missing directory and chmodding
+/// every component to `0o777` so the Playwright sidecar can write inside
+/// directories the app made. `base` itself is also chmodded so a workspace
+/// root that pre-dates the loose-perms fix gets repaired on first write.
+async fn ensure_loose_dir_chain(base: &Path, target: &Path) -> Result<()> {
+  let relative = target.strip_prefix(base).with_context(|| {
+    format!(
+      "internal: {} is not under workspace root {}",
+      target.display(),
+      base.display(),
+    )
+  })?;
+  let mut current = base.to_path_buf();
+  apply_loose_perms(&current).await;
+  for component in relative.components() {
+    let Component::Normal(name) = component else {
+      continue;
+    };
+    current.push(name);
+    match fs::create_dir(&current).await {
+      Ok(()) => {}
+      Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+      Err(error) => {
+        return Err(
+          anyhow!(error)
+            .context(format!("failed to create {}", current.display())),
+        );
+      }
+    }
+    apply_loose_perms(&current).await;
+  }
+  Ok(())
 }
 
 async fn walk_files(
