@@ -53,9 +53,9 @@ impl DebateRoot {
     })?;
     for sub in ["src", "raw"] {
       let child = path.join(sub);
-      fs::create_dir_all(&child).await.with_context(|| {
-        format!("failed to create {}", child.display())
-      })?;
+      fs::create_dir_all(&child)
+        .await
+        .with_context(|| format!("failed to create {}", child.display()))?;
     }
     Ok(RoomWorkspace { root: path })
   }

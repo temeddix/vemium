@@ -463,10 +463,12 @@ where
     .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
     .tool(inputs.inline_note_tool);
+  let mut mcp_tool_names = std::collections::HashSet::new();
   if let Some(peer) = mcp.peer() {
     match peer.list_all_tools().await {
       Ok(tools) => {
         for tool in tools {
+          mcp_tool_names.insert(tool.name.to_string());
           server = server.rmcp_tool(tool, peer.clone());
         }
       }
@@ -488,7 +490,7 @@ where
     .stream_prompt(inputs.user_prompt)
     .with_history(inputs.history)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(session.clone()))
+    .with_hook(DebateHook::new(session.clone(), mcp_tool_names))
     .await;
 
   let mut final_text = String::new();
@@ -526,7 +528,10 @@ where
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(session.clone()))
+    .with_hook(DebateHook::new(
+      session.clone(),
+      std::collections::HashSet::new(),
+    ))
     .await;
   let mut final_text = String::new();
   while let Some(item) = stream.next().await {
@@ -561,7 +566,10 @@ where
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(session.clone()))
+    .with_hook(DebateHook::new(
+      session.clone(),
+      std::collections::HashSet::new(),
+    ))
     .await;
   let mut final_text = String::new();
   while let Some(item) = stream.next().await {
@@ -597,7 +605,10 @@ where
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(session.clone()))
+    .with_hook(DebateHook::new(
+      session.clone(),
+      std::collections::HashSet::new(),
+    ))
     .await;
   while let Some(item) = stream.next().await {
     if let MultiTurnStreamItem::StreamAssistantItem(content) =
