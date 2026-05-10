@@ -102,7 +102,7 @@ impl Tool for DocumentToMdTool {
           "path": {
             "type": "string",
             "description": "Workspace-relative path to the source document \
-                            (e.g. 'basket/2025_Q1_BS.pdf')."
+                            (e.g. 'raw/2025_Q1_BS.pdf')."
           }
         },
         "required": ["path"]

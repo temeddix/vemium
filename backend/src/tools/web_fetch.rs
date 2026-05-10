@@ -14,7 +14,7 @@
 //! 3. `browser_evaluate(() => document.documentElement.outerHTML)` to
 //!    capture the page after JS has settled.
 //! 4. [`kreuzberg::extract_bytes`] with `text/html` MIME hint.
-//! 5. Save the full markdown to `basket/<url-hash>.md`. Small results are
+//! 5. Save the full markdown to `raw/<url-hash>.md`. Small results are
 //!    inlined in the response; larger results return only the path plus a
 //!    preview, leaving the agent to read selectively via `workspace`.
 //!
@@ -48,7 +48,7 @@ pub const NAME: &str = "web_fetch";
 pub const INLINE_NOTE_OK: &str = "Fetched URL";
 pub const INLINE_NOTE_FAIL: &str = "Web fetch failed";
 
-const BASKET_DIR: &str = "basket";
+const RAW_DIR: &str = "raw";
 /// Char count above which the body is omitted from the tool result and
 /// the agent must read the saved file.
 const INLINE_THRESHOLD_CHARS: usize = 12_000;
@@ -123,7 +123,7 @@ impl Tool for WebFetchTool {
       name: NAME.to_string(),
       description: "Fetches an HTML page through a real browser \
                     (JavaScript and SPAs work) and returns it as Markdown. \
-                    Full content is always saved to `basket/<url-hash>.md`. \
+                    Full content is always saved to `raw/<url-hash>.md`. \
                     Small pages also return the body inline; large pages \
                     return only the path and a preview that you read or \
                     grep through the workspace tools."
@@ -219,7 +219,7 @@ impl WebFetchTool {
     let markdown = result.content;
     let total_chars = markdown.chars().count();
 
-    let target_relative = format!("{BASKET_DIR}/{}.md", url_hash(url));
+    let target_relative = format!("{RAW_DIR}/{}.md", url_hash(url));
     self
       .workspace
       .write_file(Path::new(&target_relative), &markdown)

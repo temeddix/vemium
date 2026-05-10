@@ -2,7 +2,10 @@
 //!
 //! Each room owns a directory at `<data_root>/debate/<room-slug>/`. Inside it
 //! lives a Python project: `pyproject.toml`, `.venv/`, a `src/` directory for
-//! Python scripts, and a `basket/` directory for other files.
+//! Python scripts, and a `raw/` directory for non-code assets (downloads,
+//! screenshots, fetched HTML, …). `src/` and `raw/` are pre-created at
+//! workspace open time so tools that write directly into them
+//! (`browser_take_screenshot`, …) never trip on a missing parent.
 //!
 //! [`RoomWorkspace`] is the only public entry point. All filesystem
 //! operations it exposes are sandboxed under the room root: callers can
@@ -35,8 +38,8 @@ impl DebateRoot {
     }
   }
 
-  /// Returns the workspace handle for `code`, ensuring the directory exists
-  /// on disk.
+  /// Returns the workspace handle for `code`, ensuring the room root and
+  /// the `src/` + `raw/` standard subdirectories all exist on disk.
   pub async fn workspace_for(&self, code: &str) -> Result<RoomWorkspace> {
     if !is_valid_code(code) {
       bail!(
@@ -48,6 +51,12 @@ impl DebateRoot {
     fs::create_dir_all(&path).await.with_context(|| {
       format!("failed to create room workspace at {}", path.display())
     })?;
+    for sub in ["src", "raw"] {
+      let child = path.join(sub);
+      fs::create_dir_all(&child).await.with_context(|| {
+        format!("failed to create {}", child.display())
+      })?;
+    }
     Ok(RoomWorkspace { root: path })
   }
 }

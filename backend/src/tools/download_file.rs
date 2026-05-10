@@ -1,5 +1,5 @@
 //! `download_file` tool: saves an arbitrary HTTP response body into the
-//! room workspace under `basket/`.
+//! room workspace under `raw/`.
 //!
 //! The agent supplies a full HTTP envelope (URL, method, headers, optional
 //! body) so DART-style flows that hide a download behind a JS handler can
@@ -37,7 +37,7 @@ pub const NAME: &str = "download_file";
 pub const INLINE_NOTE_OK: &str = "Downloaded file";
 pub const INLINE_NOTE_FAIL: &str = "Download failed";
 
-const BASKET_DIR: &str = "basket";
+const RAW_DIR: &str = "raw";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 /// Minimum interval between inline-note progress updates. Prevents the
 /// row from being rewritten faster than the UI can render.
@@ -78,14 +78,14 @@ pub struct DownloadFileArgs {
   /// Request body (only meaningful for POST/PUT). Sent verbatim.
   #[serde(default)]
   pub body: Option<String>,
-  /// Override the auto-derived filename. Stored under `basket/`.
+  /// Override the auto-derived filename. Stored under `raw/`.
   #[serde(default)]
   pub filename: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadFileOutput {
-  /// Workspace-relative path of the saved file (always under `basket/`).
+  /// Workspace-relative path of the saved file (always under `raw/`).
   pub path: String,
   pub size_bytes: u64,
   pub content_type: Option<String>,
@@ -115,7 +115,7 @@ impl Tool for DownloadFileTool {
     ToolDefinition {
       name: NAME.to_string(),
       description: "Performs an HTTP request and saves the response body \
-                    under `basket/`. Use for binary downloads (PDF, XLSX, \
+                    under `raw/`. Use for binary downloads (PDF, XLSX, \
                     ZIP), authenticated endpoints (pass cookies via \
                     `headers`), or APIs returning non-HTML payloads. The \
                     filename comes from `Content-Disposition`, the URL \
@@ -147,7 +147,7 @@ impl Tool for DownloadFileTool {
           "filename": {
             "type": "string",
             "description": "Override the saved filename. Stored under \
-                            basket/."
+                            raw/."
           }
         },
         "required": ["url"]
@@ -240,7 +240,7 @@ impl DownloadFileTool {
       .or_else(|| filename_from_url(&args.url))
       .unwrap_or_else(|| envelope_hash_filename(args, content_type.as_deref()));
 
-    let target_relative = format!("{BASKET_DIR}/{resolved_filename}");
+    let target_relative = format!("{RAW_DIR}/{resolved_filename}");
 
     let mut file = self
       .workspace

@@ -18,7 +18,7 @@ interface DialogElement extends HTMLElement {
  * Modal that confirms a room clone. Owns its own open state; the parent
  * calls `show(room)` to open the dialog. On success, emits `te-cloned` with
  * the newly created room so the parent can navigate to it. The clone always
- * starts with an empty chat log because the workspace folder (`basket/`,
+ * starts with an empty chat log because the workspace folder (`raw/`,
  * `src/`, etc.) is not duplicated and any messages referencing those files
  * would be left dangling.
  */

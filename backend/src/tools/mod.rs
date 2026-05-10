@@ -15,11 +15,11 @@
 //!
 //! - [`web_fetch`]: fetches a URL through the Playwright MCP sidecar,
 //!   converts the page to Markdown via [`kreuzberg`], and saves the full
-//!   content to `basket/<url-hash>.md`. Small pages also return the body
+//!   content to `raw/<url-hash>.md`. Small pages also return the body
 //!   inline; large pages return a path plus preview that the agent reads
 //!   via [`workspace`].
 //! - [`download_file`]: saves an arbitrary HTTP response body to
-//!   `basket/` and returns the path. Filename comes from
+//!   `raw/` and returns the path. Filename comes from
 //!   `Content-Disposition`, the URL basename, or a hash. Streams progress
 //!   into the inline note row like [`python::RunPythonTool`] streams
 //!   stdout.

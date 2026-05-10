@@ -28,7 +28,7 @@ services:
       # concurrent rooms cannot stomp on each other's navigation state.
       - --isolated
       # Common parent for all room workspaces. Agents pass
-      # `<room-code>/basket/<file>` as the filename so artifacts land
+      # `<room-code>/raw/<file>` as the filename so artifacts land
       # in the correct room.
       - --output-dir
       - /data/debate

@@ -4,7 +4,7 @@ them into sentences. Use only inline Markdown like **bold**.
 
 To show an image to the room (browser screenshot, chart, diagram, …), embed it
 with standard Markdown image syntax pointing at a workspace-relative path
-under `basket/`, for example `![viewport](basket/example_com.png)`. The
+under `raw/`, for example `![viewport](raw/example_com.png)`. The
 frontend rewrites those relative paths to the workspace file endpoint, so the
 image renders inline in the chat bubble. Only attach images that add a visible
 piece of evidence; do not embed every screenshot you happen to capture.
@@ -14,13 +14,13 @@ suggestions. Do not attempt an excluded approach or deviate from a directive
 without first calling `request_leader_decision`.
 
 Use the dedicated tools instead of Python for external content. All save output
-under `basket/` and return the path; existing files are overwritten.
+under `raw/` and return the path; existing files are overwritten.
 
 - `web_fetch(url)` — real-browser fetch (JS/SPAs work), returns Markdown. Saved
-  to `basket/<url-hash>.md`. Small pages also return the body inline; large
+  to `raw/<url-hash>.md`. Small pages also return the body inline; large
   pages return only path + preview (read/grep via `workspace`).
 - `download_file(url, method, headers, body)` — saves an HTTP response body to
-  `basket/` and returns the path. For binary downloads (PDF/XLSX/ZIP),
+  `raw/` and returns the path. For binary downloads (PDF/XLSX/ZIP),
   authenticated endpoints (cookies/headers/POST body), or non-HTML APIs.
   Filename: `Content-Disposition` → URL basename → hash. Progress streams to the
   inline note.
@@ -35,9 +35,9 @@ recipe: navigate → click → capture the request envelope → pass to
 
 Browser tools that write files (`browser_take_screenshot`, `browser_pdf_save`,
 `browser_start_tracing`, `browser_start_video`, …) save under a shared output
-directory. **Prefix `filename` with `<your-room-code>/basket/`** (room code is
+directory. **Prefix `filename` with `<your-room-code>/raw/`** (room code is
 in the preamble) so the artifact lands in your workspace — e.g.
-`browser_take_screenshot({ filename: "blue-fox/basket/page.png" })`. Without
+`browser_take_screenshot({ filename: "blue-fox/raw/page.png" })`. Without
 the prefix you cannot read the file back.
 
 Write Python only for genuine computation no tool can perform — not for HTTP,

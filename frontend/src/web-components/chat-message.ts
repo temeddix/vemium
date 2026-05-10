@@ -37,7 +37,7 @@ export class ChatMessage extends LitElement {
 
   /**
    * Room code used to resolve workspace-relative paths (e.g.
-   * `basket/foo.png`) inside Markdown images. Without it, embedded images
+   * `raw/foo.png`) inside Markdown images. Without it, embedded images
    * fall back to relative URLs that won't resolve against the SPA route.
    */
   @property({ type: String, attribute: "room-code" })
@@ -401,7 +401,7 @@ function renderMarkdown(content: string, roomCode: string) {
 
 /**
  * Watches `wa-markdown`'s rendered output and (a) rewrites
- * workspace-relative image `src` attributes (e.g. `basket/foo.png`) to the
+ * workspace-relative image `src` attributes (e.g. `raw/foo.png`) to the
  * live raw-file URL when a `base` is available, and (b) wires a click
  * listener on each image so the chat page can show it in a lightbox.
  * Doing this in the rendered DOM lets us delegate Markdown parsing to
