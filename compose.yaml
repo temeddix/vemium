@@ -19,6 +19,8 @@ services:
       - "8931"
       - --host
       - 0.0.0.0
+      - --allowed-hosts
+      - "*"
     init: true
     restart: unless-stopped
     shm_size: 1g
