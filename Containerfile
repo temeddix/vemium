@@ -34,12 +34,17 @@ WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
   libsqlite3-0 \
-  libtesseract5 tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor tesseract-ocr-osd \
+  libtesseract5 tesseract-ocr tesseract-ocr-eng \
+  tesseract-ocr-kor tesseract-ocr-osd \
   ca-certificates curl \
   && rm -rf /var/lib/apt/lists/* \
   && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
-  && uv python install 3.14 \
-  && mkdir -p /data
+  && useradd -m -u 1000 app \
+  && mkdir -p /data \
+  && chown 1000:1000 /data
+
+USER 1000
+RUN uv python install 3.14
 
 COPY --from=backend-build \
   /app/backend/target/release/vemium_backend /usr/local/bin/vemium_backend
