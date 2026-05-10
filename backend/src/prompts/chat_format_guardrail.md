@@ -26,6 +26,13 @@ the Playwright MCP tools (`browser_navigate`, `browser_click`,
 recipe: navigate → click → capture the request envelope → pass to
 `download_file`.
 
+Browser tools that write files (`browser_take_screenshot`, `browser_pdf_save`,
+`browser_start_tracing`, `browser_start_video`, …) save under a shared output
+directory. **Prefix `filename` with `<your-room-code>/basket/`** (room code is
+in the preamble) so the artifact lands in your workspace — e.g.
+`browser_take_screenshot({ filename: "blue-fox/basket/page.png" })`. Without
+the prefix you cannot read the file back.
+
 Write Python only for genuine computation no tool can perform — not for HTTP,
 downloads, or document conversion.
 

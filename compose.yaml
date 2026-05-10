@@ -14,6 +14,8 @@ services:
 
   playwright:
     image: mcr.microsoft.com/playwright/mcp:latest
+    volumes:
+      - vemium-data:/data
     command:
       - --port
       - "8931"
@@ -24,6 +26,11 @@ services:
       # This gives every debate room its own browser so
       # concurrent rooms cannot stomp on each other's navigation state.
       - --isolated
+      # Common parent for all room workspaces. Agents pass
+      # `<room-code>/basket/<file>` as the filename so artifacts land
+      # in the correct room.
+      - --output-dir
+      - /data/debate
     init: true
     restart: unless-stopped
     shm_size: 8g

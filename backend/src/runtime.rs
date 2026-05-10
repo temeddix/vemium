@@ -1130,7 +1130,12 @@ pub(crate) fn wake_schedule_label(room: &Room) -> String {
 }
 
 pub(crate) fn build_room_preamble(room: &Room) -> String {
-  let mut out = format!("Topic: {}\nGoal: {}", room.topic, room.goal);
+  let mut out = format!(
+    "Room code: {code}\nTopic: {topic}\nGoal: {goal}",
+    code = room.code,
+    topic = room.topic,
+    goal = room.goal,
+  );
   if let Some(instruction) = room.instruction.as_deref()
     && !instruction.trim().is_empty()
   {
