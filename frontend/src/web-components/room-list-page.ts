@@ -141,9 +141,8 @@ export class RoomListPage extends LitElement {
       font-weight: 600;
       overflow: hidden;
       text-overflow: ellipsis;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
+      white-space: nowrap;
+      min-width: 0;
     }
 
     .room-code {
