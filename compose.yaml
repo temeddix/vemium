@@ -16,6 +16,7 @@ services:
     image: mcr.microsoft.com/playwright/mcp:latest
     volumes:
       - vemium-data:/data
+    working_dir: /data/debate
     command:
       - --port
       - "8931"
