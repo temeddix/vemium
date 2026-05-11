@@ -372,6 +372,26 @@ pub async fn finish_event(
   Ok(())
 }
 
+/// Closes any rows left open (completed_at IS NULL) from a previous run.
+/// Called when a room loop starts so stale streaming rows don't linger.
+pub async fn close_incomplete_events(
+  pool: &SqlitePool,
+  room_code: &str,
+) -> Result<()> {
+  let now = Utc::now().to_rfc3339();
+  sqlx::query(
+    "UPDATE room_events
+     SET completed_at = ?, success = 0
+     WHERE room_code = ? AND completed_at IS NULL",
+  )
+  .bind(now)
+  .bind(room_code)
+  .execute(pool)
+  .await
+  .context("failed to close incomplete events")?;
+  Ok(())
+}
+
 pub async fn load_room_events(
   pool: &SqlitePool,
   room_code: &str,

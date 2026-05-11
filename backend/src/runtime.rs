@@ -157,6 +157,10 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
     .await
     .context("failed to ensure room workspace")?;
 
+  db::close_incomplete_events(&state.db, &room_code)
+    .await
+    .context("failed to close incomplete events on room start")?;
+
   let mut tasks = JoinSet::new();
   tasks.spawn(run_debate_loop(
     state.clone(),

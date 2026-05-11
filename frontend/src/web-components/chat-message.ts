@@ -43,12 +43,7 @@ export class ChatMessage extends LitElement {
   @property({ type: String, attribute: "room-code" })
   accessor roomCode = "";
 
-  /**
-   * True only when this is the last (currently active) row and
-   * `event.completedAt` is still null. Rows that finished before the
-   * current one are rendered the same as fully completed rows even when
-   * their `completedAt` is null.
-   */
+  /** True while the row has not yet received a `completedAt` timestamp. */
   @property({ type: Boolean })
   accessor streaming = false;
 
@@ -198,11 +193,6 @@ export class ChatMessage extends LitElement {
       word-wrap: break-word;
       overflow-wrap: anywhere;
     }
-
-    .spinner {
-      margin-left: var(--content-indent);
-      font-size: 0.85rem;
-    }
   `;
 
   override connectedCallback(): void {
@@ -302,7 +292,7 @@ export class ChatMessage extends LitElement {
     const ticker = streaming ? this.#streamingTicker(event.timestamp) : null;
     return html`
       <div class="header">
-        ${this.#renderHeader(color, false, event.agent)}
+        ${this.#renderHeader(color, streaming, event.agent)}
         <button
           type="button"
           class="breadcrumb"
@@ -321,10 +311,6 @@ export class ChatMessage extends LitElement {
       ${streaming && hasBody
         ? html`
           <pre class="body">${event.detail}</pre>
-        `
-        : streaming
-        ? html`
-          <wa-spinner class="spinner"></wa-spinner>
         `
         : nothing}
     `;

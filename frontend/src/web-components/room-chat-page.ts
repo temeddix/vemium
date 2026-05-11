@@ -478,7 +478,7 @@ export class RoomChatPage extends LitElement {
         </div>
       `
       : nothing;
-    const isActiveRow = idx === events.length - 1 && event.completedAt === null;
+    const isActiveRow = event.completedAt === null;
     return html`
       ${separator}
       <te-chat-message
