@@ -5,9 +5,10 @@ import {
 } from "@/app/chat";
 import { BACKEND_BASE_URL } from "@/app/config";
 import type { RoomEvent } from "@/app/types";
-import { css, html, LitElement, nothing } from "lit";
+import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { ref } from "lit/directives/ref.js";
+import "./event-hovercard.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -50,6 +51,12 @@ export class ChatMessage extends LitElement {
   /** Wall-clock tick used to redraw the streaming "Took Ns" ticker. */
   @state()
   private accessor nowMillis = Date.now();
+
+  @state()
+  private accessor _hoverAnchor: Element | null = null;
+
+  @state()
+  private accessor _hoverRefId: number | null = null;
 
   #tickerInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -193,6 +200,18 @@ export class ChatMessage extends LitElement {
       word-wrap: break-word;
       overflow-wrap: anywhere;
     }
+
+    .event-ref {
+      color: var(--wa-color-brand-text-loud);
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      cursor: pointer;
+      border-radius: 0.2rem;
+    }
+
+    .event-ref:hover {
+      background: var(--wa-color-brand-fill-quiet);
+    }
   `;
 
   override connectedCallback(): void {
@@ -236,12 +255,25 @@ export class ChatMessage extends LitElement {
     const rowClasses = ["row", isSelf ? "is-self" : ""].filter(Boolean).join(
       " ",
     );
+    const idAttr = event.id !== null ? String(event.id) : "";
+    const rowId = `row-${event.sequence}`;
     return html`
-      <div class="${rowClasses}">
+      <div id="${rowId}" class="${rowClasses}" data-event-id="${idAttr}">
         ${isInline
           ? this.#renderInline(event, color, streaming)
           : this.#renderBubble(event, color, streaming, isSelf)}
       </div>
+      ${event.id !== null
+        ? html`
+          <wa-tooltip for="${rowId}" placement="left">#${event.id}</wa-tooltip>
+        `
+        : nothing}
+      <te-event-hovercard
+        .anchorEl="${this._hoverAnchor}"
+        .eventId="${this._hoverRefId}"
+        room-code="${this.roomCode}"
+        ?active="${this._hoverRefId !== null}"
+      ></te-event-hovercard>
     `;
   }
 
@@ -276,7 +308,11 @@ export class ChatMessage extends LitElement {
           ${this.#renderHeader(color, streaming, event.agent)}
         </div>
       `}
-      <div class="bubble">
+      <div
+        class="bubble"
+        @mouseover="${this.#onRefMouseOver}"
+        @mouseout="${this.#onRefMouseOut}"
+      >
         ${event.content === "" && streaming
           ? html`
             <wa-spinner style="font-size: 0.85rem;"></wa-spinner>
@@ -291,7 +327,11 @@ export class ChatMessage extends LitElement {
     const tooltipDisabled = !streaming && !hasBody;
     const ticker = streaming ? this.#streamingTicker(event.timestamp) : null;
     return html`
-      <div class="header">
+      <div
+        class="header"
+        @mouseover="${this.#onRefMouseOver}"
+        @mouseout="${this.#onRefMouseOut}"
+      >
         ${this.#renderHeader(color, streaming, event.agent)}
         <button
           type="button"
@@ -300,7 +340,7 @@ export class ChatMessage extends LitElement {
           title="${event.content}"
           @click="${this.#onInlineClick}"
         >
-          ${event.content}
+          ${parseEventRefs(event.content)}
         </button>
         ${ticker !== null
           ? html`
@@ -308,7 +348,7 @@ export class ChatMessage extends LitElement {
           `
           : nothing}
       </div>
-      ${streaming && hasBody
+      ${streaming
         ? html`
           <pre class="body">${event.detail}</pre>
         `
@@ -333,6 +373,32 @@ export class ChatMessage extends LitElement {
     );
   }
 
+  #onRefMouseOver(e: MouseEvent): void {
+    const target = e.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const ref = target.closest(".event-ref");
+    if (!(ref instanceof HTMLElement)) {
+      return;
+    }
+    const id = Number(ref.dataset["refId"]);
+    if (!Number.isFinite(id)) {
+      return;
+    }
+    this._hoverAnchor = ref;
+    this._hoverRefId = id;
+  }
+
+  #onRefMouseOut(e: MouseEvent): void {
+    const related = e.relatedTarget;
+    if (related instanceof Element && related.closest(".event-ref") !== null) {
+      return;
+    }
+    this._hoverRefId = null;
+    this._hoverAnchor = null;
+  }
+
   /** Returns the `Took Ns` text or null if the row started under 3s ago. */
   #streamingTicker(startedAt: string): string | null {
     const elapsed = this.nowMillis - Date.parse(startedAt);
@@ -341,6 +407,53 @@ export class ChatMessage extends LitElement {
     }
     return formatDuration(elapsed);
   }
+}
+
+/**
+ * Splits `text` on `#N` patterns and returns a mix of plain strings and
+ * `<span class="event-ref">` elements. No regex: walks the string once
+ * looking for `#` followed by one or more ASCII digits.
+ */
+function parseEventRefs(text: string): TemplateResult | string {
+  const parts: Array<TemplateResult | string> = [];
+  let i = 0;
+  let start = 0;
+
+  while (i < text.length) {
+    if (text[i] !== "#") {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < text.length && text[j] >= "0" && text[j] <= "9") {
+      j++;
+    }
+    if (j === i + 1) {
+      i++;
+      continue;
+    }
+    if (i > start) {
+      parts.push(text.slice(start, i));
+    }
+    const id = text.slice(i + 1, j);
+    parts.push(
+      html`
+        <span class="event-ref" data-ref-id="${id}">#${id}</span>
+      `,
+    );
+    i = j;
+    start = j;
+  }
+
+  if (parts.length === 0) {
+    return text;
+  }
+  if (start < text.length) {
+    parts.push(text.slice(start));
+  }
+  return html`
+    ${parts}
+  `;
 }
 
 /**

@@ -8,7 +8,7 @@ use crate::event_log::EventLog;
 use crate::llm::{LeaderDecisionTurnInputs, build_chat_client};
 use crate::models::{ProviderConfig, RoomEventKind};
 use crate::runtime::TurnSession;
-use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
+use crate::tools::get_room_event::GetRoomEventTool;
 use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -139,7 +139,7 @@ impl Tool for RequestLeaderDecisionTool {
       self.schedule_label.clone(),
       self.log.clone(),
     );
-    let inline_note_tool = GetInlineNoteDetailTool::new(
+    let room_event_tool = GetRoomEventTool::new(
       self.state.clone(),
       self.room_code.clone(),
       self.log.clone(),
@@ -161,7 +161,7 @@ impl Tool for RequestLeaderDecisionTool {
         system_prompt: self.system_prompt(),
         user_prompt: self.user_prompt(&args),
         pause_tool,
-        inline_note_tool,
+        room_event_tool,
         session: leader_session.clone(),
       })
       .await;
@@ -196,8 +196,9 @@ impl RequestLeaderDecisionTool {
        would be wasteful, call `pause_room` to pause the debate. The \
        resume scheduler will check whether to wake it on its own \
        cadence.\n\n\
-       Use `get_inline_note_detail` if a transcript breadcrumb's body \
-       (e.g. a Python traceback) is needed to ground your answer.\n\n{}",
+       Use `get_room_event` if a transcript event's body \
+       (e.g. a Python traceback or a compacted message) is needed to \
+       ground your answer.\n\n{}",
       self.context_preamble,
     )
   }

@@ -36,7 +36,7 @@ use crate::models::{
 use crate::python_runner::PythonRunner;
 use crate::streaming::{ReportId, RoomStream, WsEvent, report_id_for};
 use crate::tools::do_nothing::DoNothingTool;
-use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
+use crate::tools::get_room_event::GetRoomEventTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
 use crate::tools::resume_room::ResumeRoomTool;
@@ -86,13 +86,14 @@ const CHAT_FORMAT_GUARDRAIL: &str =
 const PYTHON_STYLE_GUIDE: &str = include_str!("prompts/python_style.md");
 
 /// Reminder injected into every persona system prompt that consumes the
-/// transcript. Explains the inline-note breadcrumb syntax and the
-/// `get_inline_note_detail` lookup tool.
-const INLINE_NOTE_TOOL_HINT: &str = "Inline-note breadcrumbs in the \
-  transcript are tagged `(inline-note #N by Author)`. The visible label is \
-  usually enough context, but when you need the full body (e.g. the \
-  traceback behind a `Python script run fail` note), call \
-  `get_inline_note_detail` with `id=N`.";
+/// transcript. Explains the `#N` reference syntax and the `get_room_event`
+/// lookup tool.
+const INLINE_NOTE_TOOL_HINT: &str = "Events in the transcript are tagged \
+  with `#N` identifiers (e.g. `(inline-note #42 by Author)` or \
+  `speaker (#42):` for bubbles). The visible label is usually enough \
+  context, but when you need the full body (e.g. the traceback behind a \
+  `Python script run fail` note, or a message compacted out of the \
+  transcript), call `get_room_event` with `id=N`.";
 
 const STEERING_INLINE_NOTE: &str = "Appeared for steering";
 const KICKOFF_INLINE_NOTE: &str = "Opened with plan";
@@ -188,11 +189,7 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
     handle,
     room_code.clone(),
   ));
-  state
-    .room_tasks
-    .lock()
-    .await
-    .insert(room_code, tasks);
+  state.room_tasks.lock().await.insert(room_code, tasks);
 
   Ok(())
 }
@@ -514,7 +511,7 @@ async fn run_chat_turn(
   );
   let do_nothing_tool =
     DoNothingTool::new(log.clone(), persona.name.to_string());
-  let inline_note_tool = GetInlineNoteDetailTool::new(
+  let room_event_tool = GetRoomEventTool::new(
     state.clone(),
     room.code.clone(),
     log.clone(),
@@ -536,7 +533,7 @@ async fn run_chat_turn(
       runner,
       leader_tool,
       do_nothing_tool,
-      inline_note_tool,
+      room_event_tool,
       session: session.clone(),
       mcp,
     })
@@ -645,7 +642,7 @@ async fn evaluate_scheduled_resume(
     ResumeRoomTool::new(state.clone(), room.code.clone(), log.clone());
   let do_nothing_tool =
     DoNothingTool::new(log.clone(), LEADER_AGENT.to_string());
-  let inline_note_tool = GetInlineNoteDetailTool::new(
+  let room_event_tool = GetRoomEventTool::new(
     state.clone(),
     room.code.clone(),
     log.clone(),
@@ -663,7 +660,7 @@ async fn evaluate_scheduled_resume(
       user_prompt,
       resume_tool,
       do_nothing_tool,
-      inline_note_tool,
+      room_event_tool,
       session: session.clone(),
     })
     .await;
@@ -875,7 +872,7 @@ async fn run_leader_turn(
     LEADER_AGENT.to_string(),
     RoomEventKind::LeaderNote,
   ));
-  let inline_note_tool = GetInlineNoteDetailTool::new(
+  let room_event_tool = GetRoomEventTool::new(
     state.clone(),
     room.code.clone(),
     log.clone(),
@@ -896,7 +893,7 @@ async fn run_leader_turn(
       system_prompt,
       user_prompt,
       session: session.clone(),
-      inline_note_tool,
+      room_event_tool,
       pause_tool,
     })
     .await;
@@ -1226,9 +1223,10 @@ fn format_transcript_line(event: &RoomEvent) -> String {
     RoomEventKind::Thinking | RoomEventKind::Summary => String::new(),
     RoomEventKind::AgentChat
     | RoomEventKind::LeaderNote
-    | RoomEventKind::UserChat => {
-      format!("[{timestamp}] {speaker}: {}", event.content)
-    }
+    | RoomEventKind::UserChat => match event.id {
+      Some(id) => format!("[{timestamp}] {speaker} (#{id}): {}", event.content),
+      None => format!("[{timestamp}] {speaker}: {}", event.content),
+    },
   }
 }
 

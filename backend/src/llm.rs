@@ -43,12 +43,14 @@ const COMPACTION_PROMPT: &str = "You are the room leader. Summarize the \
   following debate transcript concisely. Capture key arguments, decisions, \
   findings, tool outputs, and the current state of the discussion. The \
   summary replaces the original transcript as context for future turns — \
-  make it self-contained. Write in past tense.";
+  make it self-contained. Write in past tense. When referencing important \
+  messages or inline notes, preserve their `#N` identifiers (e.g. `#42`) \
+  so they can be retrieved later with the `get_room_event` tool.";
 use crate::runtime::{DebateHook, ReportHook, TurnSession};
 use crate::tools::do_nothing::DoNothingTool;
 use crate::tools::document_to_md::DocumentToMdTool;
 use crate::tools::download_file::DownloadFileTool;
-use crate::tools::get_inline_note_detail::GetInlineNoteDetailTool;
+use crate::tools::get_room_event::GetRoomEventTool;
 use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::pause_room::PauseRoomTool;
 use crate::tools::python::RunPythonTool;
@@ -93,7 +95,7 @@ pub struct DebateTurnInputs {
   pub runner: PythonRunner,
   pub leader_tool: RequestLeaderDecisionTool,
   pub do_nothing_tool: DoNothingTool,
-  pub inline_note_tool: GetInlineNoteDetailTool,
+  pub room_event_tool: GetRoomEventTool,
   pub session: Arc<TurnSession>,
   /// Singleton MCP setup for the Playwright sidecar. Always present.
   /// When the sidecar was unreachable at startup, `mcp.peer()` returns
@@ -110,7 +112,7 @@ pub struct ResumeGateInputs {
   pub user_prompt: String,
   pub resume_tool: ResumeRoomTool,
   pub do_nothing_tool: DoNothingTool,
-  pub inline_note_tool: GetInlineNoteDetailTool,
+  pub room_event_tool: GetRoomEventTool,
   pub session: Arc<TurnSession>,
 }
 
@@ -121,7 +123,7 @@ pub struct SteeringTurnInputs {
   pub system_prompt: String,
   pub user_prompt: String,
   pub session: Arc<TurnSession>,
-  pub inline_note_tool: GetInlineNoteDetailTool,
+  pub room_event_tool: GetRoomEventTool,
   pub pause_tool: PauseRoomTool,
 }
 
@@ -134,7 +136,7 @@ pub struct LeaderDecisionTurnInputs {
   pub system_prompt: String,
   pub user_prompt: String,
   pub pause_tool: PauseRoomTool,
-  pub inline_note_tool: GetInlineNoteDetailTool,
+  pub room_event_tool: GetRoomEventTool,
   pub session: Arc<TurnSession>,
 }
 
@@ -468,7 +470,7 @@ where
     .tool(RunShellTool::new(workspace, log, author))
     .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
-    .tool(inputs.inline_note_tool);
+    .tool(inputs.room_event_tool);
   let mut mcp_tool_names = std::collections::HashSet::new();
   if let Some(peer) = mcp.peer() {
     match peer.list_all_tools().await {
@@ -527,7 +529,7 @@ where
 {
   let agent = builder
     .preamble(&inputs.system_prompt)
-    .tool(inputs.inline_note_tool)
+    .tool(inputs.room_event_tool)
     .tool(inputs.pause_tool)
     .build();
   let session = inputs.session;
@@ -566,7 +568,7 @@ where
   let agent = builder
     .preamble(&inputs.system_prompt)
     .tool(inputs.pause_tool)
-    .tool(inputs.inline_note_tool)
+    .tool(inputs.room_event_tool)
     .build();
   let session = inputs.session;
   let mut stream = agent
@@ -605,7 +607,7 @@ where
     .preamble(&inputs.system_prompt)
     .tool(inputs.resume_tool)
     .tool(inputs.do_nothing_tool)
-    .tool(inputs.inline_note_tool)
+    .tool(inputs.room_event_tool)
     .build();
   let session = inputs.session;
   let mut stream = agent

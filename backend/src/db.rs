@@ -410,22 +410,23 @@ pub async fn load_room_events(
   rows.into_iter().map(parse_event_row).collect()
 }
 
-/// Loads a single inline-note row by primary key. Used by the
-/// `get_inline_note_detail` tool so personas can pull the click-to-reveal
-/// expansion of an inline note they spotted in the transcript.
-pub async fn load_inline_note(
+/// Loads a single room-event row by primary key regardless of kind. Used by
+/// the `get_room_event` tool and the REST endpoint so agents and the frontend
+/// can retrieve any event that may have been compacted out of the live
+/// transcript.
+pub async fn load_room_event(
   pool: &SqlitePool,
   id: i64,
 ) -> Result<Option<RoomEvent>> {
   let row = sqlx::query(
     "SELECT id, room_code, sequence, kind, agent, content, detail, success, timestamp, completed_at
      FROM room_events
-     WHERE id = ? AND kind = 'inline_note'",
+     WHERE id = ?",
   )
   .bind(id)
   .fetch_optional(pool)
   .await
-  .context("failed to load inline note")?;
+  .context("failed to load room event")?;
   row.map(parse_event_row).transpose()
 }
 

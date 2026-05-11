@@ -5,6 +5,7 @@ import "./clone-room-dialog.ts";
 import "./create-room-dialog.ts";
 import "./cron-picker.ts";
 import "./dashboard-provider.ts";
+import "./event-hovercard.ts";
 import "./room-chat-page.ts";
 import "./room-files-dialog.ts";
 import "./room-list-page.ts";

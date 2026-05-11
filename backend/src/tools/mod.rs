@@ -35,8 +35,8 @@
 //!   important judgment is needed.
 //! - [`do_nothing`]: a shared opt-out tool used by personas and the leader
 //!   gates to record an inline note instead of producing a chat bubble.
-//! - [`get_inline_note_detail`]: looks up the click-to-reveal `detail`
-//!   body of an inline-note row by id.
+//! - [`get_room_event`]: looks up any room-event row by id; works for all
+//!   kinds, including compacted bubble content.
 //! - [`pause_room`] / [`resume_room`]: leader gate tools that pause or
 //!   resume the debate. They flip the [`crate::models::DebateState`]
 //!   axis only - the user-controlled
@@ -46,7 +46,7 @@
 pub mod do_nothing;
 pub mod document_to_md;
 pub mod download_file;
-pub mod get_inline_note_detail;
+pub mod get_room_event;
 pub mod leader;
 pub mod pause_room;
 pub mod python;
