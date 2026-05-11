@@ -241,6 +241,7 @@ export class RoomChatPage extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.#pinnedToBottom = true;
     this.#bindStore();
     globalThis.addEventListener("scroll", this.#onWindowScroll, {
       passive: true,
@@ -253,9 +254,15 @@ export class RoomChatPage extends LitElement {
 
   override updated(changed: Map<string, unknown>): void {
     if (changed.has("store")) {
-      this.#unsubscribe?.();
-      this.#unsubscribe = null;
+      const oldStore = changed.get("store") as DashboardStore | undefined;
+      if (oldStore !== undefined) {
+        this.#unsubscribe?.();
+        this.#unsubscribe = null;
+      }
       this.#bindStore();
+    }
+    if (changed.has("code")) {
+      this.#pinnedToBottom = true;
     }
     this.#syncSelection();
     if (this.#pinnedToBottom) {
@@ -267,6 +274,7 @@ export class RoomChatPage extends LitElement {
     globalThis.removeEventListener("scroll", this.#onWindowScroll);
     this.#unsubscribe?.();
     this.#unsubscribe = null;
+    this.#lastSelectedCode = null;
     if (this.#countdownInterval !== null) {
       clearInterval(this.#countdownInterval);
       this.#countdownInterval = null;
