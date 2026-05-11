@@ -470,11 +470,13 @@ export class RoomChatPage extends LitElement {
         </div>
       `
       : nothing;
+    const isActiveRow = idx === events.length - 1 && event.completedAt === null;
     return html`
       ${separator}
       <te-chat-message
         .event="${event}"
         room-code="${this.code}"
+        ?streaming="${isActiveRow}"
       ></te-chat-message>
     `;
   }
