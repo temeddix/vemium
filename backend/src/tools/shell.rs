@@ -97,9 +97,9 @@ impl Tool for RunShellTool {
       Ok(out) => {
         let ok = out.exit_code == Some(0) && !out.timed_out;
         let label = if ok {
-          "Shell command ok"
+          "Ran shell command"
         } else {
-          "Shell command failed"
+          "Failed to run shell command"
         };
         let mut detail = format!("$ {}\n\n", args.command);
         if !out.stdout.is_empty() {
@@ -117,7 +117,7 @@ impl Tool for RunShellTool {
         (label.to_string(), detail)
       }
       Err(e) => (
-        "Shell command failed".to_string(),
+        "Failed to run shell command".to_string(),
         format!("$ {}\n{}", args.command, e.0),
       ),
     };

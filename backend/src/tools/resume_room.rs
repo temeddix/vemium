@@ -17,7 +17,7 @@ use thiserror::Error;
 
 pub const NAME: &str = "resume_room";
 pub const INLINE_NOTE_TEXT: &str = "Resumed debate";
-pub const INLINE_NOTE_FAIL_TEXT: &str = "Resume failed";
+pub const INLINE_NOTE_FAIL_TEXT: &str = "Failed to resume debate";
 
 #[derive(Clone)]
 pub struct ResumeRoomTool {

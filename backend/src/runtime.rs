@@ -107,6 +107,7 @@ const LEADER_RESUME_GATE_USER_PROMPT: &str =
 
 const DEFAULT_WAKE_LABEL: &str = "Every hour";
 const THINKING_LABEL: &str = "Thinking";
+const THOUGHT_LABEL: &str = "Thought";
 const SECRETARY_AGENT: &str = "Secretary";
 /// Compaction fires when input_tokens exceeds this fraction of the model's
 /// context window.
@@ -273,7 +274,7 @@ impl TurnSession {
       return;
     }
     if let Some(ActiveRow::Thinking(row)) = active.take() {
-      row.finish(true).await;
+      row.finish_labeled(true, THOUGHT_LABEL).await;
     }
     let row = self
       .log
@@ -292,10 +293,12 @@ impl TurnSession {
   pub async fn close_active(&self) {
     let mut active = self.active.lock().await;
     if let Some(row) = active.take() {
-      let handle = match row {
-        ActiveRow::Thinking(row) | ActiveRow::Bubble(row) => row,
-      };
-      handle.finish(true).await;
+      match row {
+        ActiveRow::Thinking(row) => {
+          row.finish_labeled(true, THOUGHT_LABEL).await
+        }
+        ActiveRow::Bubble(row) => row.finish(true).await,
+      }
     }
   }
 
@@ -304,10 +307,12 @@ impl TurnSession {
   pub async fn finish(&self, success: bool) {
     let mut active = self.active.lock().await;
     if let Some(row) = active.take() {
-      let handle = match row {
-        ActiveRow::Thinking(row) | ActiveRow::Bubble(row) => row,
-      };
-      handle.finish(success).await;
+      match row {
+        ActiveRow::Thinking(row) => {
+          row.finish_labeled(success, THOUGHT_LABEL).await
+        }
+        ActiveRow::Bubble(row) => row.finish(success).await,
+      }
     }
   }
 }

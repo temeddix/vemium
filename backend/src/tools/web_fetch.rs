@@ -46,7 +46,7 @@ use thiserror::Error;
 
 pub const NAME: &str = "web_fetch";
 pub const INLINE_NOTE_OK: &str = "Fetched URL";
-pub const INLINE_NOTE_FAIL: &str = "Web fetch failed";
+pub const INLINE_NOTE_FAIL: &str = "Failed to fetch URL";
 
 const RAW_DIR: &str = "raw";
 /// Char count above which the body is omitted from the tool result and

@@ -19,7 +19,7 @@ use thiserror::Error;
 
 pub const NAME: &str = "request_leader_decision";
 pub const INLINE_NOTE_TEXT: &str = "Requested a decision from the leader";
-pub const INLINE_NOTE_FAIL_TEXT: &str = "Leader request failed";
+pub const INLINE_NOTE_FAIL_TEXT: &str = "Failed to request leader decision";
 
 #[derive(Clone)]
 pub struct RequestLeaderDecisionTool {

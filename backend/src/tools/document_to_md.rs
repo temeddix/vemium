@@ -23,7 +23,7 @@ use thiserror::Error;
 
 pub const NAME: &str = "document_to_md";
 pub const INLINE_NOTE_OK: &str = "Converted document";
-pub const INLINE_NOTE_FAIL: &str = "Document conversion failed";
+pub const INLINE_NOTE_FAIL: &str = "Failed to convert document";
 
 /// Char count above which the body is omitted from the tool result and the
 /// agent must read the saved file. Mirrors `web_fetch`'s threshold so the

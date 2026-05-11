@@ -258,6 +258,37 @@ impl RowHandle {
     });
   }
 
+  /// Like `finish`, but replaces the stored content label before persisting.
+  /// Used to rename a breadcrumb to its past-tense form at completion time.
+  pub async fn finish_labeled(&self, success: bool, content: &str) {
+    if self.finished.swap(true, Ordering::SeqCst) {
+      return;
+    }
+    let Some(id) = self.id else {
+      return;
+    };
+    let completed_at = Utc::now();
+    let mut state = self.state.lock().await;
+    state.content = content.to_string();
+    db::finish_event(
+      &self.log.state.db,
+      id,
+      &state.content,
+      &state.detail,
+      success,
+      completed_at,
+    )
+    .await
+    .report();
+    self.log.stream.send(WsEvent::RowFinished {
+      id,
+      content: state.content.clone(),
+      detail: state.detail.clone(),
+      success,
+      completed_at,
+    });
+  }
+
   fn is_finished(&self) -> bool {
     self.finished.load(Ordering::SeqCst)
   }

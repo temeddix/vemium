@@ -20,7 +20,7 @@ use thiserror::Error;
 
 pub const NAME: &str = "pause_room";
 pub const INLINE_NOTE_TEXT: &str = "Paused debate";
-pub const INLINE_NOTE_FAIL_TEXT: &str = "Pause failed";
+pub const INLINE_NOTE_FAIL_TEXT: &str = "Failed to pause debate";
 /// Stable agent label written to `room_events.agent` for leader rows.
 pub const LEADER_AGENT: &str = "Leader";
 

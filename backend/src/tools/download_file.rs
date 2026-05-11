@@ -35,7 +35,7 @@ use tokio::io::AsyncWriteExt;
 
 pub const NAME: &str = "download_file";
 pub const INLINE_NOTE_OK: &str = "Downloaded file";
-pub const INLINE_NOTE_FAIL: &str = "Download failed";
+pub const INLINE_NOTE_FAIL: &str = "Failed to download file";
 
 const RAW_DIR: &str = "raw";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);

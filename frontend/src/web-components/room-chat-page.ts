@@ -174,6 +174,9 @@ export class RoomChatPage extends LitElement {
     }
 
     .composer-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 0.1rem;
       padding: 0.2rem 0 0.4rem;
       position: sticky;
       bottom: 0;
@@ -185,7 +188,7 @@ export class RoomChatPage extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 0.2rem 0;
+      padding: 0.1rem 0;
       font-size: 0.75rem;
       color: var(--wa-color-text-quiet);
     }
@@ -329,12 +332,6 @@ export class RoomChatPage extends LitElement {
                 this.#filesDialogRef.value?.show(room.code)}"
             >
               Files
-            </wa-dropdown-item>
-            <wa-dropdown-item
-              variant="danger"
-              @click="${(): Promise<void> => this.#confirmDelete(room.code)}"
-            >
-              Delete
             </wa-dropdown-item>
           </wa-dropdown>
         </header>
@@ -542,15 +539,6 @@ export class RoomChatPage extends LitElement {
     } finally {
       this.sending = false;
     }
-  }
-
-  async #confirmDelete(code: string): Promise<void> {
-    const ok = globalThis.confirm("Delete this room? This cannot be undone.");
-    if (!ok) {
-      return;
-    }
-    await this.store.deleteRoom(code);
-    this.#onBack();
   }
 
   #onWindowScroll = (): void => {

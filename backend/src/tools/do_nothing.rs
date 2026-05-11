@@ -12,7 +12,7 @@ use serde_json::json;
 use thiserror::Error;
 
 pub const NAME: &str = "do_nothing";
-pub const INLINE_NOTE_TEXT: &str = "Decided to do nothing.";
+pub const INLINE_NOTE_TEXT: &str = "Decided to do nothing";
 
 #[derive(Clone)]
 pub struct DoNothingTool {

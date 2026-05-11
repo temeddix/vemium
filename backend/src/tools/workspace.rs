@@ -167,7 +167,7 @@ impl Tool for ListFilesTool {
         let error = WorkspaceToolError::from_anyhow(error);
         finish_err(
           &row,
-          "File listing failed".to_string(),
+          "Failed to list files".to_string(),
           format!("Directory: {dir_label}\n\n{}", error.0),
         )
         .await;
@@ -255,7 +255,7 @@ impl Tool for ReadFileTool {
         let error = WorkspaceToolError::from_anyhow(error);
         finish_err(
           &row,
-          "File read failed".to_string(),
+          "Failed to read file".to_string(),
           format!("Path: {}\n\n{}", args.path, error.0),
         )
         .await;
@@ -360,7 +360,7 @@ impl Tool for WriteFileTool {
         let error = WorkspaceToolError::from_anyhow(error);
         finish_err(
           &row,
-          "File write failed".to_string(),
+          "Failed to write file".to_string(),
           format!("Path: {}\n\n{}", args.path, error.0),
         )
         .await;
@@ -456,7 +456,7 @@ impl Tool for EditFileTool {
         let error = WorkspaceToolError::from_anyhow(error);
         finish_err(
           &row,
-          "File edit failed".to_string(),
+          "Failed to edit file".to_string(),
           format!("Path: {}\n\n{}", args.path, error.0),
         )
         .await;
@@ -468,7 +468,7 @@ impl Tool for EditFileTool {
     if count == 0 {
       let error =
         WorkspaceToolError(format!("`old_string` not found in {}", args.path));
-      finish_err(&row, "File edit failed".to_string(), error.0.clone()).await;
+      finish_err(&row, "Failed to edit file".to_string(), error.0.clone()).await;
       return Err(error);
     }
     if count > 1 {
@@ -477,7 +477,7 @@ impl Tool for EditFileTool {
          more surrounding context to make it unique",
         args.path
       ));
-      finish_err(&row, "File edit failed".to_string(), error.0.clone()).await;
+      finish_err(&row, "Failed to edit file".to_string(), error.0.clone()).await;
       return Err(error);
     }
 
@@ -505,7 +505,7 @@ impl Tool for EditFileTool {
         let error = WorkspaceToolError::from_anyhow(error);
         finish_err(
           &row,
-          "File edit failed".to_string(),
+          "Failed to edit file".to_string(),
           format!("Path: {}\n\n{}", args.path, error.0),
         )
         .await;

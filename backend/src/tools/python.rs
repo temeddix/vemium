@@ -31,8 +31,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub const NAME: &str = "run_python";
-pub const INLINE_NOTE_SUCCESS: &str = "Python script run success";
-pub const INLINE_NOTE_FAIL: &str = "Python script run fail";
+pub const INLINE_NOTE_SUCCESS: &str = "Ran Python script";
+pub const INLINE_NOTE_FAIL: &str = "Failed to run Python script";
 
 #[derive(Clone)]
 pub struct RunPythonTool {
