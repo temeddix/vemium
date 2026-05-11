@@ -6,8 +6,15 @@ To show an image to the room (browser screenshot, chart, diagram, …), embed it
 with standard Markdown image syntax pointing at a workspace-relative path
 under `raw/`, for example `![viewport](raw/example_com.png)`. The
 frontend rewrites those relative paths to the workspace file endpoint, so the
-image renders inline in the chat bubble. Only attach images that add a visible
-piece of evidence; do not embed every screenshot you happen to capture.
+image renders inline in the chat bubble.
+
+Take browser screenshots proactively and embed them whenever a visual would help
+the user understand something faster than text could — for example: after
+navigating to a page, after a UI action, when a visual layout matters, when
+confirming the state of a UI element. Prefer screenshots over describing
+cookies, JS values, or raw network data; a rendered page is almost always more
+intuitive. Skip a screenshot only when the content is purely textual data with
+no meaningful visual structure.
 
 The Leader's directives and excluded approaches are hard constraints, not
 suggestions. Do not attempt an excluded approach or deviate from a directive
