@@ -61,11 +61,8 @@ ignore = []
 
 - Choose type-safe packages. Install type stubs when available.
 - Avoid `pandas`; use `polars` for tabular data.
-- Use `NamedTuple` and `Enum` extensively for structured data and domain values.
-- Prefer `collections.abc` over the `typing` module for abstract base classes.
-- Use built-in generic types (e.g., `list[T]`, `dict[K, V]`, `set[T]`) instead
-  of outdated aliases from `typing` (e.g., `typing.List[T]`, `typing.Dict[T]`,
-  `typing.Set[T]`).
+- Use `typing.NamedTuple` and `enum.Enum` extensively for structured data and
+  domain values.
 
 ## Concurrency
 
