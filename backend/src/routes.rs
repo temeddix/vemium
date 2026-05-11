@@ -464,13 +464,6 @@ async fn delete_room(
   Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  let handle = {
-    let handles = state.room_handles.read().await;
-    handles.get(&code).cloned()
-  };
-  if let Some(handle) = handle {
-    handle.request_stop();
-  }
   let Some(_) = db::delete_room(&state.db, &code).await.report() else {
     return internal("failed to delete room");
   };

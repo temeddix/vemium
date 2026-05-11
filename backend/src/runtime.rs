@@ -53,6 +53,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 #[derive(Clone, Copy)]
@@ -156,28 +157,38 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
     .await
     .context("failed to ensure room workspace")?;
 
-  tokio::spawn(run_debate_loop(
+  let mut tasks = JoinSet::new();
+  tasks.spawn(run_debate_loop(
     state.clone(),
     handle.clone(),
     room_code.clone(),
     workspace.clone(),
   ));
-  tokio::spawn(run_user_chat_loop(
+  tasks.spawn(run_user_chat_loop(
     state.clone(),
     handle.clone(),
     room_code.clone(),
   ));
-  tokio::spawn(run_steering_loop(
+  tasks.spawn(run_steering_loop(
     state.clone(),
     handle.clone(),
     room_code.clone(),
   ));
-  tokio::spawn(run_report_loop(
+  tasks.spawn(run_report_loop(
     state.clone(),
     handle.clone(),
     room_code.clone(),
   ));
-  tokio::spawn(run_resume_schedule_loop(state, handle, room_code));
+  tasks.spawn(run_resume_schedule_loop(
+    state.clone(),
+    handle,
+    room_code.clone(),
+  ));
+  state
+    .room_tasks
+    .lock()
+    .await
+    .insert(room_code, tasks);
 
   Ok(())
 }
@@ -397,9 +408,6 @@ async fn run_debate_loop(
   let mut persona_index: usize = 0;
 
   loop {
-    if handle.is_stopped() {
-      return;
-    }
     if handle.is_blocked() {
       handle.pause_notify.notified().await;
       continue;
@@ -419,8 +427,7 @@ async fn run_debate_loop(
         None => {
           tokio::select! {
             _ = sleep(Duration::from_secs(1)) => {}
-            _ = handle.stop_notify.notified() => return,
-            _ = handle.config_notify.notified() => continue,
+            _ = handle.config_notify.notified() => {}
           }
           continue;
         }
@@ -431,9 +438,6 @@ async fn run_debate_loop(
         .await
         .report();
       sleep_until_next_turn(&handle, snapshot.chat_interval_seconds).await;
-      if handle.is_stopped() {
-        return;
-      }
       continue;
     }
 
@@ -445,9 +449,6 @@ async fn run_debate_loop(
       .report();
 
     sleep_until_next_turn(&handle, snapshot.chat_interval_seconds).await;
-    if handle.is_stopped() {
-      return;
-    }
   }
 }
 
@@ -455,7 +456,6 @@ async fn sleep_until_next_turn(handle: &RoomHandle, seconds: u64) {
   let interval = seconds.max(1);
   tokio::select! {
     _ = sleep(Duration::from_secs(interval)) => {}
-    _ = handle.stop_notify.notified() => {}
     _ = handle.config_notify.notified() => {}
   }
 }
@@ -566,14 +566,8 @@ async fn run_resume_schedule_loop(
   room_code: String,
 ) {
   loop {
-    if handle.is_stopped() {
-      return;
-    }
     if !handle.is_debate_paused() || handle.is_deactivated() {
-      tokio::select! {
-        _ = handle.pause_notify.notified() => {}
-        _ = handle.stop_notify.notified() => return,
-      }
+      handle.pause_notify.notified().await;
       continue;
     }
 
@@ -588,10 +582,7 @@ async fn run_resume_schedule_loop(
       })
       .report()
     else {
-      tokio::select! {
-        _ = sleep(Duration::from_secs(300)) => {}
-        _ = handle.stop_notify.notified() => return,
-      }
+      sleep(Duration::from_secs(300)).await;
       continue;
     };
 
@@ -601,14 +592,10 @@ async fn run_resume_schedule_loop(
     tokio::select! {
       _ = sleep(wait) => {}
       _ = handle.pause_notify.notified() => continue,
-      _ = handle.stop_notify.notified() => return,
       _ = handle.config_notify.notified() => continue,
     }
 
-    if handle.is_stopped()
-      || !handle.is_debate_paused()
-      || handle.is_deactivated()
-    {
+    if !handle.is_debate_paused() || handle.is_deactivated() {
       continue;
     }
 
@@ -732,11 +719,8 @@ async fn run_user_chat_loop(
   room_code: String,
 ) {
   loop {
-    tokio::select! {
-      _ = handle.user_message_notify.notified() => {}
-      _ = handle.stop_notify.notified() => return,
-    }
-    if handle.is_stopped() || handle.is_deactivated() {
+    handle.user_message_notify.notified().await;
+    if handle.is_deactivated() {
       continue;
     }
     if handle.is_debate_paused()
@@ -789,11 +773,7 @@ async fn run_steering_loop(
 
     tokio::select! {
       _ = sleep(Duration::from_secs(interval)) => {}
-      _ = handle.stop_notify.notified() => return,
       _ = handle.config_notify.notified() => continue,
-    }
-    if handle.is_stopped() {
-      return;
     }
     if handle.is_blocked() {
       continue;
@@ -929,10 +909,6 @@ async fn run_report_loop(
   room_code: String,
 ) {
   loop {
-    if handle.is_stopped() {
-      return;
-    }
-
     let Some(room) = load_room_snapshot(&state, &room_code).await else {
       return;
     };
@@ -946,8 +922,7 @@ async fn run_report_loop(
     else {
       tokio::select! {
         _ = sleep(Duration::from_secs(300)) => {}
-        _ = handle.stop_notify.notified() => return,
-        _ = handle.config_notify.notified() => continue,
+        _ = handle.config_notify.notified() => {}
       }
       continue;
     };
@@ -957,11 +932,7 @@ async fn run_report_loop(
       .unwrap_or_else(|_| Duration::from_secs(1));
     tokio::select! {
       _ = sleep(wait) => {}
-      _ = handle.stop_notify.notified() => return,
       _ = handle.config_notify.notified() => continue,
-    }
-    if handle.is_stopped() {
-      return;
     }
     if handle.is_blocked() {
       continue;

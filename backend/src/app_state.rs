@@ -29,22 +29,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::task::JoinSet;
 
 /// Per-room control plane shared between the orchestrator and the HTTP API.
 ///
-/// The orchestrator polls the gate flags and `stopped` at every turn
-/// boundary and `await`s on `pause_notify` while blocked. The API and the
-/// leader gate tools toggle the flags and then notify. Keeping this small
-/// and lock-free avoids contention when a room is broadcasting tokens at
-/// high frequency.
+/// Task lifetime is managed externally via [`AppState::room_tasks`]: dropping
+/// the room's [`JoinSet`] aborts all its tasks immediately at the next
+/// `.await` point. [`RoomHandle`] only carries pause/resume signals and
+/// lightweight counters — no stop flag needed.
 ///
 /// Two orthogonal gates feed [`RoomHandle::is_blocked`]:
 ///
 /// - `room_deactivated` is the user-controlled gate (the [`RoomState`]
 ///   `Active`/`Deactivated` axis). The strongest off-switch in the system:
-///   while set the orchestrator is fully halted regardless of debate
-///   state.
+///   while set the orchestrator is fully halted regardless of debate state.
 /// - `debate_paused` is the leader-controlled gate (the [`DebateState`]
 ///   `Running`/`Paused` axis). Flipped by the `pause_room`/`resume_room`
 ///   tools when the leader decides to pause or wake the debate.
@@ -58,12 +57,6 @@ pub struct RoomHandle {
   /// Signal fired whenever any gate (`room_deactivated` /
   /// `debate_paused`) changes. The orchestrator awaits this to wake up.
   pub pause_notify: Arc<Notify>,
-  /// Permanent stop signal. When `true`, the orchestrator finishes its
-  /// current turn (if any) and exits. Used by the delete handler.
-  pub stopped: Arc<AtomicBool>,
-  /// Signal fired when `stopped` flips. Lets pauses break early on
-  /// shutdown rather than blocking forever.
-  pub stop_notify: Arc<Notify>,
   /// Signal fired when room settings change (e.g. interval edits via the
   /// HTTP API). Lets in-progress sleeps wake early so loops re-read fresh
   /// config instead of blocking on the previous interval value.
@@ -89,8 +82,6 @@ impl RoomHandle {
       room_deactivated: Arc::new(AtomicBool::new(false)),
       debate_paused: Arc::new(AtomicBool::new(false)),
       pause_notify: Arc::new(Notify::new()),
-      stopped: Arc::new(AtomicBool::new(false)),
-      stop_notify: Arc::new(Notify::new()),
       config_notify: Arc::new(Notify::new()),
       user_message_notify: Arc::new(Notify::new()),
       next_event_sequence: Arc::new(AtomicU64::new(seed_event_seq + 1)),
@@ -138,13 +129,6 @@ impl RoomHandle {
     self.pause_notify.notify_waiters();
   }
 
-  pub fn request_stop(&self) {
-    self.stopped.store(true, Ordering::SeqCst);
-    self.stop_notify.notify_waiters();
-    // Ensure any thread waiting only on `pause_notify` also wakes up.
-    self.pause_notify.notify_waiters();
-  }
-
   /// Wakes any loop that is currently sleeping on a per-room interval so it
   /// reloads the latest config snapshot. Call this after persisting a room
   /// settings update.
@@ -172,10 +156,6 @@ impl RoomHandle {
   pub fn is_debate_paused(&self) -> bool {
     self.debate_paused.load(Ordering::SeqCst)
   }
-
-  pub fn is_stopped(&self) -> bool {
-    self.stopped.load(Ordering::SeqCst)
-  }
 }
 
 #[derive(Clone)]
@@ -186,6 +166,10 @@ pub struct AppState {
   pub rooms: Arc<RwLock<HashMap<String, Room>>>,
   pub room_streams: Arc<RwLock<HashMap<String, Arc<RoomStream>>>>,
   pub room_handles: Arc<RwLock<HashMap<String, RoomHandle>>>,
+  /// Owns the live Tokio tasks for each room. Removing an entry drops the
+  /// [`JoinSet`], which aborts all tasks for that room at the next
+  /// `.await` point — no cooperative stop flag needed.
+  pub room_tasks: Arc<Mutex<HashMap<String, JoinSet<()>>>>,
   /// Cache of model context sizes keyed by `"{base_url}:{model}"`. Populated
   /// lazily on first use; values are stable for the process lifetime since
   /// a model's context length does not change without a settings update.
@@ -211,6 +195,7 @@ impl AppState {
       rooms: Arc::new(RwLock::new(HashMap::new())),
       room_streams: Arc::new(RwLock::new(HashMap::new())),
       room_handles: Arc::new(RwLock::new(HashMap::new())),
+      room_tasks: Arc::new(Mutex::new(HashMap::new())),
       context_size_cache: Arc::new(RwLock::new(HashMap::new())),
       mcp: McpRegistry::new(),
     }
@@ -234,7 +219,11 @@ impl AppState {
   }
 
   /// Tear down all in-memory bookkeeping for a room. Used after delete.
+  ///
+  /// Dropping the [`JoinSet`] aborts all room tasks immediately.
   pub async fn forget_room(&self, room_code: &str) {
+    // Drop the JoinSet first — aborts all room tasks.
+    self.room_tasks.lock().await.remove(room_code);
     self.mcp.forget(room_code).await;
     {
       let mut rooms = self.rooms.write().await;
