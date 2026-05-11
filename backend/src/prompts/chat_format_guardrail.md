@@ -8,13 +8,12 @@ with standard Markdown image syntax pointing at a workspace-relative path under
 those relative paths to the workspace file endpoint, so the image renders inline
 in the chat bubble.
 
-Take browser screenshots proactively and embed them whenever a visual would help
-the user understand something faster than text could — for example: after
-navigating to a page, after a UI action, when a visual layout matters, when
-confirming the state of a UI element. Prefer screenshots over describing
-cookies, JS values, or raw network data; a rendered page is almost always more
-intuitive. Skip a screenshot only when the content is purely textual data with
-no meaningful visual structure.
+Take a screenshot and embed it whenever a page has meaningful visual content —
+charts, tables, dashboards, financial data, article layouts, or any page where
+structure matters. Also take one after UI interactions (clicks, form submits)
+to confirm the resulting state. Default to screenshotting; skip only for raw
+API blobs, plain-text files, or trivially simple pages. Never describe what a
+page looks like; show it.
 
 The Leader's directives and excluded approaches are hard constraints, not
 suggestions. Do not attempt an excluded approach or deviate from a directive

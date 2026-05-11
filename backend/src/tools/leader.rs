@@ -95,7 +95,8 @@ impl Tool for RequestLeaderDecisionTool {
                     judgment is needed, or the discussion has plainly run \
                     its course. The leader can return a verdict (recorded \
                     as a public `leader_note` bubble) or pause the debate \
-                    directly. Calling it frequently defeats its purpose."
+                    directly. When in doubt, escalate — the leader can \
+                    always redirect if the moment is not right."
         .to_string(),
       parameters: json!({
         "type": "object",
