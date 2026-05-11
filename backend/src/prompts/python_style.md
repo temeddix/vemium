@@ -44,8 +44,9 @@ ignore = []
 - Adopt a fail-fast error handling strategy.
 - Do not execute logic at module level. Group all behavior into functions and
   classes.
-- Always define a global `THREAD_POOL` (`concurrent.futures.ThreadPoolExecutor`)
-  at module scope in the entry module.
+- Define a global `THREAD_POOL` (`concurrent.futures.ThreadPoolExecutor`).
+- Define a global `WORKSPACE_DIR` (`pathlib.Path(__file__).parent.parent` or
+  similar).
 - Start entry points with `asyncio.run(main())`. Write clear docstrings on every
   public class and function.
 

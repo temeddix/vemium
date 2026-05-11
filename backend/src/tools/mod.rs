@@ -51,5 +51,6 @@ pub mod leader;
 pub mod pause_room;
 pub mod python;
 pub mod resume_room;
+pub mod shell;
 pub mod web_fetch;
 pub mod workspace;

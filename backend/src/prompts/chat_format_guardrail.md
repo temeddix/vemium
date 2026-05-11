@@ -3,10 +3,10 @@ or dates matter, add a brief follow-up paragraph (up to 1000 chars) that weaves
 them into sentences. Use only inline Markdown like **bold**.
 
 To show an image to the room (browser screenshot, chart, diagram, …), embed it
-with standard Markdown image syntax pointing at a workspace-relative path
-under `raw/`, for example `![viewport](raw/example_com.png)`. The
-frontend rewrites those relative paths to the workspace file endpoint, so the
-image renders inline in the chat bubble.
+with standard Markdown image syntax pointing at a workspace-relative path under
+`raw/`, for example `![viewport](raw/example_com.png)`. The frontend rewrites
+those relative paths to the workspace file endpoint, so the image renders inline
+in the chat bubble.
 
 Take browser screenshots proactively and embed them whenever a visual would help
 the user understand something faster than text could — for example: after
@@ -24,8 +24,8 @@ Use the dedicated tools instead of Python for external content. All save output
 under `raw/` and return the path; existing files are overwritten.
 
 - `web_fetch(url)` — real-browser fetch (JS/SPAs work), returns Markdown. Saved
-  to `raw/<url-hash>.md`. Small pages also return the body inline; large
-  pages return only path + preview (read/grep via `workspace`).
+  to `raw/<url-hash>.md`. Small pages also return the body inline; large pages
+  return only path + preview (read/grep via `workspace`).
 - `download_file(url, method, headers, body)` — saves an HTTP response body to
   `raw/` and returns the path. For binary downloads (PDF/XLSX/ZIP),
   authenticated endpoints (cookies/headers/POST body), or non-HTML APIs.
@@ -36,16 +36,22 @@ under `raw/` and return the path; existing files are overwritten.
 
 For browser interaction (clicks, forms, capturing JS-triggered requests), use
 the Playwright MCP tools (`browser_navigate`, `browser_click`,
-`browser_network_requests`, `browser_cookie_list`, …). JS-handler download
-recipe: navigate → click → capture the request envelope → pass to
-`download_file`.
+`browser_network_requests`, `browser_cookie_list`, …).
+
+**JS-triggered download — two paths:**
+
+1. **(Preferred)** navigate → click → capture the request envelope via
+   `browser_network_requests` → replay with `download_file`. Works for most
+   sites and lands the file directly in `raw/`.
+2. **(Browser-only fallback)** If the site refuses non-browser requests (even
+   with cookies/headers): navigate → click → read the `/tmp/` path from the tool
+   result → move it with `run_shell`: `mv /tmp/... raw/<filename>`.
 
 Browser tools that write files (`browser_take_screenshot`, `browser_pdf_save`,
-`browser_start_tracing`, `browser_start_video`, …) save under a shared output
-directory. **Prefix `filename` with `<your-room-code>/raw/`** (room code is
-in the preamble) so the artifact lands in your workspace — e.g.
-`browser_take_screenshot({ filename: "blue-fox/raw/page.png" })`. Without
-the prefix you cannot read the file back.
+`browser_start_tracing`, `browser_start_video`, …) require an **absolute path**
+for `filename`. Use `/data/debate/<your-room-code>/raw/<file>` — e.g.
+`browser_take_screenshot({ filename: "/data/debate/blue-fox/raw/page.png" })`.
+Room code is in the preamble.
 
 Write Python only for genuine computation no tool can perform — not for HTTP,
 downloads, or document conversion.

@@ -53,6 +53,7 @@ use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::pause_room::PauseRoomTool;
 use crate::tools::python::RunPythonTool;
 use crate::tools::resume_room::ResumeRoomTool;
+use crate::tools::shell::RunShellTool;
 use crate::tools::web_fetch::WebFetchTool;
 use crate::tools::workspace::{
   EditFileTool, ListFilesTool, ReadFileTool, WriteFileTool,
@@ -459,7 +460,12 @@ where
       log.clone(),
       author.clone(),
     ))
-    .tool(EditFileTool::new(workspace, log, author))
+    .tool(EditFileTool::new(
+      workspace.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(RunShellTool::new(workspace, log, author))
     .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
     .tool(inputs.inline_note_tool);
