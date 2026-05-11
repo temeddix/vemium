@@ -43,6 +43,15 @@ export class ChatMessage extends LitElement {
   @property({ type: String, attribute: "room-code" })
   accessor roomCode = "";
 
+  /**
+   * True only when this is the last (currently active) row and
+   * `event.completedAt` is still null. Rows that finished before the
+   * current one are rendered the same as fully completed rows even when
+   * their `completedAt` is null.
+   */
+  @property({ type: Boolean })
+  accessor streaming = false;
+
   /** Wall-clock tick used to redraw the streaming "Took Ns" ticker. */
   @state()
   private accessor nowMillis = Date.now();
@@ -200,7 +209,7 @@ export class ChatMessage extends LitElement {
     super.connectedCallback();
     this.nowMillis = Date.now();
     this.#tickerInterval = setInterval((): void => {
-      if (this.event?.completedAt === null) {
+      if (this.streaming) {
         this.nowMillis = Date.now();
       }
     }, 500);
@@ -215,7 +224,7 @@ export class ChatMessage extends LitElement {
   }
 
   override updated(): void {
-    if (this.event?.completedAt === null) {
+    if (this.streaming) {
       const body = this.renderRoot.querySelector<HTMLElement>(".body");
       if (body !== null) {
         body.scrollTop = body.scrollHeight;
@@ -232,7 +241,7 @@ export class ChatMessage extends LitElement {
     const isInline = event.kind === "thinking" ||
       event.kind === "inline_note" ||
       event.kind === "summary";
-    const streaming = event.completedAt === null;
+    const streaming = this.streaming;
     const color = resolveAvatarColor(event.kind, event.agent);
     const rowClasses = ["row", isSelf ? "is-self" : ""].filter(Boolean).join(
       " ",
@@ -326,7 +335,7 @@ export class ChatMessage extends LitElement {
     if (event === null) {
       return;
     }
-    if (event.completedAt === null && event.detail === "") {
+    if (this.streaming && event.detail === "") {
       return;
     }
     this.dispatchEvent(
