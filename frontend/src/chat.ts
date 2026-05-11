@@ -85,17 +85,8 @@ export function shouldShowTimeSeparator(
  */
 export function formatSeparatorTimestamp(timestamp: string): string {
   const when = new Date(timestamp);
-  const now = new Date();
-  const sameDay = when.getFullYear() === now.getFullYear() &&
-    when.getMonth() === now.getMonth() &&
-    when.getDate() === now.getDate();
-  if (sameDay) {
-    return when.toLocaleTimeString("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
   return when.toLocaleString("en-US", {
+    year: "numeric",
     month: "short",
     day: "numeric",
     hour: "numeric",
