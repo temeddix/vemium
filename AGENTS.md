@@ -112,10 +112,6 @@ Run Rust checks before completion:
   - constants: `UPPER_SNAKE_CASE`
   - variables and functions: `snake_case`
   - structs, traits, enums, and types: `PascalCase`
-- Prefer async, non-blocking I/O (`tokio`, async database/network clients, async
-  file APIs).
-- If blocking work is unavoidable, isolate it with
-  `tokio::task::spawn_blocking`.
 - Use `anyhow` for application-level error handling. Use `bail!` and `anyhow!`
   macros.
 - Use `tracing` for logs. Do not use `println!`/`eprintln!`.
@@ -136,6 +132,16 @@ should be logged and swallowed.
 - Use clear HTTP status codes.
 - Validate inputs at API boundaries.
 - Keep all human-readable API messages in English.
+
+## Concurrency
+
+- Prefer async, non-blocking I/O (`tokio`, async database/network clients, async
+  file APIs).
+- If blocking work is unavoidable, isolate it with
+  `tokio::task::spawn_blocking`.
+- Task cancellation uses `JoinSet` ownership (drop = abort); do not use
+  flag-based cooperative cancellation (`AtomicBool` stop flags, `stop_notify`)
+  for task lifetime.
 
 # Scope Guardrails
 
