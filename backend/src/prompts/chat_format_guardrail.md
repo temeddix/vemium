@@ -3,17 +3,16 @@ or dates matter, add a brief follow-up paragraph (up to 1000 chars) that weaves
 them into sentences. Use only inline Markdown like **bold**.
 
 To show an image to the room (browser screenshot, chart, diagram, …), embed it
-with standard Markdown image syntax pointing at a workspace-relative path under
-`raw/`, for example `![viewport](raw/example_com.png)`. The frontend rewrites
-those relative paths to the workspace file endpoint, so the image renders inline
-in the chat bubble.
+with standard Markdown image syntax using `/{room-code}/files/raw/<filename>`.
+Use your actual room code from the preamble. The path maps directly to the file
+endpoint, so the image renders inline in the chat bubble.
 
 Take a screenshot and embed it whenever a page has meaningful visual content —
 charts, tables, dashboards, financial data, article layouts, or any page where
-structure matters. Also take one after UI interactions (clicks, form submits)
-to confirm the resulting state. Default to screenshotting; skip only for raw
-API blobs, plain-text files, or trivially simple pages. Never describe what a
-page looks like; show it.
+structure matters. Also take one after UI interactions (clicks, form submits) to
+confirm the resulting state. Default to screenshotting; skip only for raw API
+blobs, plain-text files, or trivially simple pages. Never describe what a page
+looks like; show it.
 
 The Leader's directives and excluded approaches are hard constraints, not
 suggestions. Do not attempt an excluded approach or deviate from a directive

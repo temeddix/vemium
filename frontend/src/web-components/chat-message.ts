@@ -3,7 +3,6 @@ import {
   type PersonaColor,
   resolveAvatarColor,
 } from "@/app/chat";
-import { BACKEND_BASE_URL } from "@/app/config";
 import type { RoomEvent } from "@/app/types";
 import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -318,7 +317,7 @@ export class ChatMessage extends LitElement {
           ? html`
             <wa-spinner style="font-size: 0.85rem;"></wa-spinner>
           `
-          : renderMarkdown(event.content, this.roomCode)}
+          : renderMarkdown(event.content)}
       </div>
     `;
   }
@@ -478,34 +477,33 @@ interface ManagedMarkdownEl extends HTMLElement {
   renderMarkdown?: () => void;
 }
 
-function renderMarkdown(content: string, roomCode: string) {
+function renderMarkdown(content: string) {
   if (content === "") {
     return nothing;
   }
-  const base = roomCode === ""
-    ? null
-    : new URL(`/${roomCode}/files/`, BACKEND_BASE_URL).href;
   return html`
     <div class="markdown">
-      <wa-markdown ${ref((raw) => {
-        if (raw === undefined) {
-          return;
-        }
-        const el = raw as ManagedMarkdownEl;
-        let script = el.querySelector('script[type="text/markdown"]');
-        if (script === null) {
-          script = document.createElement("script");
-          script.setAttribute("type", "text/markdown");
-          el.appendChild(script);
-        }
-        if (script.textContent !== content) {
-          script.textContent = content;
-          el.renderMarkdown?.();
-        }
-        attachImageEnhancements(el, base);
-      })}></wa-markdown>
+      <wa-markdown ${ref((raw) => syncMarkdownEl(raw, content))}></wa-markdown>
     </div>
   `;
+}
+
+function syncMarkdownEl(raw: Element | undefined, content: string): void {
+  if (raw === undefined) {
+    return;
+  }
+  const el = raw as ManagedMarkdownEl;
+  let script = el.querySelector('script[type="text/markdown"]');
+  if (script === null) {
+    script = document.createElement("script");
+    script.setAttribute("type", "text/markdown");
+    el.appendChild(script);
+  }
+  if (script.textContent !== content) {
+    script.textContent = content;
+    el.renderMarkdown?.();
+  }
+  attachImageEnhancements(raw);
 }
 
 /**
@@ -516,16 +514,17 @@ function renderMarkdown(content: string, roomCode: string) {
  * Doing this in the rendered DOM lets us delegate Markdown parsing to
  * `wa-markdown` itself and skip writing our own image-syntax matcher.
  */
-function attachImageEnhancements(
-  el: ManagedMarkdownEl,
-  base: string | null,
-): void {
+function attachImageEnhancements(raw: Element | undefined): void {
+  if (raw === undefined) {
+    return;
+  }
+  const el = raw as ManagedMarkdownEl;
   if (el[ENHANCEMENTS_ATTACHED] === true) {
     return;
   }
   el[ENHANCEMENTS_ATTACHED] = true;
-  const target = el.shadowRoot ?? el;
-  const apply = (): void => processImagesIn(target, base);
+  const target = el;
+  const apply = (): void => processImagesIn(target);
   apply();
   const observer = new MutationObserver(apply);
   observer.observe(target, {
@@ -536,25 +535,10 @@ function attachImageEnhancements(
   });
 }
 
-function processImagesIn(root: ParentNode, base: string | null): void {
+function processImagesIn(root: ParentNode): void {
   for (const img of root.querySelectorAll<HTMLImageElement>("img[src]")) {
-    if (base !== null) {
-      rewriteIfRelative(img, base);
-    }
     wireLightbox(img);
   }
-}
-
-function rewriteIfRelative(img: HTMLImageElement, base: string): void {
-  const src = img.getAttribute("src");
-  if (
-    src === null || src === "" ||
-    src.startsWith("/") || src.startsWith("#") ||
-    URL.canParse(src)
-  ) {
-    return;
-  }
-  img.setAttribute("src", new URL(src, base).href);
 }
 
 function wireLightbox(img: HTMLImageElement): void {
