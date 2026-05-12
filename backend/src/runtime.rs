@@ -92,7 +92,7 @@ const INLINE_NOTE_TOOL_HINT: &str = "Events in the transcript are tagged \
   `speaker (#42):` for bubbles). The visible label is usually enough \
   context, but when you need the full body (e.g. the traceback behind a \
   `Python script run fail` note, or a message compacted out of the \
-  transcript), call `get_room_event` with `id=N`.";
+  transcript), call `get_room_event` with `sequence=N`.";
 
 const SELECT_NEXT_AGENT_HINT: &str = "You MUST call `select_next_agent` \
   before finishing your turn. Choose who speaks next: Researcher, \
@@ -1263,22 +1263,20 @@ fn format_transcript_line(event: &RoomEvent) -> String {
   let speaker = event.agent.as_deref().unwrap_or("speaker");
   match event.kind {
     RoomEventKind::InlineNote => {
-      let id_marker = match event.id {
-        Some(id) => format!("#{id}"),
-        None => "#?".to_string(),
-      };
       format!(
-        "[{timestamp}] (inline-note {id_marker} by {speaker}) {}",
-        event.content
+        "[{timestamp}] (inline-note #{} by {speaker}) {}",
+        event.sequence, event.content
       )
     }
     RoomEventKind::Thinking | RoomEventKind::Summary => String::new(),
     RoomEventKind::AgentChat
     | RoomEventKind::LeaderNote
-    | RoomEventKind::UserChat => match event.id {
-      Some(id) => format!("[{timestamp}] {speaker} (#{id}): {}", event.content),
-      None => format!("[{timestamp}] {speaker}: {}", event.content),
-    },
+    | RoomEventKind::UserChat => {
+      format!(
+        "[{timestamp}] {speaker} (#{}): {}",
+        event.sequence, event.content
+      )
+    }
   }
 }
 

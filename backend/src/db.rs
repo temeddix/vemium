@@ -410,20 +410,22 @@ pub async fn load_room_events(
   rows.into_iter().map(parse_event_row).collect()
 }
 
-/// Loads a single room-event row by primary key regardless of kind. Used by
+/// Loads a single room-event row by its per-room sequence number. Used by
 /// the `get_room_event` tool and the REST endpoint so agents and the frontend
 /// can retrieve any event that may have been compacted out of the live
 /// transcript.
 pub async fn load_room_event(
   pool: &SqlitePool,
-  id: i64,
+  room_code: &str,
+  sequence: i64,
 ) -> Result<Option<RoomEvent>> {
   let row = sqlx::query(
     "SELECT id, room_code, sequence, kind, agent, content, detail, success, timestamp, completed_at
      FROM room_events
-     WHERE id = ?",
+     WHERE room_code = ? AND sequence = ?",
   )
-  .bind(id)
+  .bind(room_code)
+  .bind(sequence)
   .fetch_optional(pool)
   .await
   .context("failed to load room event")?;

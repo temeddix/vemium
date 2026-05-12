@@ -25,7 +25,7 @@
 //! POST   /v1/rooms/:code/messages
 //! GET    /v1/rooms/:code/reports
 //! GET    /v1/rooms/:code/reports/:seq
-//! GET    /v1/rooms/:code/events/:id
+//! GET    /v1/rooms/:code/events/:sequence
 //! GET    /v1/rooms/:code/files
 //! GET    /v1/rooms/:code/files/download
 //! GET    /v1/rooms/:code/stream    (WebSocket)
@@ -87,7 +87,7 @@ pub fn create_router(state: AppState) -> Router {
     .route("/v1/rooms/:code/deactivate", post(deactivate_room))
     .route("/v1/rooms/:code/resume", post(resume_room))
     .route("/v1/rooms/:code/messages", post(post_user_message))
-    .route("/v1/rooms/:code/events/:id", get(get_room_event))
+    .route("/v1/rooms/:code/events/:sequence", get(get_room_event))
     .route("/v1/rooms/:code/reports", get(list_reports))
     .route("/v1/rooms/:code/reports/:sequence", get(get_report))
     .route("/v1/rooms/:code/files", get(list_room_files))
@@ -637,17 +637,17 @@ async fn get_report(
 }
 
 async fn get_room_event(
-  Path((code, id)): Path<(String, i64)>,
+  Path((code, sequence)): Path<(String, i64)>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
   if !state.rooms.read().await.contains_key(&code) {
     return not_found("room");
   }
-  match db::load_room_event(&state.db, id).await {
-    Ok(Some(event)) if event.room_code == code => {
+  match db::load_room_event(&state.db, &code, sequence).await {
+    Ok(Some(event)) => {
       (StatusCode::OK, Json(json!({"event": event}))).into_response()
     }
-    Ok(_) => not_found("event"),
+    Ok(None) => not_found("event"),
     Err(e) => {
       Err::<(), _>(e).report();
       internal("failed to load event")

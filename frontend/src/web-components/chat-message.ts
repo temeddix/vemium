@@ -265,7 +265,8 @@ export class ChatMessage extends LitElement {
       </div>
       ${event.id !== null
         ? html`
-          <wa-tooltip for="${rowId}" placement="left">#${event.id}</wa-tooltip>
+          <wa-tooltip for="${rowId}" placement="left">#${event
+            .sequence}</wa-tooltip>
         `
         : nothing}
       <te-event-hovercard

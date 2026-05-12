@@ -1,7 +1,7 @@
-//! `get_room_event` tool: looks up any room-event row by its `id`, scoped to
-//! the calling room. Useful after compaction, when old bubble or inline-note
+//! `get_room_event` tool: looks up any room-event row by its per-room
+//! `sequence` number. Useful after compaction, when old bubble or inline-note
 //! content is no longer in the live transcript but can still be retrieved by
-//! the numeric `#N` id embedded in the summary text.
+//! the numeric `#N` sequence embedded in the summary text.
 
 use crate::app_state::AppState;
 use crate::db;
@@ -41,14 +41,15 @@ impl GetRoomEventTool {
 
 #[derive(Debug, Deserialize)]
 pub struct GetRoomEventArgs {
-  /// Numeric id from the transcript, e.g. the `42` in `(inline-note #42 by
-  /// Researcher)` or the `#42` embedded in a compaction summary.
-  pub id: i64,
+  /// Per-room sequence number from the transcript, e.g. the `42` in
+  /// `(inline-note #42 by Researcher)` or the `#42` embedded in a compaction
+  /// summary.
+  pub sequence: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GetRoomEventOutput {
-  pub id: i64,
+  pub sequence: i64,
   pub kind: String,
   pub agent: Option<String>,
   pub content: String,
@@ -73,24 +74,23 @@ impl Tool for GetRoomEventTool {
   async fn definition(&self, _prompt: String) -> ToolDefinition {
     ToolDefinition {
       name: NAME.to_string(),
-      description: "Fetch any room-event row by its numeric id. Works for \
-                    all event kinds: inline notes, chat bubbles, thinking \
-                    rows, etc. The transcript marks events as `#N` (e.g. \
-                    `(inline-note #42 by Author)` or `#42` in a compaction \
-                    summary). Use this to retrieve content that has been \
-                    compacted out of the live transcript. Lookups are scoped \
-                    to this room."
+      description: "Fetch any room-event row by its per-room sequence number. \
+                    Works for all event kinds: inline notes, chat bubbles, \
+                    thinking rows, etc. The transcript marks events as `#N` \
+                    (e.g. `(inline-note #42 by Author)` or `#42` in a \
+                    compaction summary). Use this to retrieve content that has \
+                    been compacted out of the live transcript."
         .to_string(),
       parameters: json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "id": {
+          "sequence": {
             "type": "integer",
-            "description": "Numeric id from the transcript or compaction summary."
+            "description": "Per-room sequence number from the transcript or compaction summary."
           }
         },
-        "required": ["id"]
+        "required": ["sequence"]
       }),
     }
   }
@@ -101,25 +101,26 @@ impl Tool for GetRoomEventTool {
       .start_row(
         RoomEventKind::InlineNote,
         Some(self.author.clone()),
-        format!("Looked up event #{}", args.id),
+        format!("Looked up event #{}", args.sequence),
         String::new(),
       )
       .await;
 
-    let lookup = db::load_room_event(&self.state.db, args.id)
-      .await
-      .map_err(|e| GetRoomEventError::Load(e.to_string()));
+    let lookup =
+      db::load_room_event(&self.state.db, &self.room_code, args.sequence)
+        .await
+        .map_err(|e| GetRoomEventError::Load(e.to_string()));
     match lookup {
-      Ok(Some(event)) if event.room_code == self.room_code => {
+      Ok(Some(event)) => {
         row
           .replace_body(
-            format!("Looked up event #{}", args.id),
+            format!("Looked up event #{}", args.sequence),
             event.content.clone(),
           )
           .await;
         row.finish(true).await;
         Ok(GetRoomEventOutput {
-          id: args.id,
+          sequence: args.sequence,
           kind: event.kind.as_str().to_string(),
           agent: event.agent,
           content: event.content,
@@ -127,20 +128,20 @@ impl Tool for GetRoomEventTool {
           timestamp: event.timestamp.to_rfc3339(),
         })
       }
-      Ok(_) => {
+      Ok(None) => {
         row
           .replace_body(
-            format!("Failed to look up event #{}", args.id),
-            format!("event #{} not found in this room", args.id),
+            format!("Failed to look up event #{}", args.sequence),
+            format!("event #{} not found in this room", args.sequence),
           )
           .await;
         row.finish(false).await;
-        Err(GetRoomEventError::NotFound(args.id))
+        Err(GetRoomEventError::NotFound(args.sequence))
       }
       Err(error) => {
         row
           .replace_body(
-            format!("Failed to look up event #{}", args.id),
+            format!("Failed to look up event #{}", args.sequence),
             error.to_string(),
           )
           .await;
