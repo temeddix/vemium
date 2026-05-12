@@ -48,7 +48,6 @@ use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
 use sqlx::SqlitePool;
-use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -320,30 +319,16 @@ impl TurnSession {
 // -- Hook -----------------------------------------------------------------
 
 /// Thin bridge between rig's [`PromptHook`] callbacks and the per-turn
-/// row segmenter. Tool calls close the open row before the tool runs;
-/// native tools own their own inline-note rows, while MCP tools get one
-/// created automatically by this hook using `on_tool_call` /
-/// `on_tool_result`.
+/// row segmenter. Each tool call closes the open bubble row; native tools
+/// own their own inline-note rows.
 #[derive(Clone)]
 pub struct DebateHook {
   session: Arc<TurnSession>,
-  /// Names of tools registered via `rmcp_tool`. Empty for turns that
-  /// have no MCP peer (steering, leader, resume-gate).
-  mcp_tool_names: Arc<HashSet<String>>,
-  /// Inline-note row opened for the current MCP tool call, if any.
-  mcp_row: Arc<Mutex<Option<RowHandle>>>,
 }
 
 impl DebateHook {
-  pub fn new(
-    session: Arc<TurnSession>,
-    mcp_tool_names: HashSet<String>,
-  ) -> Self {
-    Self {
-      session,
-      mcp_tool_names: Arc::new(mcp_tool_names),
-      mcp_row: Arc::new(Mutex::new(None)),
-    }
+  pub fn new(session: Arc<TurnSession>) -> Self {
+    Self { session }
   }
 }
 
@@ -362,44 +347,13 @@ where
 
   async fn on_tool_call(
     &self,
-    tool_name: &str,
-    _tool_call_id: Option<String>,
-    _internal_call_id: &str,
-    args: &str,
-  ) -> ToolCallHookAction {
-    self.session.close_active().await;
-    if self.mcp_tool_names.contains(tool_name) {
-      let label = format!("Called MCP: {tool_name}");
-      let row = self
-        .session
-        .log()
-        .start_row(
-          RoomEventKind::InlineNote,
-          Some(self.session.author().to_string()),
-          label,
-          args.to_string(),
-        )
-        .await;
-      *self.mcp_row.lock().await = Some(row);
-    }
-    ToolCallHookAction::cont()
-  }
-
-  async fn on_tool_result(
-    &self,
-    tool_name: &str,
+    _tool_name: &str,
     _tool_call_id: Option<String>,
     _internal_call_id: &str,
     _args: &str,
-    result: &str,
-  ) -> HookAction {
-    if self.mcp_tool_names.contains(tool_name)
-      && let Some(row) = self.mcp_row.lock().await.take()
-    {
-      row.append_detail(&format!("\n\n---\n{result}")).await;
-      row.finish(true).await;
-    }
-    HookAction::cont()
+  ) -> ToolCallHookAction {
+    self.session.close_active().await;
+    ToolCallHookAction::cont()
   }
 }
 
@@ -525,10 +479,18 @@ async fn run_chat_turn(
 
   let client =
     build_chat_client(&low).context("failed to construct low-tier client")?;
-  // Open (or reuse) the room's MCP session. Each room gets its own
-  // session — and its own isolated browser context on the sidecar — so
-  // concurrent rooms cannot stomp on each other's navigation state.
-  let mcp = state.mcp.get_or_connect(&room.code).await;
+  let browser_key = crate::browser::AgentKey::new(&room.code, persona.name);
+  let browser = match state.browser.get_or_create(&browser_key).await {
+    Ok(h) => h,
+    Err(e) => {
+      tracing::error!(
+        room_code = room.code,
+        author = persona.name,
+        "browser tab init failed: {e}"
+      );
+      return Err(e);
+    }
+  };
   let outcome = client
     .run_debate_turn(DebateTurnInputs {
       system_prompt,
@@ -540,7 +502,7 @@ async fn run_chat_turn(
       do_nothing_tool,
       room_event_tool,
       session: session.clone(),
-      mcp,
+      browser,
     })
     .await;
 

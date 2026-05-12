@@ -22,9 +22,6 @@ without first calling `request_leader_decision`.
 Use the dedicated tools instead of Python for external content. All save output
 under `raw/` and return the path; existing files are overwritten.
 
-- `web_fetch(url)` — real-browser fetch (JS/SPAs work), returns Markdown. Saved
-  to `raw/<url-hash>.md`. Small pages also return the body inline; large pages
-  return only path + preview (read/grep via `workspace`).
 - `download_file(url, method, headers, body)` — saves an HTTP response body to
   `raw/` and returns the path. For binary downloads (PDF/XLSX/ZIP),
   authenticated endpoints (cookies/headers/POST body), or non-HTML APIs.
@@ -33,9 +30,11 @@ under `raw/` and return the path; existing files are overwritten.
 - `document_to_md(path)` — converts a local document (PDF, XLSX, DOCX, image
   with text, …) to Markdown next to the source as `<name>.md`.
 
-For browser interaction (clicks, forms, capturing JS-triggered requests), use
-the Playwright MCP tools (`browser_navigate`, `browser_click`,
-`browser_network_requests`, `browser_cookie_list`, …).
+For web content and browser interaction (navigation, clicks, forms, JS-rendered
+pages, capturing network requests), use the browser tools (`browser_navigate`,
+`browser_click`, `browser_evaluate`, `browser_network_requests`, …). Save raw
+HTML to `raw/` via `workspace_write` and grep as needed; there is no automatic
+Markdown conversion for web pages.
 
 **JS-triggered download — two paths:**
 

@@ -13,11 +13,9 @@
 //! handles balloon and thinking rows on the active turn; tool inline
 //! notes appear as side rows around them.
 //!
-//! - [`web_fetch`]: fetches a URL through the Playwright MCP sidecar,
-//!   converts the page to Markdown via [`kreuzberg`], and saves the full
-//!   content to `raw/<url-hash>.md`. Small pages also return the body
-//!   inline; large pages return a path plus preview that the agent reads
-//!   via [`workspace`].
+//! - [`browser`]: browser automation tools (`browser_navigate`,
+//!   `browser_click`, `browser_take_screenshot`, etc.) backed by
+//!   chromiumoxide. Each room gets an isolated browser context.
 //! - [`download_file`]: saves an arbitrary HTTP response body to
 //!   `raw/` and returns the path. Filename comes from
 //!   `Content-Disposition`, the URL basename, or a hash. Streams progress
@@ -43,6 +41,7 @@
 //!   [`crate::models::RoomState`] axis is moved by the
 //!   `/v1/rooms/:code/{activate,deactivate}` HTTP routes instead.
 
+pub mod browser;
 pub mod do_nothing;
 pub mod document_to_md;
 pub mod download_file;
@@ -52,5 +51,4 @@ pub mod pause_room;
 pub mod python;
 pub mod resume_room;
 pub mod shell;
-pub mod web_fetch;
 pub mod workspace;

@@ -4,7 +4,7 @@
 //! The agent supplies a full HTTP envelope (URL, method, headers, optional
 //! body) so DART-style flows that hide a download behind a JS handler can
 //! be reproduced verbatim once the agent has captured the underlying
-//! request via the Playwright MCP `browser_network_requests` tool.
+//! request via the `browser_network_requests` tool.
 //!
 //! Filename selection follows a fixed fallback chain:
 //!

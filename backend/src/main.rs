@@ -9,12 +9,12 @@
 //! 5. Start the Axum HTTP server on `bind_addr`.
 
 mod app_state;
+mod browser;
 mod config;
 mod db;
 mod error;
 mod event_log;
 mod llm;
-mod mcp_client;
 mod models;
 mod provider_models;
 mod python_runner;
@@ -47,9 +47,10 @@ async fn main() -> Result<()> {
 
   let db = db::init_pool(&config.database_url).await?;
   let app_settings = db::load_app_settings(&db).await?;
-  // MCP sessions are opened lazily, per room, on first browser-tool use
-  // — see `McpRegistry` in `mcp_client.rs`. No upfront connect here.
-  let state = AppState::new(db, config.data_root.clone(), app_settings);
+  let browser_registry =
+    crate::browser::BrowserRegistry::launch(&config.data_root).await?;
+  let state =
+    AppState::new(db, config.data_root.clone(), app_settings, browser_registry);
 
   runtime::restore_rooms(state.clone()).await.report();
 

@@ -31,8 +31,8 @@ use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use rig::tool::server::ToolServer;
 use serde_json::{Value, json};
 
+use crate::browser::BrowserHandle;
 use crate::error::ReportError;
-use crate::mcp_client::McpHandle;
 use crate::models::{ApiType, ProviderConfig};
 use crate::python_runner::PythonRunner;
 
@@ -47,6 +47,15 @@ const COMPACTION_PROMPT: &str = "You are the room leader. Summarize the \
   messages or inline notes, preserve their `#N` identifiers (e.g. `#42`) \
   so they can be retrieved later with the `get_room_event` tool.";
 use crate::runtime::{DebateHook, ReportHook, TurnSession};
+use crate::tools::browser::{
+  BrowserClickTool, BrowserCloseTool, BrowserConsoleMessagesTool,
+  BrowserDragTool, BrowserDropTool, BrowserEvaluateTool, BrowserFileUploadTool,
+  BrowserFillFormTool, BrowserHandleDialogTool, BrowserHoverTool,
+  BrowserNavigateBackTool, BrowserNavigateTool, BrowserNetworkRequestsTool,
+  BrowserPressKeyTool, BrowserResizeTool, BrowserScrollTool,
+  BrowserSelectOptionTool, BrowserSnapshotTool,
+  BrowserTakeScreenshotTool, BrowserTypeTool, BrowserWaitForTool,
+};
 use crate::tools::do_nothing::DoNothingTool;
 use crate::tools::document_to_md::DocumentToMdTool;
 use crate::tools::download_file::DownloadFileTool;
@@ -56,7 +65,6 @@ use crate::tools::pause_room::PauseRoomTool;
 use crate::tools::python::RunPythonTool;
 use crate::tools::resume_room::ResumeRoomTool;
 use crate::tools::shell::RunShellTool;
-use crate::tools::web_fetch::WebFetchTool;
 use crate::tools::workspace::{
   EditFileTool, ListFilesTool, ReadFileTool, WriteFileTool,
 };
@@ -97,11 +105,9 @@ pub struct DebateTurnInputs {
   pub do_nothing_tool: DoNothingTool,
   pub room_event_tool: GetRoomEventTool,
   pub session: Arc<TurnSession>,
-  /// Singleton MCP setup for the Playwright sidecar. Always present.
-  /// When the sidecar was unreachable at startup, `mcp.peer()` returns
-  /// `None`: `build_chat_client` skips MCP tool registration entirely,
-  /// and `web_fetch`'s direct call returns a structured error.
-  pub mcp: McpHandle,
+  /// Per-room isolated Chrome context. Always present; the registry
+  /// ensures the context is created before a turn starts.
+  pub browser: BrowserHandle,
 }
 
 /// Inputs for the resume-gate tool loop. Used while a room is paused: the
@@ -417,17 +423,115 @@ where
   let log = session.log().clone();
   let author = session.author().to_string();
   let workspace = inputs.workspace;
-  let mcp = inputs.mcp;
+  let browser = inputs.browser;
+
   // rig-core 0.36's AgentBuilder makes `tool_server_handle()` and the
-  // `.tool()` chain mutually exclusive — a builder can be in only one of
-  // `WithToolServerHandle` or `WithBuilderTools` at a time. To expose
-  // both our native Rig tools AND the auto-imported Playwright `browser_*`
-  // tool set in the same agent, we build a single ToolServer that holds
-  // both, then hand it to the agent via `tool_server_handle`.
-  let mut server = ToolServer::new()
-    .tool(WebFetchTool::new(
+  // `.tool()` chain mutually exclusive — build a single ToolServer that
+  // holds all tools and hand it to the agent via `tool_server_handle`.
+  let server = ToolServer::new()
+    .tool(BrowserNavigateTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserNavigateBackTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserClickTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserTypeTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserPressKeyTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserFillFormTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserSelectOptionTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserTakeScreenshotTool::new(
+      browser.clone(),
       workspace.clone(),
-      mcp.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserEvaluateTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserWaitForTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserHandleDialogTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserHoverTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserDragTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserDropTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserFileUploadTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserResizeTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserSnapshotTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserNetworkRequestsTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserConsoleMessagesTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserCloseTool::new(
+      browser.clone(),
+      log.clone(),
+      author.clone(),
+    ))
+    .tool(BrowserScrollTool::new(
+      browser.clone(),
       log.clone(),
       author.clone(),
     ))
@@ -471,23 +575,7 @@ where
     .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
     .tool(inputs.room_event_tool);
-  let mut mcp_tool_names = std::collections::HashSet::new();
-  if let Some(peer) = mcp.peer() {
-    match peer.list_all_tools().await {
-      Ok(tools) => {
-        for tool in tools {
-          mcp_tool_names.insert(tool.name.to_string());
-          server = server.rmcp_tool(tool, peer.clone());
-        }
-      }
-      Err(error) => {
-        tracing::warn!(
-          "failed to list Playwright MCP tools (continuing with native \
-           tools only): {error}"
-        );
-      }
-    }
-  }
+
   let tool_server_handle = server.run();
   let agent = builder
     .preamble(&inputs.system_prompt)
@@ -498,7 +586,7 @@ where
     .stream_prompt(inputs.user_prompt)
     .with_history(inputs.history)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(session.clone(), mcp_tool_names))
+    .with_hook(DebateHook::new(session.clone()))
     .await;
 
   let mut final_text = String::new();
@@ -536,10 +624,7 @@ where
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(
-      session.clone(),
-      std::collections::HashSet::new(),
-    ))
+    .with_hook(DebateHook::new(session.clone()))
     .await;
   let mut final_text = String::new();
   while let Some(item) = stream.next().await {
@@ -574,10 +659,7 @@ where
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(
-      session.clone(),
-      std::collections::HashSet::new(),
-    ))
+    .with_hook(DebateHook::new(session.clone()))
     .await;
   let mut final_text = String::new();
   while let Some(item) = stream.next().await {
@@ -613,10 +695,7 @@ where
   let mut stream = agent
     .stream_prompt(inputs.user_prompt)
     .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(
-      session.clone(),
-      std::collections::HashSet::new(),
-    ))
+    .with_hook(DebateHook::new(session.clone()))
     .await;
   while let Some(item) = stream.next().await {
     if let MultiTurnStreamItem::StreamAssistantItem(content) =

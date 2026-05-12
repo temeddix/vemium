@@ -15,13 +15,11 @@
 //!   lanes (lifecycle vs. token).
 //! - `room_handles`: a [`RoomHandle`] per room that owns the orchestrator's
 //!   pause/stop signals.
-//! - `mcp`: [`McpRegistry`] holding one MCP session per active room.
-//!   Each session corresponds to an isolated browser context on the
-//!   Playwright sidecar so cross-room navigations cannot interfere.
-//!   Sessions are opened lazily on the first tool call from a given
-//!   room and torn down when [`AppState::forget_room`] runs.
+//! - `browser`: [`BrowserRegistry`] holding one isolated Chrome context per
+//!   active room. Contexts are opened lazily on the first browser tool call
+//!   from a given room and torn down when [`AppState::forget_room`] runs.
 
-use crate::mcp_client::McpRegistry;
+use crate::browser::BrowserRegistry;
 use crate::models::{AppSettings, Room};
 use crate::streaming::RoomStream;
 use sqlx::SqlitePool;
@@ -174,12 +172,11 @@ pub struct AppState {
   /// lazily on first use; values are stable for the process lifetime since
   /// a model's context length does not change without a settings update.
   pub context_size_cache: Arc<RwLock<HashMap<String, u64>>>,
-  /// Per-room MCP sessions to the Playwright sidecar. The first
-  /// `web_fetch` / `browser_*` call from a given room opens a session;
-  /// the sidecar is told to use isolated profiles (`--isolated`) so
-  /// each room gets its own browser context and the rooms cannot
-  /// interfere with each other's navigation state.
-  pub mcp: McpRegistry,
+  /// Per-room Chrome browser contexts. The first browser tool call from a
+  /// given room opens an isolated CDP context; rooms cannot interfere with
+  /// each other's navigation state. Contexts are torn down from
+  /// [`AppState::forget_room`] when a room is deleted.
+  pub browser: BrowserRegistry,
 }
 
 impl AppState {
@@ -187,6 +184,7 @@ impl AppState {
     db: SqlitePool,
     data_root: PathBuf,
     app_settings: AppSettings,
+    browser: BrowserRegistry,
   ) -> Self {
     Self {
       db,
@@ -197,7 +195,7 @@ impl AppState {
       room_handles: Arc::new(RwLock::new(HashMap::new())),
       room_tasks: Arc::new(Mutex::new(HashMap::new())),
       context_size_cache: Arc::new(RwLock::new(HashMap::new())),
-      mcp: McpRegistry::new(),
+      browser,
     }
   }
 
@@ -224,7 +222,7 @@ impl AppState {
   pub async fn forget_room(&self, room_code: &str) {
     // Drop the JoinSet first — aborts all room tasks.
     self.room_tasks.lock().await.remove(room_code);
-    self.mcp.forget(room_code).await;
+    self.browser.forget(room_code).await;
     {
       let mut rooms = self.rooms.write().await;
       rooms.remove(room_code);

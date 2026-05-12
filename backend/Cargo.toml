@@ -12,7 +12,10 @@ wildcard_imports = "deny"
 anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.7", features = ["ws", "macros"] }
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde", "clock"] }
+chromiumoxide = { version = "0.9", features = ["fetcher", "rustls", "zip0"] }
+chromiumoxide_fetcher = { version = "0.9", default-features = false, features = ["zip0", "rustls"] }
 cron = "0.12"
 futures = "0.3"
 rand = "0.8"
@@ -37,12 +40,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "stream",
 ] }
-rig-core = { version = "0.36", features = ["rmcp"] }
-rmcp = { version = "1.6", features = [
-    "client",
-    "macros",
-    "transport-streamable-http-client-reqwest",
-] }
+rig-core = { version = "0.36" }
 sha2 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

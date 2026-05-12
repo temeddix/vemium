@@ -7,8 +7,7 @@
 //!
 //! Output is written next to the source as `<basename>.md` (sandboxed by
 //! [`crate::workspace::RoomWorkspace::resolve`]). Small results are
-//! returned inline; large ones return only path + preview, matching the
-//! `web_fetch` contract so the agent has a uniform mental model.
+//! returned inline; large ones return only path + preview.
 
 use crate::event_log::EventLog;
 use crate::models::RoomEventKind;
@@ -26,8 +25,7 @@ pub const INLINE_NOTE_OK: &str = "Converted document";
 pub const INLINE_NOTE_FAIL: &str = "Failed to convert document";
 
 /// Char count above which the body is omitted from the tool result and the
-/// agent must read the saved file. Mirrors `web_fetch`'s threshold so the
-/// "small inline / large path-only" contract is consistent.
+/// agent must read the saved file.
 const INLINE_THRESHOLD_CHARS: usize = 12_000;
 const PREVIEW_CHARS: usize = 2_000;
 

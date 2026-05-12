@@ -7,44 +7,8 @@ services:
       - "${PORT}:8080"
     volumes:
       - vemium-data:/data
-      - temporary:/tmp
-    restart: unless-stopped
-    depends_on:
-      playwright:
-        condition: service_healthy
-
-  playwright:
-    image: mcr.microsoft.com/playwright/mcp:latest
-    volumes:
-      - vemium-data:/data
-      - temporary:/tmp
-    working_dir: /data/debate
-    command:
-      - --port
-      - "8931"
-      - --host
-      - 0.0.0.0
-      - --allowed-hosts
-      - "*"
-      # This gives every debate room its own browser so
-      # concurrent rooms cannot stomp on each other's navigation state.
-      - --isolated
-      # Common parent for all room workspaces. Agents pass
-      # `<room-code>/raw/<file>` as the filename so artifacts land
-      # in the correct room.
-      - --output-dir
-      - /data/debate
-    init: true
     restart: unless-stopped
     shm_size: 8g
-    healthcheck:
-      test: ["CMD", "bash", "-c", "</dev/tcp/localhost/8931"]
-      interval: 30s
-      start_interval: 2s
-      timeout: 3s
-      retries: 3
-      start_period: 60s
 
 volumes:
   vemium-data:
-  temporary:
