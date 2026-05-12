@@ -4,6 +4,7 @@ use crate::browser::BrowserHandle;
 use crate::event_log::EventLog;
 use crate::models::RoomEventKind;
 use crate::tools::browser::BrowserToolError;
+use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -84,7 +85,11 @@ impl Tool for BrowserTypeTool {
         .find_element(args.selector.as_str())
         .await
         .map_err(|e| BrowserToolError::Browser(e.to_string()))?
-        .type_str(args.text.as_str())
+        .click()
+        .await
+        .map_err(|e| BrowserToolError::Browser(e.to_string()))?;
+      page
+        .execute(InsertTextParams::new(args.text.as_str()))
         .await
         .map_err(|e| BrowserToolError::Browser(e.to_string()))?;
       Ok::<TypeOutput, BrowserToolError>(TypeOutput {

@@ -106,8 +106,15 @@ impl Tool for BrowserNavigateBackTool {
         .await
         .map_err(|e| BrowserToolError::Browser(e.to_string()))?;
 
-      // Brief settle wait; NavigateToHistoryEntry is fire-and-forget in CDP.
-      tokio::time::sleep(Duration::from_millis(500)).await;
+      // Wait for the page to finish loading. NavigateToHistoryEntry is
+      // fire-and-forget in CDP so we must explicitly wait; a timeout guards
+      // against the (rare) case where no navigation event fires.
+      tokio::time::timeout(Duration::from_secs(10), page.wait_for_navigation())
+        .await
+        .map_err(|_| {
+          BrowserToolError::Browser("navigate back timed out after 10s".into())
+        })?
+        .map_err(|e| BrowserToolError::Browser(e.to_string()))?;
 
       Ok::<NavigateBackOutput, BrowserToolError>(NavigateBackOutput {
         ok: true,
