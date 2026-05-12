@@ -87,7 +87,7 @@ impl Tool for BrowserNetworkRequestsTool {
         .map_err(|e| BrowserToolError::Browser(e.to_string()))?;
       let raw: Value = page
         .evaluate(
-          "() => JSON.stringify(performance.getEntriesByType('resource')\
+          "JSON.stringify(performance.getEntriesByType('resource')\
            .map(e => ({\
              url: e.name,\
              kind: e.initiatorType,\

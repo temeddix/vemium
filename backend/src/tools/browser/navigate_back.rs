@@ -96,6 +96,11 @@ impl Tool for BrowserNavigateBackTool {
       }
 
       let entry_id = history.entries[current_idx - 1].id;
+
+      // Register the navigation listener before issuing the command to avoid
+      // the race condition where the event fires before the future is polled.
+      let nav_future = page.wait_for_navigation();
+
       page
         .execute(
           NavigateToHistoryEntryParams::builder()
@@ -106,10 +111,7 @@ impl Tool for BrowserNavigateBackTool {
         .await
         .map_err(|e| BrowserToolError::Browser(e.to_string()))?;
 
-      // Wait for the page to finish loading. NavigateToHistoryEntry is
-      // fire-and-forget in CDP so we must explicitly wait; a timeout guards
-      // against the (rare) case where no navigation event fires.
-      tokio::time::timeout(Duration::from_secs(10), page.wait_for_navigation())
+      tokio::time::timeout(Duration::from_secs(10), nav_future)
         .await
         .map_err(|_| {
           BrowserToolError::Browser("navigate back timed out after 10s".into())
