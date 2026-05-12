@@ -164,7 +164,10 @@ impl Tool for BrowserDragTool {
     match result {
       Ok(output) => {
         row
-          .replace_body(label.replacen("Browser dragging", "Browser dragged", 1), String::new())
+          .replace_body(
+            label.replacen("Browser dragging", "Browser dragged", 1),
+            String::new(),
+          )
           .await;
         row.finish(true).await;
         Ok(output)

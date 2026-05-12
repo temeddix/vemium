@@ -96,7 +96,10 @@ impl Tool for BrowserEvaluateTool {
     match result {
       Ok(output) => {
         row
-          .replace_body("Browser evaluated JS".to_string(), output.result.clone())
+          .replace_body(
+            "Browser evaluated JS".to_string(),
+            output.result.clone(),
+          )
           .await;
         row.finish(true).await;
         Ok(output)

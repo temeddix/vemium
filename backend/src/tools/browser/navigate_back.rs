@@ -87,10 +87,12 @@ impl Tool for BrowserNavigateBackTool {
 
       let current_idx = history.current_index as usize;
       if current_idx == 0 || history.entries.is_empty() {
-        return Ok::<NavigateBackOutput, BrowserToolError>(NavigateBackOutput {
-          ok: true,
-          navigated: false,
-        });
+        return Ok::<NavigateBackOutput, BrowserToolError>(
+          NavigateBackOutput {
+            ok: true,
+            navigated: false,
+          },
+        );
       }
 
       let entry_id = history.entries[current_idx - 1].id;
@@ -127,7 +129,10 @@ impl Tool for BrowserNavigateBackTool {
       }
       Err(e) => {
         row
-          .replace_body("Browser navigate back failed".to_string(), e.to_string())
+          .replace_body(
+            "Browser navigate back failed".to_string(),
+            e.to_string(),
+          )
           .await;
         row.finish(false).await;
         Err(e)

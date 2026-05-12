@@ -94,7 +94,10 @@ impl Tool for BrowserClickTool {
     match result {
       Ok(output) => {
         row
-          .replace_body(format!("Browser clicked {}", args.selector), String::new())
+          .replace_body(
+            format!("Browser clicked {}", args.selector),
+            String::new(),
+          )
           .await;
         row.finish(true).await;
         Ok(output)

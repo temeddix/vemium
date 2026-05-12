@@ -37,9 +37,9 @@ use crate::python_runner::PythonRunner;
 use crate::streaming::{ReportId, RoomStream, WsEvent, report_id_for};
 use crate::tools::do_nothing::DoNothingTool;
 use crate::tools::get_room_event::GetRoomEventTool;
-use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::pause_room::{LEADER_AGENT, PauseRoomTool};
 use crate::tools::resume_room::ResumeRoomTool;
+use crate::tools::select_next_agent::{NextAgentSlot, SelectNextAgentTool};
 use crate::workspace::{DebateRoot, RoomWorkspace};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -94,6 +94,19 @@ const INLINE_NOTE_TOOL_HINT: &str = "Events in the transcript are tagged \
   `Python script run fail` note, or a message compacted out of the \
   transcript), call `get_room_event` with `id=N`.";
 
+const SELECT_NEXT_AGENT_HINT: &str = "You MUST call `select_next_agent` \
+  before finishing your turn. Choose who speaks next: Researcher, \
+  Strategist, Skeptic, Moderator — or Leader if you need the room leader \
+  to weigh in. Omitting this call gives the floor back to you.";
+
+const LEADER_USER_CHAT_PROMPT: &str = "You are the Leader of this debate \
+  room. The user has sent a message and is waiting for your reply. \
+  You MUST write a direct response — do not stay silent, do not call \
+  `pause_room`. Read the transcript to understand the context, then reply \
+  in 2–4 sentences. Take a clear position if one is called for.";
+/// Max times a debater turn is retried when it skips `select_next_agent`.
+const MAX_SELECT_NEXT_RETRIES: usize = 2;
+const ESCALATION_INLINE_NOTE: &str = "Called by debater";
 const STEERING_INLINE_NOTE: &str = "Appeared for steering";
 const KICKOFF_INLINE_NOTE: &str = "Opened with plan";
 const LEADER_KICKOFF_PROMPT: &str = include_str!("prompts/leader_kickoff.md");
@@ -129,15 +142,15 @@ pub async fn restore_rooms(state: AppState) -> Result<()> {
   Ok(())
 }
 
+/// First-time room initialisation. Registers the room in all in-memory maps,
+/// ensures the workspace directory, closes any stale events left by a prior
+/// crash, and — if the room is `Active` — spawns its orchestrator tasks.
 pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   let room_code = room.code.clone();
   let event_seq = db::max_event_sequence(&state.db, &room_code).await?;
   let report_seq = db::max_report_sequence(&state.db, &room_code).await?;
 
   let handle = RoomHandle::new(event_seq, report_seq);
-  if matches!(room.room_state, RoomState::Deactivated) {
-    handle.request_deactivate();
-  }
   if matches!(room.debate_state, DebateState::Paused) {
     handle.request_pause_debate();
   }
@@ -152,44 +165,68 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   }
   state.ensure_room_stream(&room_code).await;
 
+  if matches!(room.room_state, RoomState::Active) {
+    start_room_tasks(&state, &room_code).await?;
+  }
+
+  Ok(())
+}
+
+/// Spawn (or respawn) the five orchestrator tasks for an already-registered
+/// room. Closes stale events first in case previous tasks were aborted
+/// mid-turn. Inserts the new [`JoinSet`] into [`AppState::room_tasks`],
+/// replacing any prior entry (which aborts the old tasks if still alive).
+pub async fn start_room_tasks(state: &AppState, room_code: &str) -> Result<()> {
   let debate_root = DebateRoot::new(&state.data_root);
   let workspace = debate_root
-    .workspace_for(&room.code)
+    .workspace_for(room_code)
     .await
     .context("failed to ensure room workspace")?;
 
-  db::close_incomplete_events(&state.db, &room_code)
+  db::close_incomplete_events(&state.db, room_code)
     .await
     .context("failed to close incomplete events on room start")?;
+
+  let handle = {
+    let handles = state.room_handles.read().await;
+    handles
+      .get(room_code)
+      .cloned()
+      .context("handle missing for room")?
+  };
 
   let mut tasks = JoinSet::new();
   tasks.spawn(run_debate_loop(
     state.clone(),
     handle.clone(),
-    room_code.clone(),
+    room_code.to_string(),
     workspace.clone(),
   ));
   tasks.spawn(run_user_chat_loop(
     state.clone(),
     handle.clone(),
-    room_code.clone(),
+    room_code.to_string(),
   ));
   tasks.spawn(run_steering_loop(
     state.clone(),
     handle.clone(),
-    room_code.clone(),
+    room_code.to_string(),
   ));
   tasks.spawn(run_report_loop(
     state.clone(),
     handle.clone(),
-    room_code.clone(),
+    room_code.to_string(),
   ));
   tasks.spawn(run_resume_schedule_loop(
     state.clone(),
     handle,
-    room_code.clone(),
+    room_code.to_string(),
   ));
-  state.room_tasks.lock().await.insert(room_code, tasks);
+  state
+    .room_tasks
+    .lock()
+    .await
+    .insert(room_code.to_string(), tasks);
 
   Ok(())
 }
@@ -368,7 +405,7 @@ async fn run_debate_loop(
   let mut persona_index: usize = 0;
 
   loop {
-    if handle.is_blocked() {
+    if handle.is_debate_paused() {
       handle.pause_notify.notified().await;
       continue;
     }
@@ -402,11 +439,33 @@ async fn run_debate_loop(
     }
 
     let persona = DEBATE_PERSONAS[persona_index % DEBATE_PERSONAS.len()];
-    persona_index = persona_index.wrapping_add(1);
 
-    run_chat_turn(&state, &handle, &snapshot, persona, workspace.clone())
-      .await
-      .report();
+    // Retry until the agent calls select_next_agent. On error, stop retrying.
+    let mut next_name: Option<String> = None;
+    for _ in 0..=MAX_SELECT_NEXT_RETRIES {
+      let outcome =
+        run_chat_turn(&state, &handle, &snapshot, persona, workspace.clone())
+          .await;
+      let succeeded = outcome.is_ok();
+      next_name = outcome.as_ref().ok().and_then(|opt| opt.clone());
+      outcome.map(|_| ()).report();
+      if next_name.is_some() || !succeeded {
+        break;
+      }
+    }
+
+    if next_name.as_deref() == Some("Leader") {
+      run_leader_escalation(&state, &handle, &snapshot)
+        .await
+        .report();
+      persona_index = persona_index.wrapping_add(1) % DEBATE_PERSONAS.len();
+    } else {
+      persona_index = next_name
+        .and_then(|name| DEBATE_PERSONAS.iter().position(|p| p.name == name))
+        .unwrap_or_else(|| {
+          persona_index.wrapping_add(1) % DEBATE_PERSONAS.len()
+        });
+    }
 
     sleep_until_next_turn(&handle, snapshot.chat_interval_seconds).await;
   }
@@ -438,14 +497,12 @@ async fn run_chat_turn(
   room: &Room,
   persona: DebatePersona,
   workspace: RoomWorkspace,
-) -> Result<()> {
+) -> Result<Option<String>> {
   let history = load_effective_history(&state.db, &room.code).await?;
   let history_messages = render_transcript_messages(&history);
   let system_prompt = build_chat_system_prompt(room, persona);
   let workspace_files = list_shared_workspace_files(&workspace).await;
   let user_prompt = build_chat_user_prompt(room, persona, &workspace_files);
-  let preamble = build_room_preamble(room);
-  let schedule_label = wake_schedule_label(room);
 
   let stream = state.ensure_room_stream(&room.code).await;
   let log =
@@ -459,15 +516,6 @@ async fn run_chat_turn(
   let runner =
     PythonRunner::new(workspace.clone(), room.python_timeout_seconds);
   let (low, high) = current_provider_configs(state).await;
-  let leader_tool = RequestLeaderDecisionTool::new(
-    state.clone(),
-    room.code.clone(),
-    high.clone(),
-    preamble,
-    schedule_label,
-    log.clone(),
-    persona.name.to_string(),
-  );
   let do_nothing_tool =
     DoNothingTool::new(log.clone(), persona.name.to_string());
   let room_event_tool = GetRoomEventTool::new(
@@ -476,6 +524,9 @@ async fn run_chat_turn(
     log.clone(),
     persona.name.to_string(),
   );
+  let next_agent_slot: NextAgentSlot = Arc::new(Mutex::new(None));
+  let select_next_agent_tool =
+    SelectNextAgentTool::new(next_agent_slot.clone());
 
   let client =
     build_chat_client(&low).context("failed to construct low-tier client")?;
@@ -498,14 +549,15 @@ async fn run_chat_turn(
       user_prompt,
       workspace,
       runner,
-      leader_tool,
       do_nothing_tool,
       room_event_tool,
+      select_next_agent_tool,
       session: session.clone(),
       browser,
     })
     .await;
 
+  let next_agent = next_agent_slot.lock().await.take();
   let input_tokens = outcome.as_ref().map(|&(_, t)| t).unwrap_or(0);
   session.finish(outcome.is_ok()).await;
 
@@ -523,7 +575,7 @@ async fn run_chat_turn(
     );
   }
 
-  outcome.map(|_| ())
+  outcome.map(|_| next_agent)
 }
 
 // -- Resume gate -----------------------------------------------------------
@@ -534,7 +586,7 @@ async fn run_resume_schedule_loop(
   room_code: String,
 ) {
   loop {
-    if !handle.is_debate_paused() || handle.is_deactivated() {
+    if !handle.is_debate_paused() {
       handle.pause_notify.notified().await;
       continue;
     }
@@ -563,7 +615,7 @@ async fn run_resume_schedule_loop(
       _ = handle.config_notify.notified() => continue,
     }
 
-    if !handle.is_debate_paused() || handle.is_deactivated() {
+    if !handle.is_debate_paused() {
       continue;
     }
 
@@ -688,9 +740,6 @@ async fn run_user_chat_loop(
 ) {
   loop {
     handle.user_message_notify.notified().await;
-    if handle.is_deactivated() {
-      continue;
-    }
     if handle.is_debate_paused()
       && resume_debate(&state, &handle, &room_code)
         .await
@@ -716,14 +765,49 @@ async fn run_leader_on_user_chat(
   let history = load_effective_history(&state.db, &room.code).await?;
   let preamble = build_room_preamble(room);
   let system = format!(
-    "{LEADER_STEERING_PROMPT}\n\n{preamble}\n\n{CHAT_FORMAT_GUARDRAIL}\n\n{INLINE_NOTE_TOOL_HINT}"
+    "{LEADER_USER_CHAT_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}"
   );
   let transcript = render_transcript_text(&history);
   let user = format!(
-    "The user just sent a message. Here is the debate transcript:\n\n\
-     {transcript}\n\nAddress the user's message now."
+    "Here is the debate transcript:\n\n{transcript}\n\nReply to the user now."
   );
   run_leader_turn(state, handle, room, system, user, None).await
+}
+
+async fn run_leader_escalation(
+  state: &AppState,
+  handle: &RoomHandle,
+  room: &Room,
+) -> Result<()> {
+  let history = load_effective_history(&state.db, &room.code).await?;
+  if history.summary_text.is_none() && history.tail.is_empty() {
+    return Ok(());
+  }
+  let preamble = build_room_preamble(room);
+  let system = format!(
+    "You are the Leader of this debate room. A debater has passed the \
+     floor to you and is asking for your judgment.\n\n\
+     Choose one of two responses:\n\
+     1. Provide a crisp verdict or next-step directive — one to two \
+     paragraphs at most. Take a clear position.\n\
+     2. If the discussion has plainly run its course, call `pause_room`.\n\n\
+     Use `get_room_event` when a transcript event body is needed.\n\n\
+     {preamble}\n\n{CHAT_FORMAT_GUARDRAIL}\n\n{INLINE_NOTE_TOOL_HINT}"
+  );
+  let transcript = render_transcript_text(&history);
+  let user = format!(
+    "A debater has passed the floor to you. Here is the debate transcript:\
+     \n\n{transcript}\n\nWeigh in now."
+  );
+  run_leader_turn(
+    state,
+    handle,
+    room,
+    system,
+    user,
+    Some(ESCALATION_INLINE_NOTE),
+  )
+  .await
 }
 
 // -- Leader steering -------------------------------------------------------
@@ -743,7 +827,7 @@ async fn run_steering_loop(
       _ = sleep(Duration::from_secs(interval)) => {}
       _ = handle.config_notify.notified() => continue,
     }
-    if handle.is_blocked() {
+    if handle.is_debate_paused() {
       continue;
     }
 
@@ -902,7 +986,7 @@ async fn run_report_loop(
       _ = sleep(wait) => {}
       _ = handle.config_notify.notified() => continue,
     }
-    if handle.is_blocked() {
+    if handle.is_debate_paused() {
       continue;
     }
 
@@ -1052,12 +1136,13 @@ pub(crate) async fn current_provider_configs(
 
 fn build_chat_system_prompt(room: &Room, persona: DebatePersona) -> String {
   format!(
-    "{persona_prompt}\n\n{preamble}\n\n{guardrail}\n\n{python_style}\n\n{hint}",
+    "{persona_prompt}\n\n{preamble}\n\n{guardrail}\n\n{python_style}\n\n{hint}\n\n{routing}",
     persona_prompt = persona.system_prompt,
     preamble = build_room_preamble(room),
     guardrail = CHAT_FORMAT_GUARDRAIL,
     python_style = PYTHON_STYLE_GUIDE,
     hint = INLINE_NOTE_TOOL_HINT,
+    routing = SELECT_NEXT_AGENT_HINT,
   )
 }
 

@@ -117,7 +117,10 @@ impl Tool for BrowserHandleDialogTool {
       }
       Err(e) => {
         row
-          .replace_body("Browser handle dialog failed".to_string(), e.to_string())
+          .replace_body(
+            "Browser handle dialog failed".to_string(),
+            e.to_string(),
+          )
           .await;
         row.finish(false).await;
         Err(e)

@@ -113,14 +113,9 @@ impl Tool for BrowserNetworkRequestsTool {
             .iter()
             .filter_map(|item| {
               let url = item["url"].as_str()?.to_string();
-              let kind = item["kind"]
-                .as_str()
-                .unwrap_or("other")
-                .to_string();
-              let duration_ms =
-                item["duration_ms"].as_u64().unwrap_or(0);
-              let transfer_size =
-                item["transfer_size"].as_u64().unwrap_or(0);
+              let kind = item["kind"].as_str().unwrap_or("other").to_string();
+              let duration_ms = item["duration_ms"].as_u64().unwrap_or(0);
+              let transfer_size = item["transfer_size"].as_u64().unwrap_or(0);
               Some(NetworkEntry {
                 url,
                 kind,
@@ -151,7 +146,10 @@ impl Tool for BrowserNetworkRequestsTool {
       }
       Err(e) => {
         row
-          .replace_body("Browser network requests failed".to_string(), e.to_string())
+          .replace_body(
+            "Browser network requests failed".to_string(),
+            e.to_string(),
+          )
           .await;
         row.finish(false).await;
         Err(e)

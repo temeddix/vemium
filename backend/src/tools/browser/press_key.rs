@@ -110,7 +110,10 @@ impl Tool for BrowserPressKeyTool {
     match result {
       Ok(output) => {
         row
-          .replace_body(format!("Browser pressed key: {}", args.key), String::new())
+          .replace_body(
+            format!("Browser pressed key: {}", args.key),
+            String::new(),
+          )
           .await;
         row.finish(true).await;
         Ok(output)

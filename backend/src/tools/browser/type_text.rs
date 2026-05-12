@@ -96,7 +96,10 @@ impl Tool for BrowserTypeTool {
     match result {
       Ok(output) => {
         row
-          .replace_body(format!("Browser typed into {}", args.selector), String::new())
+          .replace_body(
+            format!("Browser typed into {}", args.selector),
+            String::new(),
+          )
           .await;
         row.finish(true).await;
         Ok(output)

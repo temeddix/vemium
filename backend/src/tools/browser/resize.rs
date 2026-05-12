@@ -70,7 +70,10 @@ impl Tool for BrowserResizeTool {
       .start_row(
         RoomEventKind::InlineNote,
         Some(self.author.clone()),
-        format!("Browser resizing viewport to {}x{}", args.width, args.height),
+        format!(
+          "Browser resizing viewport to {}x{}",
+          args.width, args.height
+        ),
         String::new(),
       )
       .await;
