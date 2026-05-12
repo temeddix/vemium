@@ -48,7 +48,7 @@ use crate::models::{
   RoomState, UpdateAppSettingsRequest, UpdateRoomRequest,
 };
 use crate::provider_models;
-use crate::runtime;
+use crate::runtime::{self, start_room_tasks};
 use crate::streaming::{RoomReceiver, WsEvent};
 use crate::workspace::DebateRoot;
 use anyhow::Result;
@@ -517,14 +517,12 @@ async fn set_room_state(
     return internal("failed to update room state");
   };
 
-  let handle = {
-    let handles = state.room_handles.read().await;
-    handles.get(room_code).cloned()
-  };
-  if let Some(handle) = handle {
-    match new_state {
-      RoomState::Active => handle.request_activate(),
-      RoomState::Deactivated => handle.request_deactivate(),
+  match new_state {
+    RoomState::Active => {
+      start_room_tasks(&state, room_code).await.report();
+    }
+    RoomState::Deactivated => {
+      state.room_tasks.lock().await.remove(room_code);
     }
   }
 

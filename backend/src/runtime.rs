@@ -143,15 +143,15 @@ pub async fn restore_rooms(state: AppState) -> Result<()> {
   Ok(())
 }
 
+/// First-time room initialisation. Registers the room in all in-memory maps,
+/// ensures the workspace directory, closes any stale events left by a prior
+/// crash, and — if the room is `Active` — spawns its orchestrator tasks.
 pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   let room_code = room.code.clone();
   let event_seq = db::max_event_sequence(&state.db, &room_code).await?;
   let report_seq = db::max_report_sequence(&state.db, &room_code).await?;
 
   let handle = RoomHandle::new(event_seq, report_seq);
-  if matches!(room.room_state, RoomState::Deactivated) {
-    handle.request_deactivate();
-  }
   if matches!(room.debate_state, DebateState::Paused) {
     handle.request_pause_debate();
   }
@@ -166,44 +166,68 @@ pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   }
   state.ensure_room_stream(&room_code).await;
 
+  if matches!(room.room_state, RoomState::Active) {
+    start_room_tasks(&state, &room_code).await?;
+  }
+
+  Ok(())
+}
+
+/// Spawn (or respawn) the five orchestrator tasks for an already-registered
+/// room. Closes stale events first in case previous tasks were aborted
+/// mid-turn. Inserts the new [`JoinSet`] into [`AppState::room_tasks`],
+/// replacing any prior entry (which aborts the old tasks if still alive).
+pub async fn start_room_tasks(state: &AppState, room_code: &str) -> Result<()> {
   let debate_root = DebateRoot::new(&state.data_root);
   let workspace = debate_root
-    .workspace_for(&room.code)
+    .workspace_for(room_code)
     .await
     .context("failed to ensure room workspace")?;
 
-  db::close_incomplete_events(&state.db, &room_code)
+  db::close_incomplete_events(&state.db, room_code)
     .await
     .context("failed to close incomplete events on room start")?;
+
+  let handle = {
+    let handles = state.room_handles.read().await;
+    handles
+      .get(room_code)
+      .cloned()
+      .context("handle missing for room")?
+  };
 
   let mut tasks = JoinSet::new();
   tasks.spawn(run_debate_loop(
     state.clone(),
     handle.clone(),
-    room_code.clone(),
+    room_code.to_string(),
     workspace.clone(),
   ));
   tasks.spawn(run_user_chat_loop(
     state.clone(),
     handle.clone(),
-    room_code.clone(),
+    room_code.to_string(),
   ));
   tasks.spawn(run_steering_loop(
     state.clone(),
     handle.clone(),
-    room_code.clone(),
+    room_code.to_string(),
   ));
   tasks.spawn(run_report_loop(
     state.clone(),
     handle.clone(),
-    room_code.clone(),
+    room_code.to_string(),
   ));
   tasks.spawn(run_resume_schedule_loop(
     state.clone(),
     handle,
-    room_code.clone(),
+    room_code.to_string(),
   ));
-  state.room_tasks.lock().await.insert(room_code, tasks);
+  state
+    .room_tasks
+    .lock()
+    .await
+    .insert(room_code.to_string(), tasks);
 
   Ok(())
 }
@@ -427,7 +451,7 @@ async fn run_debate_loop(
   let mut persona_index: usize = 0;
 
   loop {
-    if handle.is_blocked() {
+    if handle.is_debate_paused() {
       handle.pause_notify.notified().await;
       continue;
     }
@@ -600,7 +624,7 @@ async fn run_resume_schedule_loop(
   room_code: String,
 ) {
   loop {
-    if !handle.is_debate_paused() || handle.is_deactivated() {
+    if !handle.is_debate_paused() {
       handle.pause_notify.notified().await;
       continue;
     }
@@ -629,7 +653,7 @@ async fn run_resume_schedule_loop(
       _ = handle.config_notify.notified() => continue,
     }
 
-    if !handle.is_debate_paused() || handle.is_deactivated() {
+    if !handle.is_debate_paused() {
       continue;
     }
 
@@ -754,9 +778,6 @@ async fn run_user_chat_loop(
 ) {
   loop {
     handle.user_message_notify.notified().await;
-    if handle.is_deactivated() {
-      continue;
-    }
     if handle.is_debate_paused()
       && resume_debate(&state, &handle, &room_code)
         .await
@@ -844,7 +865,7 @@ async fn run_steering_loop(
       _ = sleep(Duration::from_secs(interval)) => {}
       _ = handle.config_notify.notified() => continue,
     }
-    if handle.is_blocked() {
+    if handle.is_debate_paused() {
       continue;
     }
 
@@ -1003,7 +1024,7 @@ async fn run_report_loop(
       _ = sleep(wait) => {}
       _ = handle.config_notify.notified() => continue,
     }
-    if handle.is_blocked() {
+    if handle.is_debate_paused() {
       continue;
     }
 

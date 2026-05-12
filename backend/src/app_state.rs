@@ -14,12 +14,11 @@
 //!   to any number of WebSocket subscribers via per-subscriber priority
 //!   lanes (lifecycle vs. token).
 //! - `room_handles`: a [`RoomHandle`] per room that owns the orchestrator's
-//!   pause/stop signals.
+//!   pause/resume signals.
+//! - `room_tasks`: the [`JoinSet`] for each room's live tasks. Dropping an
+//!   entry aborts all tasks for that room immediately at the next `.await`.
+//!   Deactivation = `room_tasks.remove(code)`; activation = respawn tasks.
 //! - `mcp`: [`McpRegistry`] holding one MCP session per active room.
-//!   Each session corresponds to an isolated browser context on the
-//!   Playwright sidecar so cross-room navigations cannot interfere.
-//!   Sessions are opened lazily on the first tool call from a given
-//!   room and torn down when [`AppState::forget_room`] runs.
 
 use crate::mcp_client::McpRegistry;
 use crate::models::{AppSettings, Room};
@@ -34,28 +33,21 @@ use tokio::task::JoinSet;
 
 /// Per-room control plane shared between the orchestrator and the HTTP API.
 ///
-/// Task lifetime is managed externally via [`AppState::room_tasks`]: dropping
-/// the room's [`JoinSet`] aborts all its tasks immediately at the next
-/// `.await` point. [`RoomHandle`] only carries pause/resume signals and
-/// lightweight counters — no stop flag needed.
+/// Task lifetime is controlled entirely by [`AppState::room_tasks`]: the
+/// JoinSet for a room is inserted on spawn and removed (dropped → aborted)
+/// on deactivate. No stop-flag cooperative cancellation is used for task
+/// lifetime.
 ///
-/// Two orthogonal gates feed [`RoomHandle::is_blocked`]:
-///
-/// - `room_deactivated` is the user-controlled gate (the [`RoomState`]
-///   `Active`/`Deactivated` axis). The strongest off-switch in the system:
-///   while set the orchestrator is fully halted regardless of debate state.
-/// - `debate_paused` is the leader-controlled gate (the [`DebateState`]
-///   `Running`/`Paused` axis). Flipped by the `pause_room`/`resume_room`
-///   tools when the leader decides to pause or wake the debate.
+/// [`RoomHandle`] only carries the leader-controlled debate-pause signal and
+/// lightweight counters. The user-controlled deactivate/activate axis is
+/// represented purely by the presence or absence of the room's JoinSet.
 #[derive(Debug, Clone)]
 pub struct RoomHandle {
-  /// `true` while the user has deactivated the room. Strongest off-switch.
-  pub room_deactivated: Arc<AtomicBool>,
-  /// `true` while the leader has paused the debate. Independent of
-  /// `room_deactivated`; both must be off for the orchestrator to advance.
+  /// `true` while the leader has paused the debate. Flipped by the
+  /// `pause_room` / `resume_room` tools.
   pub debate_paused: Arc<AtomicBool>,
-  /// Signal fired whenever any gate (`room_deactivated` /
-  /// `debate_paused`) changes. The orchestrator awaits this to wake up.
+  /// Signal fired whenever `debate_paused` changes. The orchestrator awaits
+  /// this to wake up after a pause or to stop waiting after a resume.
   pub pause_notify: Arc<Notify>,
   /// Signal fired when room settings change (e.g. interval edits via the
   /// HTTP API). Lets in-progress sleeps wake early so loops re-read fresh
@@ -65,8 +57,6 @@ pub struct RoomHandle {
   /// leader user-chat loop so it can respond immediately.
   pub user_message_notify: Arc<Notify>,
   /// Monotonic counter for the next event sequence number for this room.
-  /// Seeded from the database on orchestrator startup, then owned in
-  /// memory.
   pub next_event_sequence: Arc<AtomicU64>,
   /// Same idea as `next_event_sequence`, scoped to the report stream.
   pub next_report_sequence: Arc<AtomicU64>,
@@ -79,7 +69,6 @@ pub struct RoomHandle {
 impl RoomHandle {
   pub fn new(seed_event_seq: u64, seed_report_seq: u64) -> Self {
     Self {
-      room_deactivated: Arc::new(AtomicBool::new(false)),
       debate_paused: Arc::new(AtomicBool::new(false)),
       pause_notify: Arc::new(Notify::new()),
       config_notify: Arc::new(Notify::new()),
@@ -100,30 +89,15 @@ impl RoomHandle {
     self.next_report_sequence.fetch_add(1, Ordering::SeqCst)
   }
 
-  /// Flips the user-controlled gate to `Deactivated`. The orchestrator
-  /// stops advancing turns regardless of [`DebateState`].
-  pub fn request_deactivate(&self) {
-    self.room_deactivated.store(true, Ordering::SeqCst);
-    self.pause_notify.notify_waiters();
-  }
-
-  /// Flips the user-controlled gate back to `Active`. The leader's
-  /// `debate_paused` flag (if any) is left untouched so a previously
-  /// paused room stays paused after the user re-activates it.
-  pub fn request_activate(&self) {
-    self.room_deactivated.store(false, Ordering::SeqCst);
-    self.pause_notify.notify_waiters();
-  }
-
-  /// Leader-side debate pause. Flips [`DebateState`] to `Paused`. The
-  /// resume scheduler picks the room up at the next cron tick and asks
-  /// the leader whether to wake it.
+  /// Leader-side debate pause. Flips [`crate::models::DebateState`] to
+  /// `Paused`. The resume scheduler picks the room up at the next cron tick.
   pub fn request_pause_debate(&self) {
     self.debate_paused.store(true, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
   }
 
-  /// Leader-side debate resume. Flips [`DebateState`] back to `Running`.
+  /// Leader-side debate resume. Flips [`crate::models::DebateState`] back to
+  /// `Running`.
   pub fn request_resume_debate(&self) {
     self.debate_paused.store(false, Ordering::SeqCst);
     self.pause_notify.notify_waiters();
@@ -143,16 +117,6 @@ impl RoomHandle {
     self.user_message_notify.notify_one();
   }
 
-  /// True while either gate is engaged. The orchestrator must not advance
-  /// turns whenever this returns `true`.
-  pub fn is_blocked(&self) -> bool {
-    self.is_deactivated() || self.is_debate_paused()
-  }
-
-  pub fn is_deactivated(&self) -> bool {
-    self.room_deactivated.load(Ordering::SeqCst)
-  }
-
   pub fn is_debate_paused(&self) -> bool {
     self.debate_paused.load(Ordering::SeqCst)
   }
@@ -168,7 +132,7 @@ pub struct AppState {
   pub room_handles: Arc<RwLock<HashMap<String, RoomHandle>>>,
   /// Owns the live Tokio tasks for each room. Removing an entry drops the
   /// [`JoinSet`], which aborts all tasks for that room at the next
-  /// `.await` point — no cooperative stop flag needed.
+  /// `.await` point. Deactivating a room = `room_tasks.remove(code)`.
   pub room_tasks: Arc<Mutex<HashMap<String, JoinSet<()>>>>,
   /// Cache of model context sizes keyed by `"{base_url}:{model}"`. Populated
   /// lazily on first use; values are stable for the process lifetime since
@@ -202,8 +166,6 @@ impl AppState {
   }
 
   /// Returns the room's [`RoomStream`], creating it on first access.
-  /// Subscribers persist across orchestrator restarts because the stream
-  /// lives in [`AppState`] rather than in the orchestrator task.
   pub async fn ensure_room_stream(&self, room_code: &str) -> Arc<RoomStream> {
     {
       let streams = self.room_streams.read().await;
@@ -222,7 +184,6 @@ impl AppState {
   ///
   /// Dropping the [`JoinSet`] aborts all room tasks immediately.
   pub async fn forget_room(&self, room_code: &str) {
-    // Drop the JoinSet first — aborts all room tasks.
     self.room_tasks.lock().await.remove(room_code);
     self.mcp.forget(room_code).await;
     {
