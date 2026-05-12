@@ -468,7 +468,8 @@ impl Tool for EditFileTool {
     if count == 0 {
       let error =
         WorkspaceToolError(format!("`old_string` not found in {}", args.path));
-      finish_err(&row, "Failed to edit file".to_string(), error.0.clone()).await;
+      finish_err(&row, "Failed to edit file".to_string(), error.0.clone())
+        .await;
       return Err(error);
     }
     if count > 1 {
@@ -477,7 +478,8 @@ impl Tool for EditFileTool {
          more surrounding context to make it unique",
         args.path
       ));
-      finish_err(&row, "Failed to edit file".to_string(), error.0.clone()).await;
+      finish_err(&row, "Failed to edit file".to_string(), error.0.clone())
+        .await;
       return Err(error);
     }
 

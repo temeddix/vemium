@@ -51,10 +51,10 @@ use crate::tools::do_nothing::DoNothingTool;
 use crate::tools::document_to_md::DocumentToMdTool;
 use crate::tools::download_file::DownloadFileTool;
 use crate::tools::get_room_event::GetRoomEventTool;
-use crate::tools::leader::RequestLeaderDecisionTool;
 use crate::tools::pause_room::PauseRoomTool;
 use crate::tools::python::RunPythonTool;
 use crate::tools::resume_room::ResumeRoomTool;
+use crate::tools::select_next_agent::SelectNextAgentTool;
 use crate::tools::shell::RunShellTool;
 use crate::tools::web_fetch::WebFetchTool;
 use crate::tools::workspace::{
@@ -93,9 +93,9 @@ pub struct DebateTurnInputs {
   pub user_prompt: String,
   pub workspace: RoomWorkspace,
   pub runner: PythonRunner,
-  pub leader_tool: RequestLeaderDecisionTool,
   pub do_nothing_tool: DoNothingTool,
   pub room_event_tool: GetRoomEventTool,
+  pub select_next_agent_tool: SelectNextAgentTool,
   pub session: Arc<TurnSession>,
   /// Singleton MCP setup for the Playwright sidecar. Always present.
   /// When the sidecar was unreachable at startup, `mcp.peer()` returns
@@ -125,19 +125,6 @@ pub struct SteeringTurnInputs {
   pub session: Arc<TurnSession>,
   pub room_event_tool: GetRoomEventTool,
   pub pause_tool: PauseRoomTool,
-}
-
-/// Inputs for the on-demand leader-decision turn invoked by the
-/// `request_leader_decision` tool from a debater. Carries `pause_room`
-/// so the leader can pause the room itself, plus `get_inline_note_detail`
-/// for breadcrumb lookups. The session segments the stream like any
-/// other turn; the final text is also returned to the calling debater.
-pub struct LeaderDecisionTurnInputs {
-  pub system_prompt: String,
-  pub user_prompt: String,
-  pub pause_tool: PauseRoomTool,
-  pub room_event_tool: GetRoomEventTool,
-  pub session: Arc<TurnSession>,
 }
 
 /// Inputs for a no-tool streaming turn (leader report). Used only by the
@@ -171,16 +158,6 @@ pub trait ChatClient: Send + Sync {
   async fn run_steering_turn(
     &self,
     inputs: SteeringTurnInputs,
-  ) -> Result<String>;
-
-  /// Non-streaming tool-loop turn for the on-demand leader decision
-  /// triggered by `request_leader_decision`. The leader may call
-  /// `pause_room` to pause the debate (which emits its own bubble) or
-  /// just produce a verdict as text; the final text is returned to the
-  /// caller for downstream rendering.
-  async fn run_leader_decision_turn(
-    &self,
-    inputs: LeaderDecisionTurnInputs,
   ) -> Result<String>;
 
   /// Non-streaming gate turn for the scheduled wake decision while a
@@ -278,17 +255,6 @@ impl ChatClient for OllamaChatClient {
     run_steering_stream(builder, inputs).await
   }
 
-  async fn run_leader_decision_turn(
-    &self,
-    inputs: LeaderDecisionTurnInputs,
-  ) -> Result<String> {
-    let builder = self
-      .client
-      .agent(&self.model)
-      .additional_params(ollama_extra_params());
-    run_leader_decision_with_builder(builder, inputs).await
-  }
-
   async fn run_resume_gate_turn(&self, inputs: ResumeGateInputs) -> Result<()> {
     let builder = self
       .client
@@ -366,17 +332,6 @@ impl ChatClient for OpenRouterChatClient {
       .agent(&self.model)
       .additional_params(openrouter_extra_params());
     run_steering_stream(builder, inputs).await
-  }
-
-  async fn run_leader_decision_turn(
-    &self,
-    inputs: LeaderDecisionTurnInputs,
-  ) -> Result<String> {
-    let builder = self
-      .client
-      .agent(&self.model)
-      .additional_params(openrouter_extra_params());
-    run_leader_decision_with_builder(builder, inputs).await
   }
 
   async fn run_resume_gate_turn(&self, inputs: ResumeGateInputs) -> Result<()> {
@@ -468,9 +423,9 @@ where
       author.clone(),
     ))
     .tool(RunShellTool::new(workspace, log, author))
-    .tool(inputs.leader_tool)
     .tool(inputs.do_nothing_tool)
-    .tool(inputs.room_event_tool);
+    .tool(inputs.room_event_tool)
+    .tool(inputs.select_next_agent_tool);
   let mut mcp_tool_names = std::collections::HashSet::new();
   if let Some(peer) = mcp.peer() {
     match peer.list_all_tools().await {
@@ -531,44 +486,6 @@ where
     .preamble(&inputs.system_prompt)
     .tool(inputs.room_event_tool)
     .tool(inputs.pause_tool)
-    .build();
-  let session = inputs.session;
-  let mut stream = agent
-    .stream_prompt(inputs.user_prompt)
-    .multi_turn(MAX_TOOL_ROUNDS_PER_TURN)
-    .with_hook(DebateHook::new(
-      session.clone(),
-      std::collections::HashSet::new(),
-    ))
-    .await;
-  let mut final_text = String::new();
-  while let Some(item) = stream.next().await {
-    match item.map_err(|e| anyhow!(e.to_string()))? {
-      MultiTurnStreamItem::FinalResponse(final_response) => {
-        final_text = final_response.response().to_string();
-      }
-      MultiTurnStreamItem::StreamAssistantItem(content) => {
-        if let Some(delta) = reasoning_delta(&content) {
-          session.append_thinking(&delta).await;
-        }
-      }
-      _ => {}
-    }
-  }
-  Ok(final_text)
-}
-
-async fn run_leader_decision_with_builder<M>(
-  builder: AgentBuilder<M>,
-  inputs: LeaderDecisionTurnInputs,
-) -> Result<String>
-where
-  M: CompletionModel + 'static,
-{
-  let agent = builder
-    .preamble(&inputs.system_prompt)
-    .tool(inputs.pause_tool)
-    .tool(inputs.room_event_tool)
     .build();
   let session = inputs.session;
   let mut stream = agent
