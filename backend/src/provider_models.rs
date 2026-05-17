@@ -1,8 +1,8 @@
 //! Fetch the live model list from a configured LLM provider.
 //!
 //! Used by `POST /v1/providers/:tier/models` so the settings UI can show a
-//! dropdown of installed models (Ollama) or available models (OpenRouter)
-//! instead of asking the user to remember the exact identifier. The
+//! dropdown of installed models (Ollama) or available models (OpenRouter /
+//! OpenAI-compatible) instead of asking the user to remember the exact identifier. The
 //! fetcher mirrors the per-provider URL conventions used by
 //! [`crate::llm::build_chat_client`]:
 //!
@@ -62,7 +62,7 @@ pub async fn fetch_provider_models(
 
   match config.api_type {
     ApiType::Ollama => fetch_ollama_models(&client, base).await,
-    ApiType::OpenRouter => {
+    ApiType::OpenRouter | ApiType::OpenAi => {
       let api_key = config
         .api_key
         .as_deref()

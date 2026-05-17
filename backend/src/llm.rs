@@ -1,14 +1,14 @@
 //! Provider client construction and turn orchestration.
 //!
-//! Two API families are supported, selected via [`ProviderConfig::api_type`]:
+//! Provider families are selected via [`ProviderConfig::api_type`]:
 //!
 //! - [`ApiType::Ollama`] uses rig's native Ollama client (NDJSON over
 //!   `/api/chat`). Reasoning arrives on the `thinking` field.
 //! - [`ApiType::OpenRouter`] uses rig's OpenRouter client (SSE over
 //!   `/v1/chat/completions`). Reasoning arrives on `delta.reasoning`. This
-//!   client also works against any OpenAI-compatible endpoint that emits
-//!   `delta.reasoning` (notably llama.cpp); only the API key is required by
-//!   OpenRouter itself.
+//!   client is tuned for OpenRouter's request extensions.
+//! - [`ApiType::OpenAi`] uses rig's OpenAI Chat Completions client against a
+//!   configurable `/v1` API base.
 //!
 //! Both clients are exposed through [`ChatClient`], a `dyn`-safe trait that
 //! hides the concrete rig types. The runtime drives turns by calling these
@@ -25,7 +25,7 @@ use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, Message};
 use rig::providers::{
   ollama::{self, OllamaApiKey},
-  openrouter,
+  openai, openrouter,
 };
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use rig::tool::server::ToolServer;
@@ -195,6 +195,10 @@ pub fn build_chat_client(
       let client = OpenRouterChatClient::new(config)?;
       Ok(Arc::new(client))
     }
+    ApiType::OpenAi => {
+      let client = OpenAiChatClient::new(config)?;
+      Ok(Arc::new(client))
+    }
   }
 }
 
@@ -356,6 +360,74 @@ impl ChatClient for OpenRouterChatClient {
       .client
       .agent(&self.model)
       .additional_params(openrouter_extra_params());
+    run_report_stream(builder, inputs).await
+  }
+}
+
+// -- OpenAI-compatible ----------------------------------------------------
+
+/// Wraps rig's OpenAI Chat Completions client for servers exposing the
+/// standard `/v1/chat/completions` shape. The API key is optional at the
+/// Vemium configuration layer, but rig requires an auth value to build the
+/// client; local compatible servers commonly ignore the placeholder bearer.
+struct OpenAiChatClient {
+  client: openai::CompletionsClient,
+  model: String,
+}
+
+impl OpenAiChatClient {
+  fn new(config: &ProviderConfig) -> Result<Self> {
+    let base = config.base_url.trim();
+    if base.is_empty() {
+      bail!("OpenAI-compatible provider requires base_url");
+    }
+    let api_key = config
+      .api_key
+      .as_deref()
+      .map(str::trim)
+      .filter(|k| !k.is_empty())
+      .unwrap_or("local");
+    let client = openai::CompletionsClient::builder()
+      .api_key(BearerAuth::from(api_key.to_owned()))
+      .base_url(base)
+      .build()
+      .map_err(|e| anyhow!(e.to_string()))
+      .context("failed to build OpenAI-compatible chat client")?;
+    Ok(Self {
+      client,
+      model: config.model.clone(),
+    })
+  }
+}
+
+#[async_trait]
+impl ChatClient for OpenAiChatClient {
+  async fn run_debate_turn(
+    &self,
+    inputs: DebateTurnInputs,
+  ) -> Result<(String, u64)> {
+    let builder = self.client.agent(&self.model);
+    run_chat_turn_with_builder(builder, inputs).await
+  }
+
+  async fn run_steering_turn(
+    &self,
+    inputs: SteeringTurnInputs,
+  ) -> Result<String> {
+    let builder = self.client.agent(&self.model);
+    run_steering_stream(builder, inputs).await
+  }
+
+  async fn run_resume_gate_turn(&self, inputs: ResumeGateInputs) -> Result<()> {
+    let builder = self.client.agent(&self.model);
+    run_resume_gate_with_builder(builder, inputs).await
+  }
+
+  async fn run_report_turn(
+    &self,
+    inputs: NoToolTurnInputs<ReportHook>,
+  ) -> Result<String> {
+    let builder = self.client.agent(&self.model);
     run_report_stream(builder, inputs).await
   }
 }
@@ -713,6 +785,10 @@ pub async fn fetch_context_size(config: &ProviderConfig) -> u64 {
       .await
       .report()
       .unwrap_or(CONTEXT_SIZE_FALLBACK),
+    ApiType::OpenAi => fetch_openai_compatible_context_size(config)
+      .await
+      .report()
+      .unwrap_or(CONTEXT_SIZE_FALLBACK),
   }
 }
 
@@ -793,6 +869,43 @@ async fn fetch_openrouter_context_size(config: &ProviderConfig) -> Result<u64> {
     })
 }
 
+async fn fetch_openai_compatible_context_size(
+  config: &ProviderConfig,
+) -> Result<u64> {
+  let base = config.base_url.trim().trim_end_matches('/');
+  let url = format!("{base}/models");
+  let mut request = reqwest::Client::new().get(&url);
+  if let Some(key) = config
+    .api_key
+    .as_deref()
+    .map(str::trim)
+    .filter(|k| !k.is_empty())
+  {
+    request = request.bearer_auth(key);
+  }
+  let resp: serde_json::Value = request
+    .send()
+    .await
+    .context("OpenAI-compatible /models request failed")?
+    .json()
+    .await
+    .context("OpenAI-compatible /models response parse failed")?;
+  resp["data"]
+    .as_array()
+    .and_then(|arr| {
+      arr
+        .iter()
+        .find(|m| m["id"].as_str() == Some(&config.model))
+        .and_then(|m| m["context_length"].as_u64())
+    })
+    .ok_or_else(|| {
+      anyhow!(
+        "model {} context length not found in OpenAI-compatible /models",
+        config.model
+      )
+    })
+}
+
 // -- History compaction ----------------------------------------------------
 
 /// Calls the high-tier model to summarize `transcript` and returns the
@@ -823,6 +936,15 @@ pub async fn run_compact_transcript(
           .client
           .agent(&client.model)
           .additional_params(openrouter_extra_params()),
+        COMPACTION_PROMPT,
+        user_prompt,
+      )
+      .await
+    }
+    ApiType::OpenAi => {
+      let client = OpenAiChatClient::new(config)?;
+      run_no_hook_stream(
+        client.client.agent(&client.model),
         COMPACTION_PROMPT,
         user_prompt,
       )

@@ -16,7 +16,7 @@ export type RoomState = "active" | "deactivated";
  */
 export type DebateState = "running" | "paused";
 
-export type ApiType = "ollama" | "openRouter";
+export type ApiType = "ollama" | "openRouter" | "openAi";
 
 export interface ProviderConfig {
   model: string;

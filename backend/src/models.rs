@@ -100,6 +100,10 @@ impl DebateState {
 /// - [`ApiType::OpenRouter`]: rig's OpenRouter client. `base_url` is normally
 ///   `https://openrouter.ai/api/v1` but is left configurable for proxies;
 ///   `api_key` is required.
+/// - [`ApiType::OpenAi`]: rig's OpenAI Chat Completions client for OpenAI
+///   itself or compatible servers exposing `/v1/chat/completions` and
+///   `/v1/models`. `base_url` should point at the API root; `api_key` is
+///   optional for local servers but forwarded as bearer auth when present.
 #[derive(
   Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
 )]
@@ -108,6 +112,7 @@ pub enum ApiType {
   #[default]
   Ollama,
   OpenRouter,
+  OpenAi,
 }
 
 /// Provider configuration for one tier (low or high). One of these is stored
@@ -120,11 +125,12 @@ pub enum ApiType {
 pub struct ProviderConfig {
   pub model: String,
   /// Endpoint root. For Ollama, the server root (e.g.
-  /// `http://localhost:11434`). For OpenRouter, the API base (normally
-  /// `https://openrouter.ai/api/v1`).
+  /// `http://localhost:11434`). For OpenRouter and OpenAI-compatible
+  /// providers, the API base (normally ending in `/v1`).
   pub base_url: String,
   /// Bearer token. Plaintext in storage - do not return through the public
-  /// API without redaction. Required for OpenRouter; optional for Ollama.
+  /// API without redaction. Required for OpenRouter; optional for Ollama and
+  /// generic OpenAI-compatible servers.
   #[serde(default)]
   pub api_key: Option<String>,
   /// Which provider family to use. Defaults to [`ApiType::Ollama`] so older

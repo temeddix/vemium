@@ -386,18 +386,27 @@ export class SettingsPage extends LitElement {
           ${this.#renderLabel(
             `${tier}-api-type`,
             "API type",
-            "Pick OpenRouter for any OpenAI-compatible endpoint (cloud or proxied) or Ollama for the native /api/chat protocol.",
+            "Pick the provider protocol used by this tier.",
           )}
           <wa-select
             size="small"
             .value="${apiType}"
             @change="${(e: Event): void => {
               const value = readInputValue(e.target);
-              if (value === "ollama" || value === "openRouter") {
+              if (
+                value === "ollama" ||
+                value === "openRouter" ||
+                value === "openAi"
+              ) {
                 const patch: Partial<ProviderConfig> = { apiType: value };
                 if (value === "openRouter") {
                   patch.baseUrl = "https://openrouter.ai/api/v1";
-                } else if (config.baseUrl === "https://openrouter.ai/api/v1") {
+                } else if (value === "openAi") {
+                  patch.baseUrl = "http://localhost:1234/v1";
+                } else if (
+                  config.baseUrl === "https://openrouter.ai/api/v1" ||
+                  config.baseUrl === "http://localhost:1234/v1"
+                ) {
                   patch.baseUrl = "http://localhost:11434";
                 }
                 onChange({ ...config, ...patch });
@@ -406,26 +415,29 @@ export class SettingsPage extends LitElement {
           >
             <wa-option value="ollama">Ollama</wa-option>
             <wa-option value="openRouter">OpenRouter</wa-option>
+            <wa-option value="openAi">OpenAI Compatible</wa-option>
           </wa-select>
         </label>
-        ${apiType === "openRouter"
+        ${apiType !== "ollama"
           ? this.#renderPasswordField(
             `${tier}-api-key`,
             "API key",
             config.apiKey ?? "",
             (value) =>
               onChange({ ...config, apiKey: value === "" ? null : value }),
-            "Required for OpenRouter. Leave it as-is (***) to keep the stored key, or type a new value to replace.",
+            apiType === "openRouter"
+              ? "Required for OpenRouter. Leave it as-is (***) to keep the stored key, or type a new value to replace."
+              : "Optional bearer token. Leave it as-is (***) to keep the stored key, or type a new value to replace.",
           )
-          : nothing} ${apiType === "ollama"
-          ? this.#renderTextField(
+          : nothing} ${this.#renderTextField(
             `${tier}-base-url`,
             "Base URL",
             config.baseUrl,
             (value) => onChange({ ...config, baseUrl: value }),
-            "Server root, e.g. http://localhost:11434. Do not include /v1.",
-          )
-          : nothing} ${this.#renderModelField(
+            apiType === "ollama"
+              ? "Server root, e.g. http://localhost:11434. Do not include /v1."
+              : "OpenAI-compatible API root, e.g. http://localhost:1234/v1.",
+          )} ${this.#renderModelField(
             tier,
             config,
             this.modelsState[tier],
