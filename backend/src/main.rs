@@ -10,6 +10,7 @@
 
 mod app_state;
 mod browser;
+mod chat_db;
 mod config;
 mod db;
 mod error;

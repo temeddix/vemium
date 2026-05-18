@@ -4,7 +4,8 @@
 //! through Axum handlers and the orchestrator alike. It keeps the
 //! authoritative in-memory view of the world:
 //!
-//! - `db`: connection pool to SQLite (durable storage).
+//! - `db`: central SQLite pool for global metadata.
+//! - `chat_dbs`: per-room SQLite pools for workspace-local chat history.
 //! - `data_root`: filesystem root for room workspaces.
 //! - `app_settings`: process-wide tier provider configuration. Saved via
 //!   the home-screen Settings page; read by the orchestrator on every LLM
@@ -23,8 +24,11 @@
 //!   from a given room and torn down when [`AppState::forget_room`] runs.
 
 use crate::browser::BrowserRegistry;
+use crate::chat_db;
 use crate::models::{AppSettings, Room};
 use crate::streaming::RoomStream;
+use crate::workspace::DebateRoot;
+use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -128,6 +132,7 @@ impl RoomHandle {
 pub struct AppState {
   pub db: SqlitePool,
   pub data_root: Arc<PathBuf>,
+  pub chat_dbs: Arc<Mutex<HashMap<String, SqlitePool>>>,
   pub app_settings: Arc<RwLock<AppSettings>>,
   pub rooms: Arc<RwLock<HashMap<String, Room>>>,
   pub room_streams: Arc<RwLock<HashMap<String, Arc<RoomStream>>>>,
@@ -157,6 +162,7 @@ impl AppState {
     Self {
       db,
       data_root: Arc::new(data_root),
+      chat_dbs: Arc::new(Mutex::new(HashMap::new())),
       app_settings: Arc::new(RwLock::new(app_settings)),
       rooms: Arc::new(RwLock::new(HashMap::new())),
       room_streams: Arc::new(RwLock::new(HashMap::new())),
@@ -165,6 +171,32 @@ impl AppState {
       context_size_cache: Arc::new(RwLock::new(HashMap::new())),
       browser,
     }
+  }
+
+  /// Opens and migrates the room's workspace-local `CHAT.db`, returning a
+  /// cached pool on subsequent calls.
+  pub async fn chat_db(&self, room_code: &str) -> Result<SqlitePool> {
+    {
+      let pools = self.chat_dbs.lock().await;
+      if let Some(pool) = pools.get(room_code) {
+        return Ok(pool.clone());
+      }
+    }
+
+    let workspace = DebateRoot::new(&self.data_root)
+      .workspace_for(room_code)
+      .await
+      .with_context(|| format!("failed to open workspace for {room_code}"))?;
+    let db_path = chat_db::chat_db_path(&workspace.root);
+    let pool = chat_db::init_pool(&db_path).await?;
+
+    let mut pools = self.chat_dbs.lock().await;
+    Ok(
+      pools
+        .entry(room_code.to_string())
+        .or_insert_with(|| pool.clone())
+        .clone(),
+    )
   }
 
   /// Returns the room's [`RoomStream`], creating it on first access.
@@ -188,6 +220,7 @@ impl AppState {
   pub async fn forget_room(&self, room_code: &str) {
     self.room_tasks.lock().await.remove(room_code);
     self.browser.forget(room_code).await;
+    self.chat_dbs.lock().await.remove(room_code);
     {
       let mut rooms = self.rooms.write().await;
       rooms.remove(room_code);

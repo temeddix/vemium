@@ -38,6 +38,7 @@
 //! immediately without waiting for the next scheduled wake check.
 
 use crate::app_state::AppState;
+use crate::chat_db;
 use crate::config::room_defaults;
 use crate::db;
 use crate::error::ReportError;
@@ -612,7 +613,13 @@ async fn list_reports(
   Path(code): Path<String>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  match db::load_room_reports(&state.db, &code).await.report() {
+  if !state.rooms.read().await.contains_key(&code) {
+    return not_found("room");
+  }
+  let Some(pool) = state.chat_db(&code).await.report() else {
+    return internal("failed to open chat database");
+  };
+  match chat_db::load_room_reports(&pool, &code).await.report() {
     Some(reports) => {
       (StatusCode::OK, Json(json!({"reports": reports}))).into_response()
     }
@@ -624,7 +631,13 @@ async fn get_report(
   Path((code, sequence)): Path<(String, u64)>,
   State(state): State<AppState>,
 ) -> impl IntoResponse {
-  match db::load_room_report(&state.db, &code, sequence).await {
+  if !state.rooms.read().await.contains_key(&code) {
+    return not_found("room");
+  }
+  let Some(pool) = state.chat_db(&code).await.report() else {
+    return internal("failed to open chat database");
+  };
+  match chat_db::load_room_report(&pool, &code, sequence).await {
     Ok(Some(report)) => {
       (StatusCode::OK, Json(json!({"report": report}))).into_response()
     }
@@ -643,7 +656,10 @@ async fn get_room_event(
   if !state.rooms.read().await.contains_key(&code) {
     return not_found("room");
   }
-  match db::load_room_event(&state.db, &code, sequence).await {
+  let Some(pool) = state.chat_db(&code).await.report() else {
+    return internal("failed to open chat database");
+  };
+  match chat_db::load_room_event(&pool, &code, sequence).await {
     Ok(Some(event)) => {
       (StatusCode::OK, Json(json!({"event": event}))).into_response()
     }
@@ -802,11 +818,12 @@ async fn stream_room_events(
 /// deleted between connection acceptance and snapshot construction.
 async fn build_snapshot(state: &AppState, room_code: &str) -> Option<WsEvent> {
   let room_view = state.rooms.read().await.get(room_code).map(Room::view)?;
-  let events = db::load_room_events(&state.db, room_code)
+  let chat_pool = state.chat_db(room_code).await.report()?;
+  let events = chat_db::load_room_events(&chat_pool, room_code)
     .await
     .report()
     .unwrap_or_default();
-  let reports = db::load_room_reports(&state.db, room_code)
+  let reports = chat_db::load_room_reports(&chat_pool, room_code)
     .await
     .report()
     .unwrap_or_default();

@@ -4,7 +4,7 @@
 //! the numeric `#N` sequence embedded in the summary text.
 
 use crate::app_state::AppState;
-use crate::db;
+use crate::chat_db;
 use crate::event_log::EventLog;
 use crate::models::RoomEventKind;
 use rig::completion::ToolDefinition;
@@ -106,10 +106,14 @@ impl Tool for GetRoomEventTool {
       )
       .await;
 
-    let lookup =
-      db::load_room_event(&self.state.db, &self.room_code, args.sequence)
-        .await
-        .map_err(|e| GetRoomEventError::Load(e.to_string()));
+    let lookup = match self.state.chat_db(&self.room_code).await {
+      Ok(pool) => {
+        chat_db::load_room_event(&pool, &self.room_code, args.sequence)
+          .await
+          .map_err(|e| GetRoomEventError::Load(e.to_string()))
+      }
+      Err(error) => Err(GetRoomEventError::Load(error.to_string())),
+    };
     match lookup {
       Ok(Some(event)) => {
         row

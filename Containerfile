@@ -24,6 +24,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
 
 COPY backend/src ./src
 COPY backend/migrations ./migrations
+COPY backend/chat_migrations ./chat_migrations
 RUN cargo build --release --offline
 
 COPY --from=frontend-build /app/frontend/dist ./dist

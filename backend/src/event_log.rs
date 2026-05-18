@@ -14,7 +14,7 @@
 //! (`success = false`) is always intentional.
 
 use crate::app_state::{AppState, RoomHandle};
-use crate::db;
+use crate::chat_db;
 use crate::error::ReportError;
 use crate::models::{RoomEvent, RoomEventKind};
 use crate::streaming::{RoomStream, WsEvent};
@@ -70,10 +70,13 @@ impl EventLog {
       timestamp,
       completed_at: None,
     };
-    let stored = db::insert_event(&self.state.db, &event)
-      .await
-      .report()
-      .unwrap_or_else(|| event.clone());
+    let stored = match self.state.chat_db(&self.room_code).await.report() {
+      Some(pool) => chat_db::insert_event(&pool, &event)
+        .await
+        .report()
+        .unwrap_or_else(|| event.clone()),
+      None => event.clone(),
+    };
     self.stream.send(WsEvent::RowAdded {
       event: stored.clone(),
     });
@@ -111,10 +114,13 @@ impl EventLog {
       timestamp,
       completed_at: Some(timestamp),
     };
-    let stored = db::insert_event(&self.state.db, &event)
-      .await
-      .report()
-      .unwrap_or_else(|| event.clone());
+    let stored = match self.state.chat_db(&self.room_code).await.report() {
+      Some(pool) => chat_db::insert_event(&pool, &event)
+        .await
+        .report()
+        .unwrap_or_else(|| event.clone()),
+      None => event.clone(),
+    };
     self.stream.send(WsEvent::RowAdded {
       event: stored.clone(),
     });
@@ -151,16 +157,15 @@ impl RowHandle {
     let Some(id) = self.id else {
       return;
     };
+    let Some(pool) = self.log.state.chat_db(&self.log.room_code).await.report()
+    else {
+      return;
+    };
     let mut state = self.state.lock().await;
     state.content.push_str(delta);
-    db::update_event_body(
-      &self.log.state.db,
-      id,
-      &state.content,
-      &state.detail,
-    )
-    .await
-    .report();
+    chat_db::update_event_body(&pool, id, &state.content, &state.detail)
+      .await
+      .report();
     self.log.stream.send(WsEvent::RowDelta {
       id,
       content_delta: delta.to_string(),
@@ -177,16 +182,15 @@ impl RowHandle {
     let Some(id) = self.id else {
       return;
     };
+    let Some(pool) = self.log.state.chat_db(&self.log.room_code).await.report()
+    else {
+      return;
+    };
     let mut state = self.state.lock().await;
     state.detail.push_str(delta);
-    db::update_event_body(
-      &self.log.state.db,
-      id,
-      &state.content,
-      &state.detail,
-    )
-    .await
-    .report();
+    chat_db::update_event_body(&pool, id, &state.content, &state.detail)
+      .await
+      .report();
     self.log.stream.send(WsEvent::RowDelta {
       id,
       content_delta: String::new(),
@@ -204,19 +208,18 @@ impl RowHandle {
     let Some(id) = self.id else {
       return;
     };
+    let Some(pool) = self.log.state.chat_db(&self.log.room_code).await.report()
+    else {
+      return;
+    };
     let mut state = self.state.lock().await;
     let content_delta = diff_suffix(&state.content, &content);
     let detail_delta = diff_suffix(&state.detail, &detail);
     state.content = content;
     state.detail = detail;
-    db::update_event_body(
-      &self.log.state.db,
-      id,
-      &state.content,
-      &state.detail,
-    )
-    .await
-    .report();
+    chat_db::update_event_body(&pool, id, &state.content, &state.detail)
+      .await
+      .report();
     if !content_delta.is_empty() || !detail_delta.is_empty() {
       self.log.stream.send(WsEvent::RowDelta {
         id,
@@ -237,10 +240,14 @@ impl RowHandle {
     let Some(id) = self.id else {
       return;
     };
+    let Some(pool) = self.log.state.chat_db(&self.log.room_code).await.report()
+    else {
+      return;
+    };
     let completed_at = Utc::now();
     let state = self.state.lock().await;
-    db::finish_event(
-      &self.log.state.db,
+    chat_db::finish_event(
+      &pool,
       id,
       &state.content,
       &state.detail,
@@ -267,11 +274,15 @@ impl RowHandle {
     let Some(id) = self.id else {
       return;
     };
+    let Some(pool) = self.log.state.chat_db(&self.log.room_code).await.report()
+    else {
+      return;
+    };
     let completed_at = Utc::now();
     let mut state = self.state.lock().await;
     state.content = content.to_string();
-    db::finish_event(
-      &self.log.state.db,
+    chat_db::finish_event(
+      &pool,
       id,
       &state.content,
       &state.detail,

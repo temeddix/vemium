@@ -352,7 +352,7 @@ impl RoomEventKind {
 #[serde(rename_all = "camelCase")]
 pub struct RoomEvent {
   /// Database primary key. `None` only for events constructed in memory
-  /// before [`crate::db::insert_event`] returns; populated on every row
+  /// before [`crate::chat_db::insert_event`] returns; populated on every row
   /// read back from the database and reflected on the wire.
   #[serde(default)]
   pub id: Option<i64>,

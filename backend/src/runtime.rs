@@ -23,6 +23,7 @@
 //! protocol from a separate "draft" concept entirely.
 
 use crate::app_state::{AppState, RoomHandle};
+use crate::chat_db;
 use crate::db;
 use crate::error::ReportError;
 use crate::event_log::{EventLog, RowHandle};
@@ -47,7 +48,6 @@ use cron::Schedule;
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::CompletionModel;
 use rig::message::AssistantContent;
-use sqlx::SqlitePool;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -147,8 +147,9 @@ pub async fn restore_rooms(state: AppState) -> Result<()> {
 /// crash, and — if the room is `Active` — spawns its orchestrator tasks.
 pub async fn spawn_room(state: AppState, room: Room) -> Result<()> {
   let room_code = room.code.clone();
-  let event_seq = db::max_event_sequence(&state.db, &room_code).await?;
-  let report_seq = db::max_report_sequence(&state.db, &room_code).await?;
+  let chat_pool = state.chat_db(&room_code).await?;
+  let event_seq = chat_db::max_event_sequence(&chat_pool).await?;
+  let report_seq = chat_db::max_report_sequence(&chat_pool).await?;
 
   let handle = RoomHandle::new(event_seq, report_seq);
   if matches!(room.debate_state, DebateState::Paused) {
@@ -183,7 +184,8 @@ pub async fn start_room_tasks(state: &AppState, room_code: &str) -> Result<()> {
     .await
     .context("failed to ensure room workspace")?;
 
-  db::close_incomplete_events(&state.db, room_code)
+  let chat_pool = state.chat_db(room_code).await?;
+  chat_db::close_incomplete_events(&chat_pool)
     .await
     .context("failed to close incomplete events on room start")?;
 
@@ -419,7 +421,7 @@ async fn run_debate_loop(
     };
 
     let history =
-      match load_effective_history(&state.db, &room_code).await.report() {
+      match load_effective_history(&state, &room_code).await.report() {
         Some(value) => value,
         None => {
           tokio::select! {
@@ -498,7 +500,7 @@ async fn run_chat_turn(
   persona: DebatePersona,
   workspace: RoomWorkspace,
 ) -> Result<Option<String>> {
-  let history = load_effective_history(&state.db, &room.code).await?;
+  let history = load_effective_history(state, &room.code).await?;
   let history_messages = render_transcript_messages(&history);
   let system_prompt = build_chat_system_prompt(room, persona);
   let workspace_files = list_shared_workspace_files(&workspace).await;
@@ -633,7 +635,7 @@ async fn evaluate_scheduled_resume(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = load_effective_history(&state.db, &room.code).await?;
+  let history = load_effective_history(state, &room.code).await?;
   if history.summary_text.is_none() && history.tail.is_empty() {
     return Ok(());
   }
@@ -762,7 +764,7 @@ async fn run_leader_on_user_chat(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = load_effective_history(&state.db, &room.code).await?;
+  let history = load_effective_history(state, &room.code).await?;
   let preamble = build_room_preamble(room);
   let system = format!(
     "{LEADER_USER_CHAT_PROMPT}\n\n{preamble}\n\n{INLINE_NOTE_TOOL_HINT}"
@@ -779,7 +781,7 @@ async fn run_leader_escalation(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = load_effective_history(&state.db, &room.code).await?;
+  let history = load_effective_history(state, &room.code).await?;
   if history.summary_text.is_none() && history.tail.is_empty() {
     return Ok(());
   }
@@ -844,7 +846,7 @@ async fn run_leader_steering(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = load_effective_history(&state.db, &room.code).await?;
+  let history = load_effective_history(state, &room.code).await?;
   if history.summary_text.is_none() && history.tail.is_empty() {
     return Ok(());
   }
@@ -1003,7 +1005,7 @@ async fn run_leader_report(
   handle: &RoomHandle,
   room: &Room,
 ) -> Result<()> {
-  let history = load_effective_history(&state.db, &room.code).await?;
+  let history = load_effective_history(state, &room.code).await?;
   if history.summary_text.is_none() && history.tail.is_empty() {
     return Ok(());
   }
@@ -1018,8 +1020,9 @@ async fn run_leader_report(
 
   let sequence = handle.allocate_report_sequence();
   let started_at = Utc::now();
+  let chat_pool = state.chat_db(&room.code).await?;
   let report =
-    db::start_report(&state.db, &room.code, sequence, started_at).await?;
+    chat_db::start_report(&chat_pool, &room.code, sequence, started_at).await?;
   let report_id = report_id_for(report.id);
 
   let stream = state.ensure_room_stream(&room.code).await;
@@ -1037,8 +1040,8 @@ async fn run_leader_report(
   match outcome {
     Ok(content) => {
       let final_content = content.trim().to_string();
-      db::finish_report(
-        &state.db,
+      chat_db::finish_report(
+        &chat_pool,
         report.id,
         &final_content,
         true,
@@ -1056,7 +1059,7 @@ async fn run_leader_report(
       Ok(())
     }
     Err(error) => {
-      db::finish_report(&state.db, report.id, "", false, completed_at)
+      chat_db::finish_report(&chat_pool, report.id, "", false, completed_at)
         .await
         .report();
       stream.send(WsEvent::ReportCompleted {
@@ -1175,7 +1178,14 @@ fn build_chat_user_prompt(
 
 async fn list_shared_workspace_files(workspace: &RoomWorkspace) -> Vec<String> {
   const MAX_LISTED: usize = 50;
-  const SKIP: &[&str] = &["pyproject.toml", "uv.lock", ".python-version"];
+  const SKIP: &[&str] = &[
+    "pyproject.toml",
+    "uv.lock",
+    ".python-version",
+    "CHAT.db",
+    "CHAT.db-shm",
+    "CHAT.db-wal",
+  ];
   let Some(files) = workspace
     .list_files(std::path::Path::new("."))
     .await
@@ -1299,13 +1309,14 @@ fn render_gate_user_prompt(
 // -- Effective history loading ---------------------------------------------
 
 async fn load_effective_history(
-  pool: &SqlitePool,
+  state: &AppState,
   room_code: &str,
 ) -> anyhow::Result<EffectiveHistory> {
-  match db::load_compaction_checkpoint(pool, room_code).await? {
+  let pool = state.chat_db(room_code).await?;
+  match chat_db::load_compaction_checkpoint(&pool, room_code).await? {
     Some(checkpoint) => {
       let tail =
-        db::load_room_events_after(pool, room_code, checkpoint.sequence)
+        chat_db::load_room_events_after(&pool, room_code, checkpoint.sequence)
           .await?;
       Ok(EffectiveHistory {
         summary_text: Some(checkpoint.detail),
@@ -1313,7 +1324,7 @@ async fn load_effective_history(
       })
     }
     None => {
-      let tail = db::load_room_events(pool, room_code).await?;
+      let tail = chat_db::load_room_events(&pool, room_code).await?;
       Ok(EffectiveHistory {
         summary_text: None,
         tail,
@@ -1410,8 +1421,7 @@ async fn compact_room_history(
   }
   let _guard = Guard(&handle.compaction_in_progress);
 
-  let Some(history) =
-    load_effective_history(&state.db, &room_code).await.report()
+  let Some(history) = load_effective_history(&state, &room_code).await.report()
   else {
     return;
   };
