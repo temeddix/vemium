@@ -3,8 +3,6 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-    ports:
-      - "${PORT}:8080"
     volumes:
       - vemium-data:/data
     restart: unless-stopped
