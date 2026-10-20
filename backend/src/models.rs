@@ -29,28 +29,30 @@ use serde::{Deserialize, Serialize};
 /// [`DebateState`] or any leader decision. Only the user (via the room
 /// menu) can flip this back to `Active`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RoomState {
   /// User has the room turned on. The orchestrator may run depending on
   /// [`DebateState`].
+  #[serde(alias = "active")]
   Active,
   /// User has explicitly turned the room off. The orchestrator is fully
   /// halted and the leader cannot wake it.
+  #[serde(alias = "deactivated")]
   Deactivated,
 }
 
 impl RoomState {
   pub fn as_str(self) -> &'static str {
     match self {
-      Self::Active => "active",
-      Self::Deactivated => "deactivated",
+      Self::Active => "ACTIVE",
+      Self::Deactivated => "DEACTIVATED",
     }
   }
 
   pub fn parse(value: &str) -> anyhow::Result<Self> {
     match value {
-      "active" => Ok(Self::Active),
-      "deactivated" => Ok(Self::Deactivated),
+      "ACTIVE" | "active" => Ok(Self::Active),
+      "DEACTIVATED" | "deactivated" => Ok(Self::Deactivated),
       other => Err(anyhow::anyhow!("unknown room state: {other}")),
     }
   }
@@ -64,27 +66,29 @@ impl RoomState {
 /// a debater. Only meaningful when [`RoomState`] is `Active`; while the
 /// room is `Deactivated` this state is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DebateState {
   /// Debaters are speaking on cadence.
+  #[serde(alias = "running")]
   Running,
   /// Leader has paused the debate at a turn boundary; no LLM calls are
   /// issued until the leader (or the resume schedule) flips this back.
+  #[serde(alias = "paused")]
   Paused,
 }
 
 impl DebateState {
   pub fn as_str(self) -> &'static str {
     match self {
-      Self::Running => "running",
-      Self::Paused => "paused",
+      Self::Running => "RUNNING",
+      Self::Paused => "PAUSED",
     }
   }
 
   pub fn parse(value: &str) -> anyhow::Result<Self> {
     match value {
-      "running" => Ok(Self::Running),
-      "paused" => Ok(Self::Paused),
+      "RUNNING" | "running" => Ok(Self::Running),
+      "PAUSED" | "paused" => Ok(Self::Paused),
       other => Err(anyhow::anyhow!("unknown debate state: {other}")),
     }
   }
@@ -107,11 +111,14 @@ impl DebateState {
 #[derive(
   Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
 )]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ApiType {
   #[default]
+  #[serde(alias = "ollama")]
   Ollama,
+  #[serde(alias = "openRouter")]
   OpenRouter,
+  #[serde(alias = "openAi")]
   OpenAi,
 }
 
@@ -295,49 +302,55 @@ pub struct RoomView {
 /// the click-to-reveal body. Side rows show their body inline only while
 /// streaming; once `Done`, the body is hidden behind the breadcrumb dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RoomEventKind {
   /// A debater (low-model persona) producing a chat bubble.
+  #[serde(alias = "agent_chat")]
   AgentChat,
   /// The leader (high-model) producing a chat bubble.
+  #[serde(alias = "leader_note")]
   LeaderNote,
   /// A human-authored message injected by the operator.
+  #[serde(alias = "user_chat")]
   UserChat,
   /// A burst of model chain-of-thought emitted between text/tool segments.
   /// `detail` carries the full thinking text; `content` is the static
   /// label `"Thinking"`.
+  #[serde(alias = "thinking")]
   Thinking,
   /// A short tool-call breadcrumb. `content` is the action label,
   /// `detail` carries the click-to-reveal expansion (args, result, etc.).
+  #[serde(alias = "inline_note")]
   InlineNote,
   /// A history compaction checkpoint written by the leader. `content` is
   /// the visible label `"History compacted"`; `detail` holds the summary
   /// text that replaces all earlier events when building LLM context.
   /// The event's own `sequence` is the cutoff — only events after it are
   /// included in subsequent turns.
+  #[serde(alias = "summary")]
   Summary,
 }
 
 impl RoomEventKind {
   pub fn as_str(self) -> &'static str {
     match self {
-      Self::AgentChat => "agent_chat",
-      Self::LeaderNote => "leader_note",
-      Self::UserChat => "user_chat",
-      Self::Thinking => "thinking",
-      Self::InlineNote => "inline_note",
-      Self::Summary => "summary",
+      Self::AgentChat => "AGENT_CHAT",
+      Self::LeaderNote => "LEADER_NOTE",
+      Self::UserChat => "USER_CHAT",
+      Self::Thinking => "THINKING",
+      Self::InlineNote => "INLINE_NOTE",
+      Self::Summary => "SUMMARY",
     }
   }
 
   pub fn parse(value: &str) -> anyhow::Result<Self> {
     match value {
-      "agent_chat" => Ok(Self::AgentChat),
-      "leader_note" => Ok(Self::LeaderNote),
-      "user_chat" => Ok(Self::UserChat),
-      "thinking" => Ok(Self::Thinking),
-      "inline_note" => Ok(Self::InlineNote),
-      "summary" => Ok(Self::Summary),
+      "AGENT_CHAT" | "agent_chat" => Ok(Self::AgentChat),
+      "LEADER_NOTE" | "leader_note" => Ok(Self::LeaderNote),
+      "USER_CHAT" | "user_chat" => Ok(Self::UserChat),
+      "THINKING" | "thinking" => Ok(Self::Thinking),
+      "INLINE_NOTE" | "inline_note" => Ok(Self::InlineNote),
+      "SUMMARY" | "summary" => Ok(Self::Summary),
       other => Err(anyhow::anyhow!("unknown room event kind: {other}")),
     }
   }

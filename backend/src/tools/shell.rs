@@ -158,21 +158,14 @@ async fn run(
     .take()
     .map(|err| tokio::spawn(forward(err, stderr_buf.clone(), row.clone())));
 
-  let timed_out;
-  let exit_code;
-  match time::timeout(TIMEOUT, child.wait()).await {
-    Ok(Ok(status)) => {
-      timed_out = false;
-      exit_code = status.code();
-    }
+  let (timed_out, exit_code) = match time::timeout(TIMEOUT, child.wait()).await
+  {
+    Ok(Ok(status)) => (false, status.code()),
     Ok(Err(e)) => {
       return Err(RunShellError(format!("wait failed: {e}")));
     }
-    Err(_) => {
-      timed_out = true;
-      exit_code = None;
-    }
-  }
+    Err(_) => (true, None),
+  };
 
   if let Some(t) = stdout_task {
     let _ = t.await;

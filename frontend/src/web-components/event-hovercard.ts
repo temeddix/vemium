@@ -1,21 +1,15 @@
-import { BACKEND_BASE_URL } from "@/app/config";
-import type { RoomEvent } from "@/app/types";
-import { css, html, LitElement, nothing } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
-import { ref } from "lit/directives/ref.js";
+import "@awesome.me/webawesome/dist/components/popup/popup.js";
+import { css, html, LitElement, nothing, type TemplateResult } from "lit";
+import { customElement, property } from "lit/decorators.js";
+
+import { EventPreviewController } from "./event-preview-controller.ts";
+import { UpdateEffectController } from "./update-effect-controller.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
-    "te-event-hovercard": EventHovercard;
+    "te-event-hovercard": EventHovercardElement;
   }
 }
-
-interface WaPopupEl extends HTMLElement {
-  active: boolean;
-  anchor: Element | null;
-}
-
-const eventCache = new Map<number, RoomEvent>();
 
 /**
  * Arrow popup that previews a room event by `#N` id.
@@ -23,7 +17,7 @@ const eventCache = new Map<number, RoomEvent>();
  * the event on demand and renders a `<wa-popup placement="top" arrow>` card.
  */
 @customElement("te-event-hovercard")
-export class EventHovercard extends LitElement {
+export class EventHovercardElement extends LitElement {
   @property({ attribute: false })
   accessor anchorEl: Element | null = null;
 
@@ -36,13 +30,23 @@ export class EventHovercard extends LitElement {
   @property({ type: Boolean })
   accessor active = false;
 
-  @state()
-  private accessor _event: RoomEvent | null = null;
+  #preview: EventPreviewController = new EventPreviewController(this);
 
-  @state()
-  private accessor _loading = false;
+  /** The event id last requested, or null while the card is inactive. */
+  #requested: number | null = null;
 
-  #popupEl: WaPopupEl | null = null;
+  effects: UpdateEffectController = new UpdateEffectController(this).onUpdated(
+    (): void => {
+      const wanted = this.active ? this.eventId : null;
+      if (wanted === this.#requested) {
+        return;
+      }
+      this.#requested = wanted;
+      if (wanted !== null) {
+        void this.#preview.load(this.roomCode, wanted);
+      }
+    },
+  );
 
   static override styles = css`
     :host {
@@ -101,80 +105,43 @@ export class EventHovercard extends LitElement {
     }
   `;
 
-  override updated(changed: Map<string, unknown>): void {
-    if (this.#popupEl !== null) {
-      this.#popupEl.anchor = this.anchorEl;
-    }
-    if (
-      (changed.has("active") || changed.has("eventId")) &&
-      this.active &&
-      this.eventId !== null
-    ) {
-      this.#fetchEvent(this.eventId);
-    }
-  }
-
-  async #fetchEvent(id: number): Promise<void> {
-    const cached = eventCache.get(id);
-    if (cached !== undefined) {
-      this._event = cached;
-      return;
-    }
-    this._loading = true;
-    try {
-      const resp = await fetch(
-        `${BACKEND_BASE_URL}/v1/rooms/${this.roomCode}/events/${id}`,
-      );
-      if (resp.ok) {
-        const data = (await resp.json()) as { event: RoomEvent };
-        eventCache.set(id, data.event);
-        this._event = data.event;
-      }
-    } finally {
-      this._loading = false;
-    }
-  }
-
-  override render() {
+  override render(): TemplateResult {
+    const anchor = this.anchorEl ?? "";
+    const card = this.#preview.loading
+      ? html`
+          <span class="loading">Loading...</span>
+        `
+      : this.#renderCard();
     return html`
       <wa-popup
-        ${ref((el) => {
-          this.#popupEl = (el as WaPopupEl) ?? null;
-          if (this.#popupEl !== null) {
-            this.#popupEl.anchor = this.anchorEl;
-          }
-        })}
+        .anchor="${anchor}"
         placement="top"
         arrow
         ?active="${this.active}"
         distance="8"
         strategy="fixed"
       >
-        <div class="card">
-          ${this._loading
-            ? html`
-              <span class="loading">Loading...</span>
-            `
-            : this.#renderCard()}
-        </div>
+        <div class="card">${card}</div>
       </wa-popup>
     `;
   }
 
-  #renderCard() {
-    const ev = this._event;
-    if (ev === null) {
-      return nothing;
+  #renderCard(): TemplateResult {
+    const previewed = this.#preview.event;
+    if (previewed === null) {
+      return html``;
     }
-    const body = ev.detail !== "" ? ev.detail : ev.content;
-    return html`
-      ${ev.agent !== null
-        ? html`
+    const body = previewed.detail === "" ? previewed.content : previewed.detail;
+    const header =
+      previewed.agent === null
+        ? nothing
+        : html`
           <div class="card-header">
-            <span class="agent">${ev.agent}</span>
+            <span class="agent">${previewed.agent}</span>
           </div>
-        `
-        : nothing}
+        `;
+    return html`
+      ${header}
       <div class="card-body">${body}</div>
     `;
   }

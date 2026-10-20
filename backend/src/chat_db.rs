@@ -174,7 +174,7 @@ pub async fn load_compaction_checkpoint(
   let row = sqlx::query(
     "SELECT id, sequence, kind, agent, content, detail, success, timestamp, completed_at
      FROM room_events
-     WHERE kind = 'summary'
+     WHERE kind = 'SUMMARY'
      ORDER BY sequence DESC
      LIMIT 1",
   )

@@ -1,12 +1,18 @@
-import type { DashboardStore } from "@/app/state";
-import type { WorkspaceFile } from "@/app/types";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
+import "@awesome.me/webawesome/dist/components/icon/icon.js";
+import "@awesome.me/webawesome/dist/components/tree-item/tree-item.js";
+import "@awesome.me/webawesome/dist/components/tree/tree.js";
 import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
+import type { DashboardStore } from "#state";
+import type { WorkspaceFile } from "#types";
+
 declare global {
   interface HTMLElementTagNameMap {
-    "te-room-files-dialog": RoomFilesDialog;
+    "te-room-files-dialog": RoomFilesDialogElement;
   }
 }
 
@@ -40,21 +46,21 @@ const FILE_PATH_ATTR = "data-file-path";
  * so the tree always reflects the current state of disk.
  */
 @customElement("te-room-files-dialog")
-export class RoomFilesDialog extends LitElement {
+export class RoomFilesDialogElement extends LitElement {
   @property({ attribute: false })
   accessor store!: DashboardStore;
 
   @state()
-  private accessor roomCode: string | null = null;
+  accessor roomCode: string | null = null;
 
   @state()
-  private accessor files: WorkspaceFile[] = [];
+  accessor files: WorkspaceFile[] = [];
 
   @state()
-  private accessor loading = false;
+  accessor loading = false;
 
   @state()
-  private accessor errorText: string | null = null;
+  accessor errorText: string | null = null;
 
   #dialogRef: Ref<DialogElement> = createRef();
 
@@ -118,32 +124,37 @@ export class RoomFilesDialog extends LitElement {
     await this.#refresh();
   }
 
-  override render() {
+  override render(): TemplateResult {
     const code = this.roomCode;
+    const dialogRef = ref(this.#dialogRef);
+    const errorBanner =
+      this.errorText === null
+        ? nothing
+        : html`
+          <div class="error-banner">${this.errorText}</div>
+        `;
+    const downloadDisabled = code === null || this.loading;
+    const body = this.#renderBody();
     return html`
-      <wa-dialog ${ref(this.#dialogRef)} label="Files">
-        ${this.errorText !== null
-          ? html`
-            <div class="error-banner">${this.errorText}</div>
-          `
-          : nothing}
+      <wa-dialog ${dialogRef} label="Files">
+        ${errorBanner}
         <div class="toolbar">
           <span class="toolbar-hint">Double-click a file to open it.</span>
           <wa-button
             size="small"
-            ?disabled="${code === null || this.loading}"
+            ?disabled="${downloadDisabled}"
             @click="${this.#onDownload}"
           >
             <wa-icon slot="start" name="download"></wa-icon>
             Download zip
           </wa-button>
         </div>
-        ${this.#renderBody()}
+        ${body}
       </wa-dialog>
     `;
   }
 
-  #renderBody() {
+  #renderBody(): TemplateResult {
     if (this.loading) {
       return html`
         <div class="empty">Loading...</div>
@@ -155,29 +166,30 @@ export class RoomFilesDialog extends LitElement {
       `;
     }
     const root = buildTree(this.files);
+    const nodes = root.children.map((node) => this.#renderNode(node));
     return html`
       <div class="tree-wrapper" @dblclick="${this.#onTreeDblClick}">
-        <wa-tree>
-          ${root.children.map((node) => this.#renderNode(node))}
-        </wa-tree>
+        <wa-tree>${nodes}</wa-tree>
       </div>
     `;
   }
 
   #renderNode(node: TreeNode): TemplateResult {
     if (node.type === "folder") {
+      const children = node.children.map((child) => this.#renderNode(child));
       return html`
         <wa-tree-item>
           <wa-icon name="folder"></wa-icon>
-          ${node.name} ${node.children.map((child) => this.#renderNode(child))}
+          ${node.name} ${children}
         </wa-tree-item>
       `;
     }
+    const size = formatSize(node.sizeBytes);
     return html`
       <wa-tree-item data-file-path="${node.path}">
         <wa-icon name="file"></wa-icon>
         ${node.name}
-        <span class="file-size">${formatSize(node.sizeBytes)}</span>
+        <span class="file-size">${size}</span>
       </wa-tree-item>
     `;
   }
@@ -232,7 +244,9 @@ export class RoomFilesDialog extends LitElement {
 
 function buildTree(files: WorkspaceFile[]): FolderNode {
   const root: FolderNode = { type: "folder", name: "", children: [] };
-  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  const sorted = files.toSorted((left, right) =>
+    left.path.localeCompare(right.path),
+  );
   for (const file of sorted) {
     insertFile(root, file);
   }
@@ -241,13 +255,13 @@ function buildTree(files: WorkspaceFile[]): FolderNode {
 }
 
 function insertFile(root: FolderNode, file: WorkspaceFile): void {
-  const segments = file.path.split("/").filter((s) => s.length > 0);
-  if (segments.length === 0) {
+  const segments = file.path.split("/").filter((part) => part.length > 0);
+  const fileName = segments.pop();
+  if (fileName === undefined) {
     return;
   }
   let cursor: FolderNode = root;
-  for (let i = 0; i < segments.length - 1; i += 1) {
-    const segment = segments[i];
+  for (const segment of segments) {
     const existing = cursor.children.find(
       (child): child is FolderNode =>
         child.type === "folder" && child.name === segment,
@@ -266,7 +280,7 @@ function insertFile(root: FolderNode, file: WorkspaceFile): void {
   }
   cursor.children.push({
     type: "file",
-    name: segments[segments.length - 1],
+    name: fileName,
     path: file.path,
     sizeBytes: file.sizeBytes,
   });
@@ -274,11 +288,11 @@ function insertFile(root: FolderNode, file: WorkspaceFile): void {
 
 /** Folders before files, alphabetical within each group. */
 function sortFolder(folder: FolderNode): void {
-  folder.children.sort((a, b) => {
-    if (a.type !== b.type) {
-      return a.type === "folder" ? -1 : 1;
+  folder.children.sort((left, right) => {
+    if (left.type !== right.type) {
+      return left.type === "folder" ? -1 : 1;
     }
-    return a.name.localeCompare(b.name);
+    return left.name.localeCompare(right.name);
   });
   for (const child of folder.children) {
     if (child.type === "folder") {
@@ -287,7 +301,7 @@ function sortFolder(folder: FolderNode): void {
   }
 }
 
-const SIZE_UNITS = ["B", "KB", "MB", "GB"] as const;
+const SIZE_UNITS: string[] = ["B", "KB", "MB", "GB"];
 
 function formatSize(bytes: number): string {
   let value = bytes;
@@ -297,5 +311,5 @@ function formatSize(bytes: number): string {
     unit += 1;
   }
   const rounded = unit === 0 ? value.toString() : value.toFixed(1);
-  return `${rounded} ${SIZE_UNITS[unit]}`;
+  return `${rounded} ${SIZE_UNITS[unit] ?? ""}`;
 }

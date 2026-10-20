@@ -1,3 +1,8 @@
+At the start of every new session, run `damem recall` in the terminal and treat
+its output as the context for this repository. If the `damem` command is not
+found, read [INSTALL.md](https://github.com/cunarist/damem/blob/main/INSTALL.md)
+and follow it before reasoning or responding.
+
 This repository is a Rust backend web server with a Lit SPA frontend.
 
 # Common
@@ -19,17 +24,21 @@ This repository is a Rust backend web server with a Lit SPA frontend.
 
 # Frontend Guidelines
 
-Run frontend quality checks before completion. Use the project scripts if
-available.
+The frontend runs on Node.js 24 with Vite+ (`vp`). Run its checks in
+`frontend/` before completion; CI runs the same ones.
 
-- `deno check`
-- `deno fmt`
-- `deno lint`
+- `vp fmt` formats; `vp check` checks formatting, lint, and types.
+- `npm run lit-check` checks the Lit templates.
+- `vp test` runs the Vitest tests.
+- `vp build` writes the bundle to `dist/js/bundle.js`.
+
+Lint rules, exceptions, and their reasons live in `scripts/project-lint.ts`;
+the notes in `.agents/memory` explain the policy. Never add lint disable
+comments.
 
 ## TypeScript Style
 
-- Use double quotes.
-- Use two spaces for indentation.
+- Formatting is Oxfmt's (`vp fmt`): double quotes, two-space indentation.
 - Naming:
   - constants: `UPPER_SNAKE_CASE`
   - variables and functions: `camelCase`
@@ -77,10 +86,9 @@ available.
 
 ## Lifecycle and Cleanup
 
-- Create external resources in `connectedCallback`.
-- Dispose resources in `disconnectedCallback`.
-- Call `super.connectedCallback()` at the start of `connectedCallback`.
-- Call `super.disconnectedCallback()` at the end of `disconnectedCallback`.
+- Components override no lifecycle method; the lint bans it. Create
+  external resources in a reactive controller's `hostConnected` and dispose
+  them in its `hostDisconnected`.
 - Clean up all listeners/subscriptions to prevent leaks.
 
 ## CSS Units
@@ -90,11 +98,12 @@ available.
 
 ## TypeScript Module Structure
 
-- Follow the intro_server-style frontend module organization pattern.
-- Keep a single frontend bundle entry module (for example: `frontend/mod.ts`).
-- Use structured exports with local `mod.ts` files for internal module groups.
-- Use `deno bundle` to produce browser-consumable JavaScript from TypeScript.
-- Keep bundling commands in Deno tasks (for example: `deno task bundle`).
+- Keep a single frontend bundle entry module, `frontend/src/index.ts`.
+- Each direct `src/` subfolder is a module group with an `index.ts` barrel
+  and a `#` alias in `package.json` `imports`, listed in layer order (a
+  group imports only the aliases below it). Inside a group, import siblings
+  relatively; `../` is never used.
+- Use `vp build` to produce browser-consumable JavaScript from TypeScript.
 
 # Backend Guidelines
 

@@ -1,12 +1,18 @@
-import type { DashboardStore } from "@/app/state";
-import type { Room } from "@/app/types";
-import { css, html, LitElement, nothing } from "lit";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
+import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
+import type { DashboardStore } from "#state";
+import type { Room, RoomEnvelope } from "#types";
+
 declare global {
   interface HTMLElementTagNameMap {
-    "te-clone-room-dialog": CloneRoomDialog;
+    "te-clone-room-dialog": CloneRoomDialogElement;
+  }
+  interface HTMLElementEventMap {
+    "te-cloned": CustomEvent<RoomEnvelope>;
   }
 }
 
@@ -23,18 +29,18 @@ interface DialogElement extends HTMLElement {
  * would be left dangling.
  */
 @customElement("te-clone-room-dialog")
-export class CloneRoomDialog extends LitElement {
+export class CloneRoomDialogElement extends LitElement {
   @property({ attribute: false })
   accessor store!: DashboardStore;
 
   @state()
-  private accessor room: Room | null = null;
+  accessor room: Room | null = null;
 
   @state()
-  private accessor busy = false;
+  accessor busy = false;
 
   @state()
-  private accessor errorText: string | null = null;
+  accessor errorText: string | null = null;
 
   #dialogRef: Ref<DialogElement> = createRef();
 
@@ -111,15 +117,19 @@ export class CloneRoomDialog extends LitElement {
     }
   }
 
-  override render() {
+  override render(): TemplateResult {
     const room = this.room;
+    const dialogRef = ref(this.#dialogRef);
+    const errorBanner =
+      this.errorText === null
+        ? nothing
+        : html`
+          <div class="error-banner">${this.errorText}</div>
+        `;
+    const form = room === null ? nothing : this.#renderForm(room);
     return html`
-      <wa-dialog ${ref(this.#dialogRef)} label="Duplicate room">
-        ${this.errorText !== null
-          ? html`
-            <div class="error-banner">${this.errorText}</div>
-          `
-          : nothing} ${room === null ? nothing : this.#renderForm(room)}
+      <wa-dialog ${dialogRef} label="Duplicate room">
+        ${errorBanner} ${form}
         <div slot="footer" class="footer-row">
           <wa-button
             size="small"
@@ -140,7 +150,7 @@ export class CloneRoomDialog extends LitElement {
     `;
   }
 
-  #renderForm(room: Room) {
+  #renderForm(room: Room): TemplateResult {
     const sourceLabel = room.topic.trim() === "" ? room.code : room.topic;
     return html`
       <div class="form-grid">
@@ -154,7 +164,7 @@ export class CloneRoomDialog extends LitElement {
     `;
   }
 
-  async #onConfirm(): Promise<void> {
+  #onConfirm = async (): Promise<void> => {
     const room = this.room;
     if (room === null || this.busy) {
       return;
@@ -172,18 +182,18 @@ export class CloneRoomDialog extends LitElement {
       dialog.open = false;
     }
     this.dispatchEvent(
-      new CustomEvent("te-cloned", {
+      new CustomEvent<RoomEnvelope>("te-cloned", {
         detail: { room: cloned },
         bubbles: true,
         composed: true,
       }),
     );
-  }
+  };
 
-  #onCancel(): void {
+  #onCancel = (): void => {
     const dialog = this.#dialogRef.value;
     if (dialog !== undefined) {
       dialog.open = false;
     }
-  }
+  };
 }

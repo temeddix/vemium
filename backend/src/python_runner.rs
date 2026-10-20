@@ -39,11 +39,15 @@ pub type StageSink =
 
 /// Stages of the [`PythonRunner::run`] pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PythonStage {
+  #[serde(alias = "ruff_format")]
   RuffFormat,
+  #[serde(alias = "ruff_check")]
   RuffCheck,
+  #[serde(alias = "ty_check")]
   TyCheck,
+  #[serde(alias = "run")]
   Run,
 }
 
