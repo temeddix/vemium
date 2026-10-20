@@ -8,7 +8,7 @@
  * across reloads, and even after server-side renames.
  */
 
-import type { RoomEventKind } from "@/app/types";
+import type { RoomEventKind } from "#types";
 
 /** Stable string the backend writes into `agent` for human-authored rows. */
 export const USER_AGENT_NAME = "user";
@@ -28,8 +28,8 @@ export interface PersonaColor {
  * deg steps). OKLCH is perceptually uniform so each slot looks equally saturated
  * and bright, giving distinct identities at the small avatar size.
  */
-const PALETTE: PersonaColor[] = Array.from({ length: 32 }, (_, i) => ({
-  background: `oklch(0.68 0.18 ${((i * 360) / 32).toFixed(2)})`,
+const PALETTE: PersonaColor[] = Array.from({ length: 32 }, (_entry, slot) => ({
+  background: `oklch(0.68 0.18 ${((slot * 360) / 32).toFixed(2)})`,
   foreground: "#1a1a1a",
 }));
 
@@ -48,14 +48,12 @@ export function resolveAvatarColor(
   kind: RoomEventKind,
   agent: string | null,
 ): PersonaColor {
-  if (kind === "user_chat") {
+  if (kind === "USER_CHAT") {
     return SELF_COLOR;
   }
   const key = agent ?? "";
-  if (key === "") {
-    return PALETTE[0];
-  }
-  return PALETTE[hashToIndex(key, PALETTE.length)];
+  const slot = key === "" ? 0 : hashToIndex(key, PALETTE.length);
+  return PALETTE[slot] ?? SELF_COLOR;
 }
 
 /**
@@ -94,6 +92,11 @@ export function formatSeparatorTimestamp(timestamp: string): string {
   });
 }
 
+/** Pads a clock field to two digits. */
+export function pad2(value: number): string {
+  return value < 10 ? `0${value}` : `${value}`;
+}
+
 /**
  * Formats a millisecond duration as a compact `Ns` / `M:SS` string. The
  * dialog uses the same format for the final "Took N seconds" line, so
@@ -106,7 +109,6 @@ export function formatDuration(milliseconds: number): string {
   }
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  const pad2 = (n: number): string => n < 10 ? `0${n}` : `${n}`;
   return `${minutes}:${pad2(seconds)}`;
 }
 
@@ -117,8 +119,10 @@ export function formatDuration(milliseconds: number): string {
  */
 function hashToIndex(value: string, modulus: number): number {
   let hash = 5381;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = ((hash << 5) + hash + value.charCodeAt(i)) | 0;
+  for (let index = 0; index < value.length; index += 1) {
+    // `Math.imul` keeps the hash a wrapping 32-bit integer, as djb2 expects.
+    const code = value.codePointAt(index) ?? 0;
+    hash = Math.imul(Math.imul(hash, 33) + code, 1);
   }
   return Math.abs(hash) % modulus;
 }

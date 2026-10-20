@@ -1,28 +1,63 @@
-import { BACKEND_BASE_URL } from "@/app/config";
-import type {
-  AppSettings,
-  CreateMessageRequest,
-  CreateRoomRequest,
-  ProviderConfig,
-  ProviderModelOption,
-  ProviderModelsResponse,
-  ReportBuffer,
-  Room,
-  RoomEvent,
-  RoomReport,
-  RoomsListResponse,
-  RoomState,
-  RoomView,
-  SettingsEnvelope,
-  UpdateAppSettingsRequest,
-  UpdateRoomRequest,
-  WorkspaceFile,
-  WorkspaceFilesResponse,
-  WsEvent,
-} from "@/app/types";
+import { BACKEND_BASE_URL } from "#config";
+import {
+  type AppSettings,
+  type CreateMessageRequest,
+  type CreateRoomRequest,
+  isErrorBody,
+  isProviderModelsResponse,
+  isRoomEnvelope,
+  isRoomsListResponse,
+  isRoomStateResponse,
+  isSettingsEnvelope,
+  isWorkspaceFilesResponse,
+  type ProviderConfig,
+  type ProviderModelOption,
+  type ReportBuffer,
+  type Room,
+  type RoomEvent,
+  type RoomReport,
+  type RoomView,
+  type UpdateAppSettingsRequest,
+  type UpdateRoomRequest,
+  type WorkspaceFile,
+  type WsEvent,
+} from "#types";
+
 import { RoomClient } from "./room-client.ts";
 
 type Listener = () => void;
+
+/** A provider tier: which of the two stored configurations to use. */
+export type Tier = "LOW" | "HIGH";
+
+/** Which way a room's on/off switch is being flipped. */
+type RoomStateAction = "ACTIVATE" | "DEACTIVATE";
+
+/** The models a provider lists, or why it could not list them. */
+export interface ProviderModelsResult {
+  models: ProviderModelOption[];
+  error: string | null;
+}
+
+/** Orders timeline rows by `sequence`. */
+function bySequence(left: RoomEvent, right: RoomEvent): number {
+  return left.sequence - right.sequence;
+}
+
+/**
+ * Reads a response's JSON and checks it is the shape the endpoint documents.
+ * One that is not fails like a network error.
+ */
+async function readJson<T>(
+  response: Response,
+  isShape: (value: unknown) => value is T,
+): Promise<T> {
+  const payload: unknown = await response.json();
+  if (!isShape(payload)) {
+    throw new Error("The server answered an unexpected shape");
+  }
+  return payload;
+}
 
 /**
  * Application-wide state shape exposed to web components. The store keeps
@@ -32,7 +67,7 @@ type Listener = () => void;
 export interface DashboardState {
   rooms: Room[];
   currentRoomCode: string | null;
-  views: Record<string, RoomView>;
+  views: Map<string, RoomView>;
   settings: AppSettings | null;
   wsConnected: boolean;
   reconnectAttempt: number;
@@ -44,7 +79,7 @@ export interface DashboardState {
 const INITIAL_STATE: DashboardState = {
   rooms: [],
   currentRoomCode: null,
-  views: {},
+  views: new Map<string, RoomView>(),
   settings: null,
   wsConnected: false,
   reconnectAttempt: 0,
@@ -67,16 +102,24 @@ export class DashboardStore {
   constructor() {
     this.#client = new RoomClient({
       onConnected: (): void => {
-        this.#patch({ wsConnected: true, reconnectAttempt: 0 });
+        this.#setState({
+          ...this.#state,
+          wsConnected: true,
+          reconnectAttempt: 0,
+        });
       },
       onDisconnected: (attempt: number): void => {
-        this.#patch({ wsConnected: false, reconnectAttempt: attempt });
+        this.#setState({
+          ...this.#state,
+          wsConnected: false,
+          reconnectAttempt: attempt,
+        });
       },
       onEvent: (event: WsEvent): void => {
         this.#applyEvent(event);
       },
       onError: (message: string): void => {
-        this.#patch({ errorMessage: message });
+        this.#setState({ ...this.#state, errorMessage: message });
       },
     });
     void this.loadRooms();
@@ -105,13 +148,19 @@ export class DashboardStore {
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/v1/rooms`);
       if (!response.ok) {
-        this.#patch({ errorMessage: "Failed to load rooms." });
+        this.#setState({
+          ...this.#state,
+          errorMessage: "Failed to load rooms.",
+        });
         return;
       }
-      const payload = (await response.json()) as RoomsListResponse;
-      this.#patch({ rooms: payload.rooms });
+      const payload = await readJson(response, isRoomsListResponse);
+      this.#setState({ ...this.#state, rooms: payload.rooms });
     } catch {
-      this.#patch({ errorMessage: "Network error while loading rooms." });
+      this.#setState({
+        ...this.#state,
+        errorMessage: "Network error while loading rooms.",
+      });
     }
   }
 
@@ -119,20 +168,28 @@ export class DashboardStore {
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/v1/settings`);
       if (!response.ok) {
-        this.#patch({ errorMessage: "Failed to load settings." });
+        this.#setState({
+          ...this.#state,
+          errorMessage: "Failed to load settings.",
+        });
         return;
       }
-      const payload = (await response.json()) as SettingsEnvelope;
-      this.#patch({ settings: payload.settings });
+      const payload = await readJson(response, isSettingsEnvelope);
+      this.#setState({ ...this.#state, settings: payload.settings });
     } catch {
-      this.#patch({ errorMessage: "Network error while loading settings." });
+      this.#setState({
+        ...this.#state,
+        errorMessage: "Network error while loading settings.",
+      });
     }
   }
 
-  async saveSettings(
-    request: UpdateAppSettingsRequest,
-  ): Promise<boolean> {
-    this.#patch({ isSavingSettings: true, errorMessage: null });
+  async saveSettings(request: UpdateAppSettingsRequest): Promise<boolean> {
+    this.#setState({
+      ...this.#state,
+      isSavingSettings: true,
+      errorMessage: null,
+    });
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/v1/settings`, {
         method: "PUT",
@@ -141,20 +198,23 @@ export class DashboardStore {
       });
       if (!response.ok) {
         const text = await response.text();
-        this.#patch({
+        this.#setState({
+          ...this.#state,
           isSavingSettings: false,
           errorMessage: `Save settings failed: ${text}`,
         });
         return false;
       }
-      const payload = (await response.json()) as SettingsEnvelope;
-      this.#patch({
+      const payload = await readJson(response, isSettingsEnvelope);
+      this.#setState({
+        ...this.#state,
         settings: payload.settings,
         isSavingSettings: false,
       });
       return true;
     } catch {
-      this.#patch({
+      this.#setState({
+        ...this.#state,
         isSavingSettings: false,
         errorMessage: "Network error while saving settings.",
       });
@@ -163,9 +223,9 @@ export class DashboardStore {
   }
 
   async fetchProviderModels(
-    tier: "low" | "high",
+    tier: Tier,
     config: ProviderConfig,
-  ): Promise<{ models: ProviderModelOption[]; error: string | null }> {
+  ): Promise<ProviderModelsResult> {
     try {
       const response = await fetch(
         `${BACKEND_BASE_URL}/v1/providers/${tier}/models`,
@@ -182,7 +242,7 @@ export class DashboardStore {
           error: extractErrorMessage(text, response.status),
         };
       }
-      const payload = (await response.json()) as ProviderModelsResponse;
+      const payload = await readJson(response, isProviderModelsResponse);
       return { models: payload.models, error: null };
     } catch {
       return {
@@ -196,7 +256,8 @@ export class DashboardStore {
     if (this.#state.currentRoomCode === roomCode) {
       return;
     }
-    this.#patch({
+    this.#setState({
+      ...this.#state,
       currentRoomCode: roomCode,
       wsConnected: false,
       reconnectAttempt: 0,
@@ -210,7 +271,8 @@ export class DashboardStore {
       return;
     }
     this.#client.disconnect();
-    this.#patch({
+    this.#setState({
+      ...this.#state,
       currentRoomCode: null,
       wsConnected: false,
       reconnectAttempt: 0,
@@ -222,7 +284,11 @@ export class DashboardStore {
   }
 
   async createRoom(request: CreateRoomRequest): Promise<Room | null> {
-    this.#patch({ isCreatingRoom: true, errorMessage: null });
+    this.#setState({
+      ...this.#state,
+      isCreatingRoom: true,
+      errorMessage: null,
+    });
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/v1/rooms`, {
         method: "POST",
@@ -231,19 +297,21 @@ export class DashboardStore {
       });
       if (!response.ok) {
         const text = await response.text();
-        this.#patch({
+        this.#setState({
+          ...this.#state,
           isCreatingRoom: false,
           errorMessage: `Create failed: ${text}`,
         });
         return null;
       }
-      const payload = (await response.json()) as { room: Room };
-      this.#patch({ isCreatingRoom: false });
+      const payload = await readJson(response, isRoomEnvelope);
+      this.#setState({ ...this.#state, isCreatingRoom: false });
       await this.loadRooms();
       this.selectRoom(payload.room.code);
       return payload.room;
     } catch {
-      this.#patch({
+      this.#setState({
+        ...this.#state,
         isCreatingRoom: false,
         errorMessage: "Network error while creating room.",
       });
@@ -252,7 +320,7 @@ export class DashboardStore {
   }
 
   async cloneRoom(roomCode: string): Promise<Room | null> {
-    this.#patch({ errorMessage: null });
+    this.#setState({ ...this.#state, errorMessage: null });
     try {
       const response = await fetch(
         `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/clone`,
@@ -264,14 +332,20 @@ export class DashboardStore {
       );
       if (!response.ok) {
         const text = await response.text();
-        this.#patch({ errorMessage: `Duplicate failed: ${text}` });
+        this.#setState({
+          ...this.#state,
+          errorMessage: `Duplicate failed: ${text}`,
+        });
         return null;
       }
-      const payload = (await response.json()) as { room: Room };
+      const payload = await readJson(response, isRoomEnvelope);
       await this.loadRooms();
       return payload.room;
     } catch {
-      this.#patch({ errorMessage: "Network error while duplicating room." });
+      this.#setState({
+        ...this.#state,
+        errorMessage: "Network error while duplicating room.",
+      });
       return null;
     }
   }
@@ -281,32 +355,32 @@ export class DashboardStore {
     request: UpdateRoomRequest,
   ): Promise<boolean> {
     try {
-      const response = await fetch(
-        `${BACKEND_BASE_URL}/v1/rooms/${roomCode}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
+      const response = await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomCode}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      });
       if (!response.ok) {
         const text = await response.text();
-        this.#patch({ errorMessage: `Update failed: ${text}` });
+        this.#setState({
+          ...this.#state,
+          errorMessage: `Update failed: ${text}`,
+        });
         return false;
       }
-      const payload = (await response.json()) as { room: Room };
+      const payload = await readJson(response, isRoomEnvelope);
       this.#mergeRoom(payload.room);
       return true;
     } catch {
-      this.#patch({ errorMessage: "Network error while updating room." });
+      this.#setState({
+        ...this.#state,
+        errorMessage: "Network error while updating room.",
+      });
       return false;
     }
   }
 
-  async sendUserMessage(
-    roomCode: string,
-    content: string,
-  ): Promise<void> {
+  async sendUserMessage(roomCode: string, content: string): Promise<void> {
     const trimmed = content.trim();
     if (trimmed === "") {
       return;
@@ -323,10 +397,16 @@ export class DashboardStore {
       );
       if (!response.ok) {
         const text = await response.text();
-        this.#patch({ errorMessage: `Send failed: ${text}` });
+        this.#setState({
+          ...this.#state,
+          errorMessage: `Send failed: ${text}`,
+        });
       }
     } catch {
-      this.#patch({ errorMessage: "Network error while sending message." });
+      this.#setState({
+        ...this.#state,
+        errorMessage: "Network error while sending message.",
+      });
     }
   }
 
@@ -336,13 +416,17 @@ export class DashboardStore {
         `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/files`,
       );
       if (!response.ok) {
-        this.#patch({ errorMessage: "Failed to load workspace files." });
+        this.#setState({
+          ...this.#state,
+          errorMessage: "Failed to load workspace files.",
+        });
         return null;
       }
-      const payload = (await response.json()) as WorkspaceFilesResponse;
+      const payload = await readJson(response, isWorkspaceFilesResponse);
       return payload.files;
     } catch {
-      this.#patch({
+      this.#setState({
+        ...this.#state,
         errorMessage: "Network error while loading workspace files.",
       });
       return null;
@@ -350,7 +434,10 @@ export class DashboardStore {
   }
 
   workspaceFileUrl(roomCode: string, path: string): string {
-    const encoded = path.split("/").map(encodeURIComponent).join("/");
+    const encoded = path
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
     return `${BACKEND_BASE_URL}/${roomCode}/files/${encoded}`;
   }
 
@@ -359,7 +446,8 @@ export class DashboardStore {
   }
 
   async toggleRoomActivation(room: Room): Promise<void> {
-    const action = room.roomState === "deactivated" ? "activate" : "deactivate";
+    const action: RoomStateAction =
+      room.roomState === "DEACTIVATED" ? "ACTIVATE" : "DEACTIVATE";
     await this.#postRoomStateAction(room.code, action);
   }
 
@@ -368,45 +456,57 @@ export class DashboardStore {
       await fetch(`${BACKEND_BASE_URL}/v1/rooms/${roomCode}`, {
         method: "DELETE",
       });
-      const remaining = this.#state.rooms.filter((r) => r.code !== roomCode);
+      const remaining = this.#state.rooms.filter(
+        (candidate) => candidate.code !== roomCode,
+      );
       const nextSelected = remaining[0]?.code ?? null;
-      const views = { ...this.#state.views };
-      delete views[roomCode];
-      this.#patch({
+      const views = new Map(this.#state.views);
+      views.delete(roomCode);
+      this.#setState({
+        ...this.#state,
         rooms: remaining,
         currentRoomCode: nextSelected,
         views,
       });
-      if (nextSelected !== null) {
-        this.#client.connect(nextSelected);
-      } else {
+      if (nextSelected === null) {
         this.#client.disconnect();
+      } else {
+        this.#client.connect(nextSelected);
       }
     } catch {
-      this.#patch({ errorMessage: "Failed to delete room." });
+      this.#setState({
+        ...this.#state,
+        errorMessage: "Failed to delete room.",
+      });
     }
   }
 
   async #postRoomStateAction(
     roomCode: string,
-    action: "activate" | "deactivate",
+    action: RoomStateAction,
   ): Promise<void> {
+    const verb = action === "ACTIVATE" ? "activate" : "deactivate";
     try {
       const response = await fetch(
-        `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/${action}`,
+        `${BACKEND_BASE_URL}/v1/rooms/${roomCode}/${verb}`,
         { method: "POST" },
       );
       if (!response.ok) {
-        this.#patch({ errorMessage: `${action} failed.` });
+        this.#setState({ ...this.#state, errorMessage: `${verb} failed.` });
         return;
       }
-      const payload = (await response.json()) as { roomState: RoomState };
-      const room = this.#state.rooms.find((r) => r.code === roomCode);
+      const payload = await readJson(response, isRoomStateResponse);
+      const room = this.#state.rooms.find(
+        (candidate) => candidate.code === roomCode,
+      );
       if (room !== undefined) {
         this.#mergeRoom({ ...room, roomState: payload.roomState });
       }
     } catch {
-      this.#patch({ errorMessage: `Network error during ${action}.` });
+      this.#setState({
+        ...this.#state,
+        errorMessage: `Network error during ${verb}.`,
+      });
     }
   }
 
@@ -414,31 +514,31 @@ export class DashboardStore {
 
   #applyEvent(event: WsEvent): void {
     switch (event.type) {
-      case "snapshot":
+      case "SNAPSHOT":
         this.#applySnapshot(event.room, event.events, event.reports);
         break;
-      case "roomState":
+      case "ROOM_STATE":
         this.#patchCurrentRoom((room) => ({ ...room, roomState: event.state }));
         break;
-      case "debateState":
+      case "DEBATE_STATE":
         this.#patchCurrentRoom((room) => ({
           ...room,
           debateState: event.state,
         }));
         break;
-      case "rowAdded":
+      case "ROW_ADDED":
         this.#mutateView((view) => upsertRow(view, event.event));
         break;
-      case "rowDelta":
+      case "ROW_DELTA":
         this.#mutateView((view) =>
           mapRow(view, event.id, (row) => ({
             ...row,
             content: row.content + (event.contentDelta ?? ""),
             detail: row.detail + (event.detailDelta ?? ""),
-          }))
+          })),
         );
         break;
-      case "rowFinished":
+      case "ROW_FINISHED":
         this.#mutateView((view) =>
           mapRow(view, event.id, (row) => ({
             ...row,
@@ -446,10 +546,10 @@ export class DashboardStore {
             detail: event.detail,
             success: event.success,
             completedAt: event.completedAt,
-          }))
+          })),
         );
         break;
-      case "reportStarted":
+      case "REPORT_STARTED":
         this.#mutateView((view) =>
           appendReport(view, {
             reportId: event.reportId,
@@ -457,55 +557,56 @@ export class DashboardStore {
             content: "",
             success: false,
             completedAt: null,
-          })
+          }),
         );
         break;
-      case "reportToken":
+      case "REPORT_TOKEN":
         this.#mutateView((view) =>
           mapReport(view, event.reportId, (report) => ({
             ...report,
             content: report.content + event.delta,
-          }))
+          })),
         );
         break;
-      case "reportCompleted":
+      case "REPORT_COMPLETED":
         this.#mutateView((view) =>
           mapReport(view, event.reportId, (report) => ({
             ...report,
             content: event.content,
             success: event.success,
             completedAt: event.completedAt,
-          }))
+          })),
         );
         break;
     }
   }
 
-  #applySnapshot(
-    room: Room,
-    events: RoomEvent[],
-    reports: RoomReport[],
-  ): void {
+  #applySnapshot(room: Room, events: RoomEvent[], reports: RoomReport[]): void {
     const view: RoomView = {
       room,
-      events: events.slice().sort((a, b) => a.sequence - b.sequence),
-      reports: reports.map(toReportBuffer),
+      events: events.toSorted(bySequence),
+      reports: reports.map((report) => toReportBuffer(report)),
     };
-    this.#patch({
-      views: { ...this.#state.views, [room.code]: view },
-    });
+    const views = new Map([...this.#state.views, [room.code, view]]);
+    this.#setState({ ...this.#state, views });
     this.#mergeRoom(room);
   }
 
   #mergeRoom(updated: Room): void {
-    const rooms = this.#state.rooms.some((r) => r.code === updated.code)
-      ? this.#state.rooms.map((r) => (r.code === updated.code ? updated : r))
+    const rooms = this.#state.rooms.some((room) => room.code === updated.code)
+      ? this.#state.rooms.map((room) =>
+          room.code === updated.code ? updated : room,
+        )
       : [updated, ...this.#state.rooms];
-    const view = this.#state.views[updated.code];
-    const views = view !== undefined
-      ? { ...this.#state.views, [updated.code]: { ...view, room: updated } }
-      : this.#state.views;
-    this.#patch({ rooms, views });
+    const view = this.#state.views.get(updated.code);
+    const views =
+      view === undefined
+        ? this.#state.views
+        : new Map([
+            ...this.#state.views,
+            [updated.code, { ...view, room: updated }],
+          ]);
+    this.#setState({ ...this.#state, rooms, views });
   }
 
   #patchCurrentRoom(transform: (room: Room) => Room): void {
@@ -513,7 +614,7 @@ export class DashboardStore {
     if (code === null) {
       return;
     }
-    const room = this.#state.rooms.find((r) => r.code === code);
+    const room = this.#state.rooms.find((candidate) => candidate.code === code);
     if (room === undefined) {
       return;
     }
@@ -525,16 +626,16 @@ export class DashboardStore {
     if (code === null) {
       return;
     }
-    const view = this.#state.views[code];
+    const view = this.#state.views.get(code);
     if (view === undefined) {
       return;
     }
-    const next = transform(view);
-    this.#patch({ views: { ...this.#state.views, [code]: next } });
+    const views = new Map([...this.#state.views, [code, transform(view)]]);
+    this.#setState({ ...this.#state, views });
   }
 
-  #patch(patch: Partial<DashboardState>): void {
-    this.#state = { ...this.#state, ...patch };
+  #setState(next: DashboardState): void {
+    this.#state = next;
     for (const listener of this.#listeners) {
       listener();
     }
@@ -553,20 +654,18 @@ function upsertRow(view: RoomView, incoming: RoomEvent): RoomView {
   if (incoming.id === null) {
     return { ...view, events: [...view.events, incoming] };
   }
-  const existing = view.events.findIndex((e) => e.id === incoming.id);
-  if (existing >= 0) {
-    const events = view.events.map((e, i) => (i === existing ? incoming : e));
+  const existing = view.events.findIndex((row) => row.id === incoming.id);
+  if (existing !== -1) {
+    const events = view.events.map((row, index) =>
+      index === existing ? incoming : row,
+    );
     return { ...view, events };
   }
-  if (
-    view.events.length === 0 ||
-    incoming.sequence > view.events[view.events.length - 1].sequence
-  ) {
+  const last = view.events.at(-1);
+  if (last === undefined || incoming.sequence > last.sequence) {
     return { ...view, events: [...view.events, incoming] };
   }
-  const events = [...view.events, incoming].sort(
-    (a, b) => a.sequence - b.sequence,
-  );
+  const events = [...view.events, incoming].toSorted(bySequence);
   return { ...view, events };
 }
 
@@ -575,17 +674,22 @@ function mapRow(
   id: number,
   transform: (row: RoomEvent) => RoomEvent,
 ): RoomView {
-  const events = view.events.map((
-    row,
-  ) => (row.id === id ? transform(row) : row));
+  const events = view.events.map((row) =>
+    row.id === id ? transform(row) : row,
+  );
   return { ...view, events };
 }
 
 function appendReport(view: RoomView, report: ReportBuffer): RoomView {
-  const idx = view.reports.findIndex((r) => r.reportId === report.reportId);
-  const reports = idx >= 0
-    ? view.reports.map((r, i) => (i === idx ? report : r))
-    : [...view.reports, report];
+  const existing = view.reports.findIndex(
+    (candidate) => candidate.reportId === report.reportId,
+  );
+  const reports =
+    existing === -1
+      ? [...view.reports, report]
+      : view.reports.map((candidate, index) =>
+          index === existing ? report : candidate,
+        );
   return { ...view, reports };
 }
 
@@ -595,7 +699,7 @@ function mapReport(
   transform: (report: ReportBuffer) => ReportBuffer,
 ): RoomView {
   const reports = view.reports.map((report) =>
-    report.reportId === reportId ? transform(report) : report
+    report.reportId === reportId ? transform(report) : report,
   );
   return { ...view, reports };
 }
@@ -603,8 +707,8 @@ function mapReport(
 function extractErrorMessage(body: string, status: number): string {
   if (body !== "") {
     try {
-      const parsed = JSON.parse(body) as { error?: unknown };
-      if (typeof parsed.error === "string" && parsed.error !== "") {
+      const parsed: unknown = JSON.parse(body);
+      if (isErrorBody(parsed) && parsed.error !== "") {
         return parsed.error;
       }
     } catch {

@@ -1,0 +1,81 @@
+name: Code Quality
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-code:
+    name: rust-code
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The OCR and SQLite crates link against these system libraries
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsqlite3-dev libtesseract-dev libleptonica-dev \
+            clang cmake pkg-config
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  typescript-code:
+    name: typescript-code
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1.21.2
+        with:
+          node-version: "24"
+          working-directory: frontend
+          cache: true
+
+      # Formatting, lint (Oxlint with the project's plugins), and type check
+      - name: Vite+ Check
+        run: vp check
+
+      # Check Lit templates, which the type check cannot see inside
+      - name: Lit Check
+        run: npm run lit-check
+
+      - name: Test
+        run: vp test
+
+      # The bundle is what the container ships, so it has to build
+      - name: Build
+        run: vp build

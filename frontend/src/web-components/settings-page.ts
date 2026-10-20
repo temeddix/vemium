@@ -1,18 +1,32 @@
-import { dashboardContext } from "@/app/context";
-import type { DashboardState, DashboardStore } from "@/app/state";
-import type {
-  ApiType,
-  ProviderConfig,
-  ProviderModelOption,
-  UpdateAppSettingsRequest,
-} from "@/app/types";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/icon/icon.js";
+import "@awesome.me/webawesome/dist/components/input/input.js";
+import "@awesome.me/webawesome/dist/components/option/option.js";
+import "@awesome.me/webawesome/dist/components/select/select.js";
+import "@awesome.me/webawesome/dist/components/tooltip/tooltip.js";
 import { consume } from "@lit/context";
-import { css, html, LitElement, nothing } from "lit";
+import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+
+import { dashboardContext } from "#context";
+import type { DashboardState, DashboardStore, Tier } from "#state";
+import type { ApiType, ProviderConfig, UpdateAppSettingsRequest } from "#types";
+import { navigateTo } from "#utils";
+
+import {
+  type FieldSpec,
+  readInputValue,
+  renderLabel,
+  renderPasswordField,
+  renderTextField,
+} from "./form-fields.ts";
+import { ModelListController } from "./model-list-controller.ts";
+import { StoreController } from "./store-controller.ts";
+import { UpdateEffectController } from "./update-effect-controller.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
-    "te-settings-page": SettingsPage;
+    "te-settings-page": SettingsPageElement;
   }
 }
 
@@ -21,68 +35,99 @@ interface SettingsForm {
   high: ProviderConfig;
 }
 
-type Tier = "low" | "high";
-
-/**
- * Per-tier state for the auto-fetched model list. `models === null` means
- * "no list available" (initial render, fetch error, or incomplete config);
- * the model field falls back to a free-text input in that case so the user
- * is never blocked by a flaky provider.
- */
-interface TierModelsState {
-  models: ProviderModelOption[] | null;
-  loading: boolean;
-  error: string | null;
+/** How a tier's fieldset introduces itself. */
+interface TierSpec {
+  tier: Tier;
+  /** Lowercase name, used in element ids. */
+  key: string;
+  label: string;
+  tooltip: string;
 }
 
-const INITIAL_TIER_MODELS: TierModelsState = {
-  models: null,
-  loading: false,
-  error: null,
+const LOW_TIER: TierSpec = {
+  tier: "LOW",
+  key: "low",
+  label: "Low tier",
+  tooltip: "Cheaper / faster model used for every debater turn.",
 };
 
-/**
- * Debounce window between the last form edit and the fetch request. Long
- * enough to coalesce keystrokes while typing a base URL, short enough that
- * the dropdown feels responsive after the user stops.
- */
-const MODELS_FETCH_DEBOUNCE_MS = 500;
+const HIGH_TIER: TierSpec = {
+  tier: "HIGH",
+  key: "high",
+  label: "High tier",
+  tooltip:
+    "Higher-quality model used for steering nudges, halt/proceed gates, and reports.",
+};
+
+const OPEN_ROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+const OPEN_AI_BASE_URL = "http://localhost:1234/v1";
+const OLLAMA_BASE_URL = "http://localhost:11434";
+
+const MODEL_TOOLTIP =
+  "Exact model identifier accepted by the provider, e.g. qwen3:14b or anthropic/claude-sonnet-4-6.";
 
 const EMPTY_PROVIDER: ProviderConfig = {
   model: "",
-  baseUrl: "http://localhost:11434",
+  baseUrl: OLLAMA_BASE_URL,
   apiKey: null,
-  apiType: "ollama",
+  apiType: "OLLAMA",
 };
 
-function readInputValue(target: EventTarget | null): string {
-  if (!(target instanceof HTMLElement)) {
-    return "";
-  }
-  if (!("value" in target)) {
-    return "";
-  }
-  const value = (target as Record<string, unknown>)["value"];
-  return typeof value === "string" ? value : "";
+/** Whether a string is an `ApiType`. */
+function isApiType(value: string): value is ApiType {
+  return value === "OLLAMA" || value === "OPEN_ROUTER" || value === "OPEN_AI";
+}
+
+/** A tier's configuration within the form. */
+function tierConfig(form: SettingsForm, tier: Tier): ProviderConfig {
+  return tier === "LOW" ? form.low : form.high;
+}
+
+/** The form with one tier's configuration replaced. */
+function withTierConfig(
+  form: SettingsForm,
+  tier: Tier,
+  config: ProviderConfig,
+): SettingsForm {
+  return tier === "LOW" ? { ...form, low: config } : { ...form, high: config };
 }
 
 /**
- * Returns true when `config` carries the minimum fields the backend will
- * accept for a model-list lookup. Mirrors the validation in
- * `routes::list_provider_models` so we can suppress noisy "Could not list
- * models (HTTP 400)" toasts while the user is still filling out the form.
+ * The tier of the fieldset an event came from, read from its `data-tier`.
+ * Null when the event did not come from inside a tier's fieldset.
  */
-function canFetchModels(config: ProviderConfig): boolean {
-  if (config.baseUrl.trim() === "") {
-    return false;
+function tierOf(event: Event): Tier | null {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return null;
   }
-  if ((config.apiType ?? "ollama") === "openRouter") {
-    const key = config.apiKey;
-    if (key === null || key.trim() === "") {
-      return false;
-    }
+  const fieldset = target.closest("fieldset[data-tier]");
+  if (!(fieldset instanceof HTMLElement)) {
+    return null;
   }
-  return true;
+  const tier = fieldset.dataset["tier"];
+  return tier === "LOW" || tier === "HIGH" ? tier : null;
+}
+
+/**
+ * The configuration after picking `apiType`: switching to OpenRouter or an
+ * OpenAI-compatible server fills in its usual base URL, and switching back
+ * to Ollama restores Ollama's when the URL was one of those defaults.
+ */
+function withApiType(config: ProviderConfig, apiType: ApiType): ProviderConfig {
+  if (apiType === "OPEN_ROUTER") {
+    return { ...config, apiType, baseUrl: OPEN_ROUTER_BASE_URL };
+  }
+  if (apiType === "OPEN_AI") {
+    return { ...config, apiType, baseUrl: OPEN_AI_BASE_URL };
+  }
+  if (
+    config.baseUrl === OPEN_ROUTER_BASE_URL ||
+    config.baseUrl === OPEN_AI_BASE_URL
+  ) {
+    return { ...config, apiType, baseUrl: OLLAMA_BASE_URL };
+  }
+  return { ...config, apiType };
 }
 
 /**
@@ -92,40 +137,43 @@ function canFetchModels(config: ProviderConfig): boolean {
  * rotation takes effect at the next turn.
  */
 @customElement("te-settings-page")
-export class SettingsPage extends LitElement {
+export class SettingsPageElement extends LitElement {
   @consume({ context: dashboardContext, subscribe: true })
   @property({ attribute: false })
   accessor store!: DashboardStore;
 
   @state()
-  private accessor dashboardState: DashboardState | null = null;
+  accessor dashboardState: DashboardState | null = null;
 
   @state()
-  private accessor form: SettingsForm | null = null;
+  accessor form: SettingsForm | null = null;
 
-  @state()
-  private accessor modelsState: Record<Tier, TierModelsState> = {
-    low: INITIAL_TIER_MODELS,
-    high: INITIAL_TIER_MODELS,
-  };
+  #lowModels: ModelListController = new ModelListController(this).forTier(
+    "LOW",
+    (): DashboardStore => this.store,
+  );
 
-  #unsubscribe: (() => void) | null = null;
-  #debounce: Record<Tier, ReturnType<typeof setTimeout> | null> = {
-    low: null,
-    high: null,
-  };
-  /**
-   * Last config fingerprint we kicked a fetch for, per tier. Lets
-   * `updated()` skip re-scheduling when an unrelated piece of state changed
-   * (e.g. an in-flight fetch resolving and updating `modelsState`).
-   */
-  #lastFingerprint: Record<Tier, string | null> = { low: null, high: null };
-  /**
-   * Per-tier monotonic counter incremented every time we kick a fetch.
-   * In-flight callbacks compare their captured value against the current
-   * counter and bail if a newer fetch has been scheduled in the meantime.
-   */
-  #fetchSeq: Record<Tier, number> = { low: 0, high: 0 };
+  #highModels: ModelListController = new ModelListController(this).forTier(
+    "HIGH",
+    (): DashboardStore => this.store,
+  );
+
+  storeSubscription: StoreController = new StoreController(this).track(
+    (): DashboardStore | null => this.store,
+    (next: DashboardState): void => {
+      this.dashboardState = next;
+    },
+  );
+
+  effects: UpdateEffectController = new UpdateEffectController(this).onUpdated(
+    (): void => {
+      this.#seedFormIfNeeded();
+      if (this.form !== null) {
+        this.#lowModels.schedule(this.form.low);
+        this.#highModels.schedule(this.form.high);
+      }
+    },
+  );
 
   static override styles = css`
     :host {
@@ -262,39 +310,8 @@ export class SettingsPage extends LitElement {
       color: var(--wa-color-danger-on-quiet);
     }
   `;
-
-  override connectedCallback(): void {
-    super.connectedCallback();
-    this.#bindStore();
-  }
-
-  override updated(changed: Map<string, unknown>): void {
-    if (changed.has("store")) {
-      this.#unsubscribe?.();
-      this.#unsubscribe = null;
-      this.#bindStore();
-    }
-    this.#seedFormIfNeeded();
-    if (this.form !== null) {
-      this.#scheduleModelFetch("low", this.form.low);
-      this.#scheduleModelFetch("high", this.form.high);
-    }
-  }
-
-  override disconnectedCallback(): void {
-    this.#unsubscribe?.();
-    this.#unsubscribe = null;
-    for (const tier of ["low", "high"] as const) {
-      const timer = this.#debounce[tier];
-      if (timer !== null) {
-        clearTimeout(timer);
-        this.#debounce[tier] = null;
-      }
-    }
-    super.disconnectedCallback();
-  }
-
-  override render() {
+  override render(): TemplateResult {
+    const body = this.#renderBody();
     return html`
       <div class="container">
         <header class="header">
@@ -307,12 +324,12 @@ export class SettingsPage extends LitElement {
             responses.
           </span>
         </header>
-        ${this.#renderBody()}
+        ${body}
       </div>
     `;
   }
 
-  #renderBody() {
+  #renderBody(): TemplateResult {
     const form = this.form;
     if (form === null) {
       return html`
@@ -321,32 +338,18 @@ export class SettingsPage extends LitElement {
     }
     const error = this.dashboardState?.errorMessage ?? null;
     const busy = this.dashboardState?.isSavingSettings ?? false;
-    return html`
-      ${error
-        ? html`
+    const errorBanner =
+      error === null || error === ""
+        ? nothing
+        : html`
           <div class="error-banner">${error}</div>
-        `
-        : nothing}
+        `;
+    const low = this.#renderProvider(LOW_TIER, form.low);
+    const high = this.#renderProvider(HIGH_TIER, form.high);
+    return html`
+      ${errorBanner}
       <div class="form-grid">
-        <div class="provider-grid">
-          ${this.#renderProvider(
-            "low",
-            "Low tier",
-            "Cheaper / faster model used for every debater turn.",
-            form.low,
-            (next) => {
-              this.form = { ...form, low: next };
-            },
-          )} ${this.#renderProvider(
-            "high",
-            "High tier",
-            "Higher-quality model used for steering nudges, halt/proceed gates, and reports.",
-            form.high,
-            (next) => {
-              this.form = { ...form, high: next };
-            },
-          )}
-        </div>
+        <div class="provider-grid">${low} ${high}</div>
         <div class="footer-row">
           <wa-button
             size="small"
@@ -367,82 +370,47 @@ export class SettingsPage extends LitElement {
     `;
   }
 
-  #renderProvider(
-    tier: Tier,
-    label: string,
-    tierTooltip: string,
-    config: ProviderConfig,
-    onChange: (config: ProviderConfig) => void,
-  ) {
-    const apiType: ApiType = config.apiType ?? "ollama";
-    const legendAnchor = `tip-${tier}-tier`;
+  #renderProvider(spec: TierSpec, config: ProviderConfig): TemplateResult {
+    const apiType: ApiType = config.apiType ?? "OLLAMA";
+    const legendAnchor = `tip-${spec.key}-tier`;
+    const apiTypeLabel = renderLabel({
+      key: `${spec.key}-api-type`,
+      label: "API type",
+      tooltip: "Pick the provider protocol used by this tier.",
+    });
+    const apiKey =
+      apiType === "OLLAMA"
+        ? nothing
+        : renderPasswordField(
+            apiKeyField(spec, apiType),
+            config.apiKey ?? "",
+            this.#onApiKeyInput,
+          );
+    const baseUrl = renderTextField(
+      baseUrlField(spec, apiType),
+      config.baseUrl,
+      this.#onBaseUrlInput,
+    );
+    const model = this.#renderModelField(spec, config);
     return html`
-      <fieldset class="tier">
-        <legend>${label}</legend>
+      <fieldset class="tier" data-tier="${spec.tier}">
+        <legend>${spec.label}</legend>
         <wa-tooltip for="${legendAnchor}" placement="top">
-          ${tierTooltip}
+          ${spec.tooltip}
         </wa-tooltip>
         <label class="form-field">
-          ${this.#renderLabel(
-            `${tier}-api-type`,
-            "API type",
-            "Pick the provider protocol used by this tier.",
-          )}
+          ${apiTypeLabel}
           <wa-select
             size="small"
             .value="${apiType}"
-            @change="${(e: Event): void => {
-              const value = readInputValue(e.target);
-              if (
-                value === "ollama" ||
-                value === "openRouter" ||
-                value === "openAi"
-              ) {
-                const patch: Partial<ProviderConfig> = { apiType: value };
-                if (value === "openRouter") {
-                  patch.baseUrl = "https://openrouter.ai/api/v1";
-                } else if (value === "openAi") {
-                  patch.baseUrl = "http://localhost:1234/v1";
-                } else if (
-                  config.baseUrl === "https://openrouter.ai/api/v1" ||
-                  config.baseUrl === "http://localhost:1234/v1"
-                ) {
-                  patch.baseUrl = "http://localhost:11434";
-                }
-                onChange({ ...config, ...patch });
-              }
-            }}"
+            @change="${this.#onApiTypeChange}"
           >
-            <wa-option value="ollama">Ollama</wa-option>
-            <wa-option value="openRouter">OpenRouter</wa-option>
-            <wa-option value="openAi">OpenAI Compatible</wa-option>
+            <wa-option value="OLLAMA">Ollama</wa-option>
+            <wa-option value="OPEN_ROUTER">OpenRouter</wa-option>
+            <wa-option value="OPEN_AI">OpenAI Compatible</wa-option>
           </wa-select>
         </label>
-        ${apiType !== "ollama"
-          ? this.#renderPasswordField(
-            `${tier}-api-key`,
-            "API key",
-            config.apiKey ?? "",
-            (value) =>
-              onChange({ ...config, apiKey: value === "" ? null : value }),
-            apiType === "openRouter"
-              ? "Required for OpenRouter. Leave it as-is (***) to keep the stored key, or type a new value to replace."
-              : "Optional bearer token. Leave it as-is (***) to keep the stored key, or type a new value to replace.",
-          )
-          : nothing} ${this.#renderTextField(
-            `${tier}-base-url`,
-            "Base URL",
-            config.baseUrl,
-            (value) => onChange({ ...config, baseUrl: value }),
-            apiType === "ollama"
-              ? "Server root, e.g. http://localhost:11434. Do not include /v1."
-              : "OpenAI-compatible API root, e.g. http://localhost:1234/v1.",
-          )} ${this.#renderModelField(
-            tier,
-            config,
-            this.modelsState[tier],
-            (model) => onChange({ ...config, model }),
-          )}
+        ${apiKey} ${baseUrl} ${model}
       </fieldset>
     `;
   }
@@ -456,130 +424,53 @@ export class SettingsPage extends LitElement {
    * "(custom)" entry when it is not present in the fetched list, so
    * stale-but-valid values survive provider hiccups.
    */
-  #renderModelField(
-    tier: Tier,
-    config: ProviderConfig,
-    state: TierModelsState,
-    onChange: (model: string) => void,
-  ) {
-    const tooltip =
-      "Exact model identifier accepted by the provider, e.g. qwen3:14b or anthropic/claude-sonnet-4-6.";
-    const labelKey = `${tier}-model`;
-    if (state.models !== null) {
-      const ids = state.models.map((entry) => entry.id);
-      const hasCurrent = config.model !== "" && ids.includes(config.model);
+  #renderModelField(spec: TierSpec, config: ProviderConfig): TemplateResult {
+    const list = spec.tier === "LOW" ? this.#lowModels : this.#highModels;
+    const label = renderLabel({
+      key: `${spec.key}-model`,
+      label: "Model",
+      tooltip: MODEL_TOOLTIP,
+    });
+    const status = renderModelStatus(list.loading, list.error);
+    if (list.models === null) {
       return html`
         <label class="form-field">
-          ${this.#renderLabel(labelKey, "Model", tooltip)}
-          <wa-select
+          ${label}
+          <wa-input
             size="small"
             .value="${config.model}"
-            @change="${(e: Event): void => onChange(readInputValue(e.target))}"
-          >
-            ${!hasCurrent && config.model !== ""
-              ? html`
-                <wa-option value="${config.model}">
-                  ${config.model} (custom)
-                </wa-option>
-              `
-              : nothing} ${ids.map((id) =>
-                html`
-                  <wa-option value="${id}">${id}</wa-option>
-                `
-              )}
-          </wa-select>
-          ${this.#renderModelStatus(state)}
+            @input="${this.#onModelInput}"
+          ></wa-input>
+          ${status}
         </label>
       `;
     }
+    const ids = list.models.map((entry) => entry.id);
+    const hasCurrent = config.model !== "" && ids.includes(config.model);
+    const custom =
+      !hasCurrent && config.model !== ""
+        ? html`
+          <wa-option value="${config.model}">${config.model} (custom)</wa-option>
+        `
+        : nothing;
+    const options = ids.map(
+      (id) =>
+        html`
+          <wa-option value="${id}">${id}</wa-option>
+        `,
+    );
     return html`
       <label class="form-field">
-        ${this.#renderLabel(labelKey, "Model", tooltip)}
-        <wa-input
+        ${label}
+        <wa-select
           size="small"
           .value="${config.model}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-input>
-        ${this.#renderModelStatus(state)}
+          @change="${this.#onModelInput}"
+        >
+          ${custom} ${options}
+        </wa-select>
+        ${status}
       </label>
-    `;
-  }
-
-  #renderModelStatus(state: TierModelsState) {
-    if (state.loading) {
-      return html`
-        <span class="model-status">Fetching models...</span>
-      `;
-    }
-    if (state.error !== null) {
-      return html`
-        <span class="model-status error">${state.error}</span>
-      `;
-    }
-    return nothing;
-  }
-
-  #renderTextField(
-    key: string,
-    label: string,
-    value: string,
-    onChange: (value: string) => void,
-    tooltip?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-input
-          size="small"
-          .value="${value}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-input>
-      </label>
-    `;
-  }
-
-  #renderPasswordField(
-    key: string,
-    label: string,
-    value: string,
-    onChange: (value: string) => void,
-    tooltip?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-input
-          type="password"
-          size="small"
-          password-toggle
-          .value="${value}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-input>
-      </label>
-    `;
-  }
-
-  #renderLabel(key: string, label: string, tooltip?: string) {
-    if (tooltip === undefined || tooltip === "") {
-      return html`
-        <span class="form-label">${label}</span>
-      `;
-    }
-    const anchorId = `tip-${key}`;
-    return html`
-      <span class="form-label">
-        <span>${label}</span>
-        <wa-icon
-          id="${anchorId}"
-          class="help-icon"
-          name="circle-question"
-          tabindex="0"
-        ></wa-icon>
-      </span>
-      <wa-tooltip for="${anchorId}" placement="top">${tooltip}</wa-tooltip>
     `;
   }
 
@@ -597,72 +488,45 @@ export class SettingsPage extends LitElement {
     };
   }
 
-  /**
-   * Reacts to `form` changes by re-fetching the model list when the
-   * fetch-relevant fields (api type, base URL, api key) change. Other
-   * edits - most notably `model` itself - leave the dropdown alone so the
-   * list does not flicker every keystroke when the user is just picking a
-   * model. The fingerprint check makes this a no-op when called with
-   * unchanged config, so it is safe to invoke from every `updated()`.
-   */
-  #scheduleModelFetch(tier: Tier, config: ProviderConfig): void {
-    const fingerprint = JSON.stringify({
-      apiType: config.apiType ?? "ollama",
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-    });
-    if (this.#lastFingerprint[tier] === fingerprint) {
+  /** Replaces the configuration of the tier an event came from. */
+  #updateTier(
+    event: Event,
+    update: (config: ProviderConfig) => ProviderConfig,
+  ): void {
+    const tier = tierOf(event);
+    const form = this.form;
+    if (tier === null || form === null) {
       return;
     }
-    this.#lastFingerprint[tier] = fingerprint;
-
-    const pending = this.#debounce[tier];
-    if (pending !== null) {
-      clearTimeout(pending);
-      this.#debounce[tier] = null;
-    }
-    // Bumping the seq invalidates any earlier in-flight fetch for this
-    // tier so its result cannot overwrite the new state when it lands.
-    const seq = ++this.#fetchSeq[tier];
-
-    if (!canFetchModels(config)) {
-      this.#updateTier(tier, INITIAL_TIER_MODELS);
-      return;
-    }
-
-    this.#updateTier(tier, {
-      models: this.modelsState[tier].models,
-      loading: true,
-      error: null,
-    });
-
-    this.#debounce[tier] = setTimeout((): void => {
-      this.#debounce[tier] = null;
-      void this.#runModelFetch(tier, config, seq);
-    }, MODELS_FETCH_DEBOUNCE_MS);
+    this.form = withTierConfig(form, tier, update(tierConfig(form, tier)));
   }
 
-  async #runModelFetch(
-    tier: Tier,
-    config: ProviderConfig,
-    seq: number,
-  ): Promise<void> {
-    const result = await this.store.fetchProviderModels(tier, config);
-    if (this.#fetchSeq[tier] !== seq) {
-      return;
+  #onApiTypeChange = (event: Event): void => {
+    const value = readInputValue(event.target);
+    if (isApiType(value)) {
+      this.#updateTier(event, (config) => withApiType(config, value));
     }
-    this.#updateTier(tier, {
-      models: result.error === null ? result.models : null,
-      loading: false,
-      error: result.error,
-    });
-  }
+  };
 
-  #updateTier(tier: Tier, next: TierModelsState): void {
-    this.modelsState = { ...this.modelsState, [tier]: next };
-  }
+  #onApiKeyInput = (event: Event): void => {
+    const value = readInputValue(event.target);
+    this.#updateTier(event, (config) => ({
+      ...config,
+      apiKey: value === "" ? null : value,
+    }));
+  };
 
-  #onResetClick(): void {
+  #onBaseUrlInput = (event: Event): void => {
+    const baseUrl = readInputValue(event.target);
+    this.#updateTier(event, (config) => ({ ...config, baseUrl }));
+  };
+
+  #onModelInput = (event: Event): void => {
+    const model = readInputValue(event.target);
+    this.#updateTier(event, (config) => ({ ...config, model }));
+  };
+
+  #onResetClick = (): void => {
     const settings = this.dashboardState?.settings ?? null;
     if (settings === null) {
       this.form = { low: { ...EMPTY_PROVIDER }, high: { ...EMPTY_PROVIDER } };
@@ -672,9 +536,9 @@ export class SettingsPage extends LitElement {
       low: { ...settings.low },
       high: { ...settings.high },
     };
-  }
+  };
 
-  async #onSaveClick(): Promise<void> {
+  #onSaveClick = async (): Promise<void> => {
     if (this.form === null) {
       return;
     }
@@ -686,20 +550,51 @@ export class SettingsPage extends LitElement {
     if (ok) {
       this.#onBack();
     }
-  }
+  };
 
-  #onBack(): void {
-    globalThis.history.pushState({}, "", "/");
-    globalThis.dispatchEvent(new PopStateEvent("popstate"));
-  }
+  #onBack = (): void => {
+    navigateTo("/");
+  };
+}
 
-  #bindStore(): void {
-    if (this.#unsubscribe !== null || this.store === undefined) {
-      return;
-    }
-    this.#unsubscribe = this.store.subscribe((): void => {
-      this.dashboardState = this.store.getState();
-    });
-    this.dashboardState = this.store.getState();
+/** The API key field of a tier, with help text for its provider. */
+function apiKeyField(spec: TierSpec, apiType: ApiType): FieldSpec {
+  return {
+    key: `${spec.key}-api-key`,
+    label: "API key",
+    tooltip:
+      apiType === "OPEN_ROUTER"
+        ? "Required for OpenRouter. Leave it as-is (***) to keep the stored key, or type a new value to replace."
+        : "Optional bearer token. Leave it as-is (***) to keep the stored key, or type a new value to replace.",
+  };
+}
+
+/** The base URL field of a tier, with help text for its provider. */
+function baseUrlField(spec: TierSpec, apiType: ApiType): FieldSpec {
+  return {
+    key: `${spec.key}-base-url`,
+    label: "Base URL",
+    tooltip:
+      apiType === "OLLAMA"
+        ? "Server root, e.g. http://localhost:11434. Do not include /v1."
+        : "OpenAI-compatible API root, e.g. http://localhost:1234/v1.",
+  };
+}
+
+/** The line under a model field: fetching, the fetch error, or nothing. */
+function renderModelStatus(
+  loading: boolean,
+  error: string | null,
+): TemplateResult {
+  if (loading) {
+    return html`
+      <span class="model-status">Fetching models...</span>
+    `;
   }
+  if (error !== null) {
+    return html`
+      <span class="model-status error">${error}</span>
+    `;
+  }
+  return html``;
 }

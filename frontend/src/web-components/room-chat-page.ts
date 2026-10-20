@@ -1,23 +1,37 @@
-import {
-  formatDuration,
-  formatSeparatorTimestamp,
-  shouldShowTimeSeparator,
-} from "@/app/chat";
-import { dashboardContext } from "@/app/context";
-import type { DashboardState, DashboardStore } from "@/app/state";
-import type { Room, RoomEvent, RoomView } from "@/app/types";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
+import "@awesome.me/webawesome/dist/components/dropdown-item/dropdown-item.js";
+import "@awesome.me/webawesome/dist/components/dropdown/dropdown.js";
+import "@awesome.me/webawesome/dist/components/icon/icon.js";
+import "@awesome.me/webawesome/dist/components/switch/switch.js";
 import { consume } from "@lit/context";
-import { css, html, LitElement, nothing } from "lit";
+import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
 
+import {
+  formatDuration,
+  formatSeparatorTimestamp,
+  pad2,
+  shouldShowTimeSeparator,
+} from "#chat";
+import { dashboardContext } from "#context";
+import type { DashboardState, DashboardStore } from "#state";
+import type { Room, RoomEvent, RoomView } from "#types";
+import { navigateTo } from "#utils";
+
 import "./chat-composer.ts";
+import type { SendDetail } from "./chat-composer.ts";
 import "./chat-message.ts";
 import { nextCronTick } from "./cron-picker.ts";
+import { IntervalController } from "./interval-controller.ts";
 import "./room-files-dialog.ts";
 import "./room-reports-dialog.ts";
 import "./room-settings-dialog.ts";
+import { StoreController } from "./store-controller.ts";
+import { UpdateEffectController } from "./update-effect-controller.ts";
+import { WindowScrollController } from "./window-scroll-controller.ts";
 
 interface DetailDialogState {
   author: string;
@@ -26,9 +40,19 @@ interface DetailDialogState {
   duration: string;
 }
 
+interface DialogElement extends HTMLElement {
+  open: boolean;
+}
+
+/** How often the paused-room countdown redraws. */
+const COUNTDOWN_INTERVAL_MS = 1000;
+
+/** How close to the bottom, in pixels, still counts as pinned there. */
+const PINNED_THRESHOLD_PX = 64;
+
 declare global {
   interface HTMLElementTagNameMap {
-    "te-room-chat-page": RoomChatPage;
+    "te-room-chat-page": RoomChatPageElement;
   }
 }
 
@@ -40,7 +64,7 @@ declare global {
  * [`te-chat-message`], which switches body shape by `event.kind`.
  */
 @customElement("te-room-chat-page")
-export class RoomChatPage extends LitElement {
+export class RoomChatPageElement extends LitElement {
   @consume({ context: dashboardContext, subscribe: true })
   @property({ attribute: false })
   accessor store!: DashboardStore;
@@ -49,26 +73,24 @@ export class RoomChatPage extends LitElement {
   accessor code = "";
 
   @state()
-  private accessor dashboardState: DashboardState | null = null;
+  accessor dashboardState: DashboardState | null = null;
 
   @state()
-  private accessor sending = false;
+  accessor sending = false;
 
   @state()
-  private accessor detailDialog: DetailDialogState | null = null;
+  accessor detailDialog: DetailDialogState | null = null;
 
   @state()
-  private accessor imageDialogSrc: string | null = null;
+  accessor imageDialogSrc: string | null = null;
 
   /** Wall-clock tick used to redraw the paused-room countdown each second. */
   @state()
-  private accessor nowMillis = Date.now();
+  accessor nowMillis = Date.now();
 
-  #countdownInterval: ReturnType<typeof setInterval> | null = null;
+  #detailDialogRef: Ref<DialogElement> = createRef();
 
-  #detailDialogRef: Ref<HTMLElement & { open: boolean }> = createRef();
-
-  #imageDialogRef: Ref<HTMLElement & { open: boolean }> = createRef();
+  #imageDialogRef: Ref<DialogElement> = createRef();
 
   #settingsDialogRef: Ref<HTMLElementTagNameMap["te-room-settings-dialog"]> =
     createRef();
@@ -79,16 +101,59 @@ export class RoomChatPage extends LitElement {
   #filesDialogRef: Ref<HTMLElementTagNameMap["te-room-files-dialog"]> =
     createRef();
 
-  #unsubscribe: (() => void) | null = null;
-
   /** Tracks the last selected code so `selectRoom` only fires on changes. */
   #lastSelectedCode: string | null = null;
+
+  /** The `code` the last update saw, to notice when it changes. */
+  #lastRenderedCode: string | null = null;
 
   /**
    * Tracks whether the user is currently anchored to the bottom of the
    * scroll viewport. Auto-scroll only fires when this is true.
    */
   #pinnedToBottom = true;
+
+  storeSubscription: StoreController = new StoreController(this).track(
+    (): DashboardStore | null => this.store,
+    (next: DashboardState): void => {
+      this.dashboardState = next;
+    },
+  );
+
+  scrollTracking: WindowScrollController = new WindowScrollController(
+    this,
+  ).listen((): void => {
+    const scrollTop = globalThis.scrollY;
+    const viewport = globalThis.innerHeight;
+    const total = document.documentElement.scrollHeight;
+    const distanceFromBottom = total - scrollTop - viewport;
+    this.#pinnedToBottom = distanceFromBottom < PINNED_THRESHOLD_PX;
+  });
+
+  countdown: IntervalController = new IntervalController(this).schedule(
+    COUNTDOWN_INTERVAL_MS,
+    (): void => {
+      this.nowMillis = Date.now();
+    },
+  );
+
+  effects: UpdateEffectController = new UpdateEffectController(this)
+    .onConnected((): void => {
+      this.#pinnedToBottom = true;
+    })
+    .onUpdated((): void => {
+      if (this.#lastRenderedCode !== this.code) {
+        this.#lastRenderedCode = this.code;
+        this.#pinnedToBottom = true;
+      }
+      this.#syncSelection();
+      if (this.#pinnedToBottom) {
+        scrollToBottom();
+      }
+    })
+    .onDisconnected((): void => {
+      this.#lastSelectedCode = null;
+    });
 
   static override styles = css`
     :host {
@@ -241,58 +306,24 @@ export class RoomChatPage extends LitElement {
       border-radius: 0.5rem;
     }
   `;
-
-  override connectedCallback(): void {
-    super.connectedCallback();
-    this.#pinnedToBottom = true;
-    this.#bindStore();
-    globalThis.addEventListener("scroll", this.#onWindowScroll, {
-      passive: true,
-    });
-    this.nowMillis = Date.now();
-    this.#countdownInterval = setInterval((): void => {
-      this.nowMillis = Date.now();
-    }, 1000);
-  }
-
-  override updated(changed: Map<string, unknown>): void {
-    if (changed.has("store")) {
-      const oldStore = changed.get("store") as DashboardStore | undefined;
-      if (oldStore !== undefined) {
-        this.#unsubscribe?.();
-        this.#unsubscribe = null;
-      }
-      this.#bindStore();
-    }
-    if (changed.has("code")) {
-      this.#pinnedToBottom = true;
-    }
-    this.#syncSelection();
-    if (this.#pinnedToBottom) {
-      this.#scrollToBottom();
-    }
-  }
-
-  override disconnectedCallback(): void {
-    globalThis.removeEventListener("scroll", this.#onWindowScroll);
-    this.#unsubscribe?.();
-    this.#unsubscribe = null;
-    this.#lastSelectedCode = null;
-    if (this.#countdownInterval !== null) {
-      clearInterval(this.#countdownInterval);
-      this.#countdownInterval = null;
-    }
-    super.disconnectedCallback();
-  }
-
-  override render() {
+  override render(): TemplateResult {
     const view = this.#currentView();
     if (view === null) {
       return this.#renderResolving();
     }
     const { room } = view;
-    const events = view.events;
     const topicLabel = room.topic.trim() === "" ? room.code : room.topic;
+    const active = room.roomState === "ACTIVE";
+    const scrollArea = this.#renderScrollArea(view.events);
+    const pausedBanner = this.#renderPausedBanner(room);
+    const errorMessage = this.dashboardState?.errorMessage ?? "";
+    const errorBanner =
+      errorMessage === ""
+        ? nothing
+        : html`
+          <div class="error-banner">${errorMessage}</div>
+        `;
+    const dialogs = this.#renderDialogs(view);
     return html`
       <div class="container">
         <header class="header">
@@ -304,9 +335,8 @@ export class RoomChatPage extends LitElement {
           </div>
           <wa-switch
             size="small"
-            ?checked="${room.roomState === "active"}"
-            @change="${(): Promise<void> =>
-              this.store.toggleRoomActivation(room)}"
+            ?checked="${active}"
+            @change="${this.#onToggleActivation}"
           ></wa-switch>
           <wa-dropdown placement="bottom-end">
             <wa-button
@@ -317,83 +347,74 @@ export class RoomChatPage extends LitElement {
             >
               <wa-icon name="ellipsis-vertical"></wa-icon>
             </wa-button>
-            <wa-dropdown-item
-              @click="${(): void => this.#settingsDialogRef.value?.show(room)}"
-            >
+            <wa-dropdown-item @click="${this.#openSettings}">
               Settings
             </wa-dropdown-item>
-            <wa-dropdown-item
-              @click="${(): void => this.#reportsDialogRef.value?.show()}"
-            >
+            <wa-dropdown-item @click="${this.#openReports}">
               Reports
             </wa-dropdown-item>
-            <wa-dropdown-item
-              @click="${(): Promise<void> | undefined =>
-                this.#filesDialogRef.value?.show(room.code)}"
-            >
-              Files
-            </wa-dropdown-item>
+            <wa-dropdown-item @click="${this.#openFiles}">Files</wa-dropdown-item>
           </wa-dropdown>
         </header>
-        ${this.#renderScrollArea(events)}
+        ${scrollArea}
         <div class="composer-wrap">
-          ${this.#renderPausedBanner(room)}
+          ${pausedBanner}
           <te-chat-composer
             ?disabled="${this.sending}"
             @te-send="${this.#onSend}"
           ></te-chat-composer>
-          ${this.dashboardState?.errorMessage
-            ? html`
-              <div class="error-banner">
-                ${this.dashboardState.errorMessage}
-              </div>
-            `
-            : nothing}
+          ${errorBanner}
         </div>
       </div>
+      ${dialogs}
+    `;
+  }
+
+  #renderDialogs(view: RoomView): TemplateResult {
+    const settingsDialogRef = ref(this.#settingsDialogRef);
+    const reportsDialogRef = ref(this.#reportsDialogRef);
+    const filesDialogRef = ref(this.#filesDialogRef);
+    const detailDialogRef = ref(this.#detailDialogRef);
+    const imageDialogRef = ref(this.#imageDialogRef);
+    const detail = this.detailDialog;
+    const detailLabel = detail?.label ?? "";
+    const detailBody =
+      detail === null
+        ? nothing
+        : html`
+          <div class="detail-dialog-author">${detail.author}</div>
+          <div class="detail-dialog-duration">Took ${detail.duration}</div>
+          <div class="detail-dialog-body">${detail.body}</div>
+        `;
+    const image =
+      this.imageDialogSrc === null
+        ? nothing
+        : html`
+          <img class="image-dialog-img" src="${this.imageDialogSrc}" alt="" />
+        `;
+    return html`
       <te-room-settings-dialog
-        ${ref(this.#settingsDialogRef)}
+        ${settingsDialogRef}
         .store="${this.store}"
       ></te-room-settings-dialog>
       <te-room-reports-dialog
-        ${ref(this.#reportsDialogRef)}
+        ${reportsDialogRef}
         .reports="${view.reports}"
       ></te-room-reports-dialog>
       <te-room-files-dialog
-        ${ref(this.#filesDialogRef)}
+        ${filesDialogRef}
         .store="${this.store}"
       ></te-room-files-dialog>
-      <wa-dialog
-        ${ref(this.#detailDialogRef)}
-        label="${this.detailDialog?.label ?? ""}"
-      >
-        ${this.detailDialog === null ? nothing : html`
-          <div class="detail-dialog-author">${this.detailDialog.author}</div>
-          <div class="detail-dialog-duration">
-            Took ${this.detailDialog.duration}
-          </div>
-          <div class="detail-dialog-body">${this.detailDialog.body}</div>
-        `}
-      </wa-dialog>
-      <wa-dialog
-        ${ref(this.#imageDialogRef)}
-        label="Image"
-        class="image-dialog"
-      >
-        ${this.imageDialogSrc === null ? nothing : html`
-          <img
-            class="image-dialog-img"
-            src="${this.imageDialogSrc}"
-            alt=""
-          />
-        `}
+      <wa-dialog ${detailDialogRef} label="${detailLabel}">${detailBody}</wa-dialog>
+      <wa-dialog ${imageDialogRef} label="Image" class="image-dialog">
+        ${image}
       </wa-dialog>
     `;
   }
 
-  #renderResolving() {
-    const state = this.dashboardState;
-    if (state === null || state.rooms.length === 0) {
+  #renderResolving(): TemplateResult {
+    const dashboard = this.dashboardState;
+    if (dashboard === null || dashboard.rooms.length === 0) {
       return html`
         <div class="container">
           <p class="empty">Loading...</p>
@@ -412,34 +433,35 @@ export class RoomChatPage extends LitElement {
     `;
   }
 
-  #renderPausedBanner(room: Room) {
-    if (room.debateState !== "paused" || room.roomState !== "active") {
-      return nothing;
+  #renderPausedBanner(room: Room): TemplateResult {
+    if (room.debateState !== "PAUSED" || room.roomState !== "ACTIVE") {
+      return html``;
     }
     const nextTick = nextCronTick(
       room.resumeScheduleCron,
       new Date(this.nowMillis),
     );
-    const countdownText = nextTick === null
-      ? null
-      : formatCountdown(nextTick.getTime() - this.nowMillis);
+    const countdownText =
+      nextTick === null
+        ? null
+        : formatCountdown(nextTick.getTime() - this.nowMillis);
+    const message =
+      countdownText === null
+        ? html`
+          Paused - the leader will check back at the next scheduled time.
+        `
+        : html`
+          Paused - the leader will come back after
+          <span class="paused-banner-countdown">${countdownText}</span>.
+        `;
     return html`
       <div class="paused-banner" role="status">
-        <span>
-          ${countdownText === null
-            ? html`
-              Paused - the leader will check back at the next scheduled time.
-            `
-            : html`
-              Paused - the leader will come back after
-              <span class="paused-banner-countdown">${countdownText}</span>.
-            `}
-        </span>
+        <span>${message}</span>
       </div>
     `;
   }
 
-  #renderScrollArea(events: RoomEvent[]) {
+  #renderScrollArea(events: RoomEvent[]): TemplateResult {
     if (events.length === 0) {
       return html`
         <div class="empty">
@@ -447,32 +469,38 @@ export class RoomChatPage extends LitElement {
         </div>
       `;
     }
+    const entries = repeat(
+      events,
+      (event) => entryKey(event),
+      (event, index) => this.#renderEntry(event, events, index),
+    );
     return html`
       <div
         class="scroll"
         @te-open-detail="${this.#onOpenDetail}"
         @te-open-image="${this.#onOpenImage}"
       >
-        ${repeat(
-          events,
-          (event) => entryKey(event),
-          (event, idx) => this.#renderEntry(event, events, idx),
-        )}
+        ${entries}
       </div>
     `;
   }
 
-  #renderEntry(event: RoomEvent, events: RoomEvent[], idx: number) {
-    const previous = idx > 0 ? events[idx - 1] : null;
+  #renderEntry(
+    event: RoomEvent,
+    events: RoomEvent[],
+    index: number,
+  ): TemplateResult {
+    const previous = index > 0 ? (events[index - 1] ?? null) : null;
     const showSeparator = shouldShowTimeSeparator(
       previous?.timestamp ?? null,
       event.timestamp,
     );
+    const separatorText = showSeparator
+      ? formatSeparatorTimestamp(event.timestamp)
+      : "";
     const separator = showSeparator
       ? html`
-        <div class="time-separator">
-          ${formatSeparatorTimestamp(event.timestamp)}
-        </div>
+        <div class="time-separator">${separatorText}</div>
       `
       : nothing;
     const isActiveRow = event.completedAt === null;
@@ -486,16 +514,16 @@ export class RoomChatPage extends LitElement {
     `;
   }
 
-  #onOpenDetail = (raw: Event): void => {
-    const event = (raw as CustomEvent<RoomEvent>).detail;
+  #onOpenDetail = (customEvent: CustomEvent<RoomEvent>): void => {
+    const event = customEvent.detail;
     const author = event.agent ?? "";
-    const finishedAt = event.completedAt !== null
-      ? Date.parse(event.completedAt)
-      : Date.now();
+    const finishedAt =
+      event.completedAt === null ? Date.now() : Date.parse(event.completedAt);
     const startedAt = Date.parse(event.timestamp);
-    const elapsedMs = Number.isNaN(startedAt) || Number.isNaN(finishedAt)
-      ? 0
-      : Math.max(0, finishedAt - startedAt);
+    const elapsedMs =
+      Number.isNaN(startedAt) || Number.isNaN(finishedAt)
+        ? 0
+        : Math.max(0, finishedAt - startedAt);
     this.detailDialog = {
       author,
       label: event.content,
@@ -508,9 +536,9 @@ export class RoomChatPage extends LitElement {
     }
   };
 
-  #onOpenImage = (raw: Event): void => {
-    const src = (raw as CustomEvent<string>).detail;
-    if (typeof src !== "string" || src === "") {
+  #onOpenImage = (customEvent: CustomEvent<string>): void => {
+    const src = customEvent.detail;
+    if (src === "") {
       return;
     }
     this.imageDialogSrc = src;
@@ -522,12 +550,37 @@ export class RoomChatPage extends LitElement {
 
   // -- Actions ------------------------------------------------------------
 
-  #onBack(): void {
-    globalThis.history.pushState({}, "", "/");
-    globalThis.dispatchEvent(new PopStateEvent("popstate"));
-  }
+  #onToggleActivation = async (): Promise<void> => {
+    const view = this.#currentView();
+    if (view !== null) {
+      await this.store.toggleRoomActivation(view.room);
+    }
+  };
 
-  async #onSend(event: CustomEvent<{ content: string }>): Promise<void> {
+  #openSettings = (): void => {
+    const view = this.#currentView();
+    if (view !== null) {
+      this.#settingsDialogRef.value?.show(view.room);
+    }
+  };
+
+  #openReports = (): void => {
+    this.#reportsDialogRef.value?.show();
+  };
+
+  #openFiles = async (): Promise<void> => {
+    const view = this.#currentView();
+    const dialog = this.#filesDialogRef.value;
+    if (view !== null && dialog !== undefined) {
+      await dialog.show(view.room.code);
+    }
+  };
+
+  #onBack = (): void => {
+    navigateTo("/");
+  };
+
+  #onSend = async (event: CustomEvent<SendDetail>): Promise<void> => {
     const view = this.#currentView();
     if (view === null || this.sending) {
       return;
@@ -539,26 +592,16 @@ export class RoomChatPage extends LitElement {
     } finally {
       this.sending = false;
     }
-  }
-
-  #onWindowScroll = (): void => {
-    const scrollTop = globalThis.scrollY;
-    const viewport = globalThis.innerHeight;
-    const total = document.documentElement.scrollHeight;
-    const distanceFromBottom = total - scrollTop - viewport;
-    this.#pinnedToBottom = distanceFromBottom < 64;
   };
 
   // -- Selection plumbing -------------------------------------------------
 
   #syncSelection(): void {
-    if (this.store === undefined) {
-      return;
-    }
     if (this.#lastSelectedCode === this.code) {
       return;
     }
-    const room = this.store.findRoomByCode(this.code);
+    // Before context arrives the store is still unset.
+    const room = this.store?.findRoomByCode(this.code) ?? null;
     if (room === null) {
       return;
     }
@@ -566,31 +609,21 @@ export class RoomChatPage extends LitElement {
     this.store.selectRoom(room.code);
   }
 
-  #scrollToBottom(): void {
-    globalThis.scrollTo({ top: document.documentElement.scrollHeight });
-  }
-
   #currentView(): RoomView | null {
-    const state = this.dashboardState;
-    if (state === null) {
+    const dashboard = this.dashboardState;
+    if (dashboard === null) {
       return null;
     }
-    const room = this.store?.findRoomByCode(this.code);
-    if (!room) {
+    const room = this.store?.findRoomByCode(this.code) ?? null;
+    if (room === null) {
       return null;
     }
-    return state.views[room.code] ?? null;
+    return dashboard.views.get(room.code) ?? null;
   }
+}
 
-  #bindStore(): void {
-    if (this.#unsubscribe !== null || this.store === undefined) {
-      return;
-    }
-    this.#unsubscribe = this.store.subscribe((): void => {
-      this.dashboardState = this.store.getState();
-    });
-    this.dashboardState = this.store.getState();
-  }
+function scrollToBottom(): void {
+  globalThis.scrollTo({ top: document.documentElement.scrollHeight });
 }
 
 /**
@@ -600,16 +633,15 @@ export class RoomChatPage extends LitElement {
  * a sequence-derived key for the rare in-memory event without an id.
  */
 function entryKey(event: RoomEvent): string {
-  return event.id !== null ? `r-${event.id}` : `s-${event.sequence}`;
+  return event.id === null ? `s-${event.sequence}` : `r-${event.id}`;
 }
 
 function formatCountdown(milliseconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  const pad2 = (n: number): string => n < 10 ? `0${n}` : `${n}`;
   const clock = `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`;
   if (days === 0) {
     return clock;

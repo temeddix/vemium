@@ -1,6 +1,7 @@
 import { Router } from "@lit-labs/router";
-import { css, html, LitElement } from "lit";
+import { css, html, LitElement, type TemplateResult } from "lit";
 import { customElement } from "lit/decorators.js";
+
 import "./dashboard-provider.ts";
 import "./room-chat-page.ts";
 import "./room-list-page.ts";
@@ -8,7 +9,7 @@ import "./settings-page.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
-    "te-app-shell": AppShell;
+    "te-app-shell": AppShellElement;
   }
 }
 
@@ -19,7 +20,7 @@ declare global {
  * which page is shown.
  */
 @customElement("te-app-shell")
-export class AppShell extends LitElement {
+export class AppShellElement extends LitElement {
   static override styles = css`
     :host {
       display: block;
@@ -29,31 +30,34 @@ export class AppShell extends LitElement {
   #router = new Router(this, [
     {
       path: "/",
-      render: () =>
+      render: (): TemplateResult =>
         html`
           <te-room-list-page></te-room-list-page>
         `,
     },
     {
       path: "/settings",
-      render: () =>
+      render: (): TemplateResult =>
         html`
           <te-settings-page></te-settings-page>
         `,
     },
     {
       path: "/:code",
-      render: (params) =>
-        html`
-          <te-room-chat-page code="${params["code"] ?? ""}"></te-room-chat-page>
-        `,
+      render: (params): TemplateResult => {
+        const code = params["code"] ?? "";
+        return html`
+          <te-room-chat-page code="${code}"></te-room-chat-page>
+        `;
+      },
     },
   ]);
 
-  override render() {
+  override render(): TemplateResult {
+    const outlet = this.#router.outlet();
     return html`
       <te-dashboard-provider>
-        ${this.#router.outlet()}
+        ${outlet}
       </te-dashboard-provider>
     `;
   }

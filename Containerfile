@@ -1,12 +1,14 @@
-FROM denoland/deno:2.7.12 AS frontend-build
+FROM docker.io/library/node:24-alpine AS frontend-build
 WORKDIR /app/frontend
 
-COPY frontend/deno.json frontend/deno.lock ./
-RUN deno install
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
 
+COPY frontend/tsconfig.json frontend/vite.config.ts ./
+COPY frontend/scripts ./scripts
 COPY frontend/src ./src
 COPY frontend/dist ./dist
-RUN deno task bundle
+RUN npx vp build
 
 FROM rust:1.91-trixie AS backend-build
 WORKDIR /app/backend

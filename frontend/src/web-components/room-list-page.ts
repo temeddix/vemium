@@ -1,18 +1,27 @@
-import { dashboardContext } from "@/app/context";
-import type { DashboardState, DashboardStore } from "@/app/state";
-import type { Room } from "@/app/types";
-import { formatTimestamp } from "@/app/utils";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
+import "@awesome.me/webawesome/dist/components/dropdown-item/dropdown-item.js";
+import "@awesome.me/webawesome/dist/components/dropdown/dropdown.js";
+import "@awesome.me/webawesome/dist/components/icon/icon.js";
+import "@awesome.me/webawesome/dist/components/switch/switch.js";
 import { consume } from "@lit/context";
-import { css, html, LitElement, nothing } from "lit";
+import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
+import { dashboardContext } from "#context";
+import type { DashboardState, DashboardStore } from "#state";
+import type { Room, RoomEnvelope } from "#types";
+import { formatTimestamp, navigateTo } from "#utils";
+
 import "./clone-room-dialog.ts";
 import "./create-room-dialog.ts";
+import { StoreController } from "./store-controller.ts";
+import { UpdateEffectController } from "./update-effect-controller.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
-    "te-room-list-page": RoomListPage;
+    "te-room-list-page": RoomListPageElement;
   }
 }
 
@@ -29,13 +38,13 @@ interface DialogElement extends HTMLElement {
  * cleanly on narrow viewports without sacrificing the desktop affordance.
  */
 @customElement("te-room-list-page")
-export class RoomListPage extends LitElement {
+export class RoomListPageElement extends LitElement {
   @consume({ context: dashboardContext, subscribe: true })
   @property({ attribute: false })
   accessor store!: DashboardStore;
 
   @state()
-  private accessor dashboardState: DashboardState | null = null;
+  accessor dashboardState: DashboardState | null = null;
 
   #createDialogRef: Ref<HTMLElementTagNameMap["te-create-room-dialog"]> =
     createRef();
@@ -46,12 +55,24 @@ export class RoomListPage extends LitElement {
   #deleteDialogRef: Ref<DialogElement> = createRef();
 
   @state()
-  private accessor pendingDelete: Room | null = null;
+  accessor pendingDelete: Room | null = null;
 
   @state()
-  private accessor isDeleting = false;
+  accessor isDeleting = false;
 
-  #unsubscribe: (() => void) | null = null;
+  storeSubscription: StoreController = new StoreController(this).track(
+    (): DashboardStore | null => this.store,
+    (next: DashboardState): void => {
+      this.dashboardState = next;
+    },
+  );
+
+  // The list page shows no room, so entering it drops the selection.
+  effects: UpdateEffectController = new UpdateEffectController(
+    this,
+  ).onConnected((): void => {
+    this.store?.clearSelection();
+  });
 
   static override styles = css`
     :host {
@@ -199,28 +220,17 @@ export class RoomListPage extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    this.#bindStore();
-    this.store?.clearSelection();
-  }
-
-  override updated(changed: Map<string, unknown>): void {
-    if (changed.has("store")) {
-      this.#unsubscribe?.();
-      this.#unsubscribe = null;
-      this.#bindStore();
-    }
-  }
-
-  override disconnectedCallback(): void {
-    this.#unsubscribe?.();
-    this.#unsubscribe = null;
-    super.disconnectedCallback();
-  }
-
-  override render() {
+  override render(): TemplateResult {
     const rooms = this.dashboardState?.rooms ?? [];
+    const roomList =
+      rooms.length === 0
+        ? html`
+          <p class="empty">No rooms yet. Create one to start a debate.</p>
+        `
+        : this.#renderRoomGrid(rooms);
+    const createDialogRef = ref(this.#createDialogRef);
+    const cloneDialogRef = ref(this.#cloneDialogRef);
+    const deleteDialog = this.#renderDeleteDialog();
     return html`
       <div class="container">
         <header class="header">
@@ -240,42 +250,40 @@ export class RoomListPage extends LitElement {
             </wa-dropdown>
           </div>
         </header>
-        ${rooms.length === 0
-          ? html`
-            <p class="empty">
-              No rooms yet. Create one to start a debate.
-            </p>
-          `
-          : this.#renderRoomGrid(rooms)}
+        ${roomList}
         <te-create-room-dialog
-          ${ref(this.#createDialogRef)}
+          ${createDialogRef}
           .store="${this.store}"
           @te-room-created="${this.#onRoomCreated}"
         ></te-create-room-dialog>
         <te-clone-room-dialog
-          ${ref(this.#cloneDialogRef)}
+          ${cloneDialogRef}
           .store="${this.store}"
           @te-cloned="${this.#onRoomCloned}"
         ></te-clone-room-dialog>
-        ${this.#renderDeleteDialog()}
+        ${deleteDialog}
       </div>
     `;
   }
 
-  #renderDeleteDialog() {
+  #renderDeleteDialog(): TemplateResult {
     const room = this.pendingDelete;
-    const sourceLabel = room === null
-      ? ""
-      : (room.topic.trim() === "" ? room.code : room.topic);
-    return html`
-      <wa-dialog ${ref(this.#deleteDialogRef)} label="Delete room">
-        ${room === null ? nothing : html`
+    const dialogRef = ref(this.#deleteDialogRef);
+    const label = room === null ? "" : roomLabel(room);
+    const summary =
+      room === null
+        ? nothing
+        : html`
           <p class="delete-summary">
             Permanently delete
-            <span class="delete-topic">${sourceLabel}</span>? Chat history, reports, and
-            workspace files for this room will be removed. This cannot be undone.
+            <span class="delete-topic">${label}</span>? Chat history,
+            reports, and workspace files for this room will be removed. This
+            cannot be undone.
           </p>
-        `}
+        `;
+    return html`
+      <wa-dialog ${dialogRef} label="Delete room">
+        ${summary}
         <div slot="footer" class="footer-row">
           <wa-button
             size="small"
@@ -297,113 +305,138 @@ export class RoomListPage extends LitElement {
     `;
   }
 
-  #renderRoomGrid(rooms: Room[]) {
+  #renderRoomGrid(rooms: Room[]): TemplateResult {
+    const cards = rooms.map((room) => this.#renderRoomCard(room));
     return html`
-      <ul class="room-grid">
-        ${rooms.map((room) =>
-          html`
-            <li class="room-card">
-              <a
-                class="room-card-link"
-                href="/${room.code}"
-                @click="${(e: MouseEvent): void => this.#onRoomClick(e, room)}"
-              >
-                ${room.topic !== ""
-                  ? html`
-                    <span class="room-topic-row">
-                      <span class="room-topic">${room.topic}</span>
-                    </span>
-                  `
-                  : nothing}
-                <span class="room-code">${room.code}</span>
-                <span class="room-meta">
-                  <span class="room-time">${formatTimestamp(
-                    room.createdAt,
-                  )}</span>
-                  <span
-                    @click="${(e: MouseEvent): void => e.stopPropagation()}"
-                  >
-                    <wa-switch
-                      size="small"
-                      ?checked="${room.roomState === "active"}"
-                      @change="${(): Promise<void> =>
-                        this.store.toggleRoomActivation(room)}"
-                    ></wa-switch>
-                  </span>
-                </span>
-              </a>
-              <span class="room-card-menu">
-                <wa-dropdown placement="bottom-end">
-                  <wa-button
-                    slot="trigger"
-                    size="small"
-                    appearance="plain"
-                    title="Room actions"
-                  >
-                    <wa-icon name="ellipsis-vertical"></wa-icon>
-                  </wa-button>
-                  <wa-dropdown-item
-                    @click="${(): void => this.#openClone(room)}"
-                  >
-                    Duplicate
-                  </wa-dropdown-item>
-                  <wa-dropdown-item
-                    @click="${(): void => this.#openDelete(room)}"
-                  >
-                    Delete
-                  </wa-dropdown-item>
-                </wa-dropdown>
-              </span>
-            </li>
-          `
-        )}
-      </ul>
+      <ul class="room-grid">${cards}</ul>
     `;
   }
 
-  #onRoomClick(event: MouseEvent, room: Room): void {
+  #renderRoomCard(room: Room): TemplateResult {
+    const topicRow =
+      room.topic === ""
+        ? nothing
+        : html`
+          <span class="room-topic-row">
+            <span class="room-topic">${room.topic}</span>
+          </span>
+        `;
+    const createdAt = formatTimestamp(room.createdAt);
+    const active = room.roomState === "ACTIVE";
+    return html`
+      <li class="room-card">
+        <a
+          class="room-card-link"
+          href="/${room.code}"
+          data-code="${room.code}"
+          @click="${this.#onRoomClick}"
+        >
+          ${topicRow}
+          <span class="room-code">${room.code}</span>
+          <span class="room-meta">
+            <span class="room-time">${createdAt}</span>
+            <span @click="${stopPropagation}">
+              <wa-switch
+                size="small"
+                data-code="${room.code}"
+                ?checked="${active}"
+                @change="${this.#onToggleActivation}"
+              ></wa-switch>
+            </span>
+          </span>
+        </a>
+        <span class="room-card-menu">
+          <wa-dropdown placement="bottom-end">
+            <wa-button
+              slot="trigger"
+              size="small"
+              appearance="plain"
+              title="Room actions"
+            >
+              <wa-icon name="ellipsis-vertical"></wa-icon>
+            </wa-button>
+            <wa-dropdown-item
+              data-code="${room.code}"
+              @click="${this.#openClone}"
+            >
+              Duplicate
+            </wa-dropdown-item>
+            <wa-dropdown-item
+              data-code="${room.code}"
+              @click="${this.#openDelete}"
+            >
+              Delete
+            </wa-dropdown-item>
+          </wa-dropdown>
+        </span>
+      </li>
+    `;
+  }
+
+  /** The room whose card holds the element an event was bound on. */
+  #roomOf(event: Event): Room | null {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) {
+      return null;
+    }
+    const code = target.dataset["code"] ?? "";
+    return this.store.findRoomByCode(code);
+  }
+
+  #onToggleActivation = async (event: Event): Promise<void> => {
+    const room = this.#roomOf(event);
+    if (room !== null) {
+      await this.store.toggleRoomActivation(room);
+    }
+  };
+
+  #onRoomClick = (event: MouseEvent): void => {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
     }
+    const room = this.#roomOf(event);
+    if (room === null) {
+      return;
+    }
     event.preventDefault();
-    this.#navigateToRoom(room.code);
-  }
-
-  #navigateToRoom(code: string): void {
-    const url = `/${code}`;
-    globalThis.history.pushState({}, "", url);
-    globalThis.dispatchEvent(new PopStateEvent("popstate"));
-  }
+    navigateTo(`/${room.code}`);
+  };
 
   #openCreate = (): void => {
     this.#createDialogRef.value?.show();
   };
 
   #openSettings = (): void => {
-    globalThis.history.pushState({}, "", "/settings");
-    globalThis.dispatchEvent(new PopStateEvent("popstate"));
+    navigateTo("/settings");
   };
 
-  #onRoomCreated(event: CustomEvent<{ room: Room }>): void {
-    this.#navigateToRoom(event.detail.room.code);
-  }
+  #onRoomCreated = (event: CustomEvent<RoomEnvelope>): void => {
+    navigateTo(`/${event.detail.room.code}`);
+  };
 
-  #openClone(room: Room): void {
-    this.#cloneDialogRef.value?.show(room);
-  }
+  #openClone = (event: Event): void => {
+    const room = this.#roomOf(event);
+    if (room !== null) {
+      this.#cloneDialogRef.value?.show(room);
+    }
+  };
 
-  #onRoomCloned(event: CustomEvent<{ room: Room }>): void {
-    this.#navigateToRoom(event.detail.room.code);
-  }
+  #onRoomCloned = (event: CustomEvent<RoomEnvelope>): void => {
+    navigateTo(`/${event.detail.room.code}`);
+  };
 
-  #openDelete(room: Room): void {
+  #openDelete = (event: Event): void => {
+    const room = this.#roomOf(event);
+    if (room === null) {
+      return;
+    }
     this.pendingDelete = room;
     this.isDeleting = false;
     const dialog = this.#deleteDialogRef.value;
     if (dialog !== undefined) {
       dialog.open = true;
     }
-  }
+  };
 
   #onDeleteCancel = (): void => {
     const dialog = this.#deleteDialogRef.value;
@@ -427,14 +460,14 @@ export class RoomListPage extends LitElement {
     }
     this.pendingDelete = null;
   };
+}
 
-  #bindStore(): void {
-    if (this.#unsubscribe !== null || this.store === undefined) {
-      return;
-    }
-    this.#unsubscribe = this.store.subscribe((): void => {
-      this.dashboardState = this.store.getState();
-    });
-    this.dashboardState = this.store.getState();
-  }
+/** Keeps a click on a card's switch from following the card's link. */
+function stopPropagation(event: Event): void {
+  event.stopPropagation();
+}
+
+/** A room's display name: its topic, or its code when it has none. */
+function roomLabel(room: Room): string {
+  return room.topic.trim() === "" ? room.code : room.topic;
 }

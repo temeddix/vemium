@@ -169,9 +169,9 @@ async fn list_provider_models(
   let existing = {
     let settings = state.app_settings.read().await;
     match tier.as_str() {
-      "low" => settings.low.clone(),
-      "high" => settings.high.clone(),
-      _ => return bad_request("tier", "must be 'low' or 'high'"),
+      "LOW" | "low" => settings.low.clone(),
+      "HIGH" | "high" => settings.high.clone(),
+      _ => return bad_request("tier", "must be 'LOW' or 'HIGH'"),
     }
   };
   preserve_existing_api_key_if_redacted(&mut payload, &existing);

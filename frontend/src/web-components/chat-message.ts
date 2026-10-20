@@ -1,37 +1,47 @@
-import {
-  formatDuration,
-  type PersonaColor,
-  resolveAvatarColor,
-} from "@/app/chat";
-import type { RoomEvent } from "@/app/types";
+import WaMarkdown from "@awesome.me/webawesome/dist/components/markdown/markdown.js";
+import "@awesome.me/webawesome/dist/components/spinner/spinner.js";
+import "@awesome.me/webawesome/dist/components/tooltip/tooltip.js";
 import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { ref } from "lit/directives/ref.js";
+import { createRef, type Ref, ref } from "lit/directives/ref.js";
+
+import { formatDuration, type PersonaColor, resolveAvatarColor } from "#chat";
+import type { RoomEvent } from "#types";
+
 import "./event-hovercard.ts";
+import { IntervalController } from "./interval-controller.ts";
+import { UpdateEffectController } from "./update-effect-controller.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
-    "te-chat-message": ChatMessage;
+    "te-chat-message": ChatMessageElement;
+  }
+  interface HTMLElementEventMap {
+    "te-open-detail": CustomEvent<RoomEvent>;
+    "te-open-image": CustomEvent<string>;
   }
 }
 
-const TICKER_THRESHOLD_MS = 3_000;
+const TICKER_THRESHOLD_MS = 3000;
+
+/** How often the streaming "Took Ns" ticker redraws. */
+const TICKER_INTERVAL_MS = 500;
 
 /**
  * One row in the chat timeline. Renders any `RoomEvent` and switches body
  * shape by `event.kind`:
  *
- * - `agent_chat` / `leader_note`: avatar + author header above a markdown
+ * - `AGENT_CHAT` / `LEADER_NOTE`: avatar + author header above a markdown
  *   bubble.
- * - `user_chat`: right-aligned brand bubble, no header.
- * - `thinking` / `inline_note`: avatar + author + clickable breadcrumb on
+ * - `USER_CHAT`: right-aligned brand bubble, no header.
+ * - `THINKING` / `INLINE_NOTE`: avatar + author + clickable breadcrumb on
  *   one line. While streaming the row also shows the live `detail` body
  *   beneath it and a "Took Ns" ticker once it has been running for 3s.
  *   Once finalised, only the breadcrumb remains and clicking it dispatches
  *   `te-open-detail` so the page can show the full body in a dialog.
  */
 @customElement("te-chat-message")
-export class ChatMessage extends LitElement {
+export class ChatMessageElement extends LitElement {
   @property({ attribute: false })
   accessor event: RoomEvent | null = null;
 
@@ -49,15 +59,33 @@ export class ChatMessage extends LitElement {
 
   /** Wall-clock tick used to redraw the streaming "Took Ns" ticker. */
   @state()
-  private accessor nowMillis = Date.now();
+  accessor nowMillis = Date.now();
 
   @state()
-  private accessor _hoverAnchor: Element | null = null;
+  accessor hoverAnchor: Element | null = null;
 
   @state()
-  private accessor _hoverRefId: number | null = null;
+  accessor hoverRefId: number | null = null;
 
-  #tickerInterval: ReturnType<typeof setInterval> | null = null;
+  #bodyRef: Ref<HTMLElement> = createRef();
+
+  ticker: IntervalController = new IntervalController(this).schedule(
+    TICKER_INTERVAL_MS,
+    (): void => {
+      if (this.streaming) {
+        this.nowMillis = Date.now();
+      }
+    },
+  );
+
+  autoScroll: UpdateEffectController = new UpdateEffectController(
+    this,
+  ).onUpdated((): void => {
+    const body = this.#bodyRef.value;
+    if (this.streaming && body !== undefined) {
+      body.scrollTop = body.scrollHeight;
+    }
+  });
 
   static override styles = css`
     :host {
@@ -213,86 +241,69 @@ export class ChatMessage extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    this.nowMillis = Date.now();
-    this.#tickerInterval = setInterval((): void => {
-      if (this.streaming) {
-        this.nowMillis = Date.now();
-      }
-    }, 500);
-  }
-
-  override disconnectedCallback(): void {
-    if (this.#tickerInterval !== null) {
-      clearInterval(this.#tickerInterval);
-      this.#tickerInterval = null;
-    }
-    super.disconnectedCallback();
-  }
-
-  override updated(): void {
-    if (this.streaming) {
-      const body = this.renderRoot.querySelector<HTMLElement>(".body");
-      if (body !== null) {
-        body.scrollTop = body.scrollHeight;
-      }
-    }
-  }
-
-  override render() {
+  override render(): TemplateResult {
     const event = this.event;
     if (event === null) {
-      return nothing;
+      return html``;
     }
-    const isSelf = event.kind === "user_chat";
-    const isInline = event.kind === "thinking" ||
-      event.kind === "inline_note" ||
-      event.kind === "summary";
+    const isSelf = event.kind === "USER_CHAT";
+    const isInline =
+      event.kind === "THINKING" ||
+      event.kind === "INLINE_NOTE" ||
+      event.kind === "SUMMARY";
     const streaming = this.streaming;
     const color = resolveAvatarColor(event.kind, event.agent);
-    const rowClasses = ["row", isSelf ? "is-self" : ""].filter(Boolean).join(
-      " ",
-    );
-    const idAttr = event.id !== null ? String(event.id) : "";
+    const rowClasses = ["row", isSelf ? "is-self" : ""]
+      .filter(Boolean)
+      .join(" ");
+    const idAttr = event.id === null ? "" : String(event.id);
     const rowId = `row-${event.sequence}`;
+    const content = isInline
+      ? this.#renderInline(event, color, streaming)
+      : this.#renderBubble(event, color, streaming, isSelf);
+    const tooltip =
+      event.id === null
+        ? nothing
+        : html`
+          <wa-tooltip for="${rowId}" placement="left">#${
+            event.sequence
+          }</wa-tooltip>
+        `;
+    const hovercardActive = this.hoverRefId !== null;
     return html`
       <div id="${rowId}" class="${rowClasses}" data-event-id="${idAttr}">
-        ${isInline
-          ? this.#renderInline(event, color, streaming)
-          : this.#renderBubble(event, color, streaming, isSelf)}
+        ${content}
       </div>
-      ${event.id !== null
-        ? html`
-          <wa-tooltip for="${rowId}" placement="left">#${event
-            .sequence}</wa-tooltip>
-        `
-        : nothing}
+      ${tooltip}
       <te-event-hovercard
-        .anchorEl="${this._hoverAnchor}"
-        .eventId="${this._hoverRefId}"
+        .anchorEl="${this.hoverAnchor}"
+        .eventId="${this.hoverRefId}"
         room-code="${this.roomCode}"
-        ?active="${this._hoverRefId !== null}"
+        ?active="${hovercardActive}"
       ></te-event-hovercard>
     `;
   }
 
-  #renderHeader(color: PersonaColor, streaming: boolean, agent: string | null) {
-    const style =
-      `background: ${color.background}; color: ${color.foreground};`;
-    return html`
-      <div class="avatar" style="${style}">
-        ${streaming
-          ? html`
-            <wa-spinner style="font-size: 1rem;"></wa-spinner>
-          `
-          : nothing}
-      </div>
-      ${agent !== null
-        ? html`
-          <span class="author-name">${agent}</span>
+  #renderHeader(
+    color: PersonaColor,
+    streaming: boolean,
+    agent: string | null,
+  ): TemplateResult {
+    const style = `background: ${color.background}; color: ${color.foreground};`;
+    const spinner = streaming
+      ? html`
+          <wa-spinner style="font-size: 1rem;"></wa-spinner>
         `
-        : nothing}
+      : nothing;
+    const authorName =
+      agent === null
+        ? nothing
+        : html`
+          <span class="author-name">${agent}</span>
+        `;
+    return html`
+      <div class="avatar" style="${style}">${spinner}</div>
+      ${authorName}
     `;
   }
 
@@ -301,38 +312,60 @@ export class ChatMessage extends LitElement {
     color: PersonaColor,
     streaming: boolean,
     isSelf: boolean,
-  ) {
+  ): TemplateResult {
+    const headerContent = this.#renderHeader(color, streaming, event.agent);
+    const header = isSelf
+      ? nothing
+      : html`
+        <div class="header">${headerContent}</div>
+      `;
+    const bubbleBody =
+      event.content === "" && streaming
+        ? html`
+          <wa-spinner style="font-size: 0.85rem;"></wa-spinner>
+        `
+        : renderMarkdown(event.content);
     return html`
-      ${isSelf ? nothing : html`
-        <div class="header">
-          ${this.#renderHeader(color, streaming, event.agent)}
-        </div>
-      `}
+      ${header}
       <div
         class="bubble"
         @mouseover="${this.#onRefMouseOver}"
         @mouseout="${this.#onRefMouseOut}"
       >
-        ${event.content === "" && streaming
-          ? html`
-            <wa-spinner style="font-size: 0.85rem;"></wa-spinner>
-          `
-          : renderMarkdown(event.content)}
+        ${bubbleBody}
       </div>
     `;
   }
 
-  #renderInline(event: RoomEvent, color: PersonaColor, streaming: boolean) {
+  #renderInline(
+    event: RoomEvent,
+    color: PersonaColor,
+    streaming: boolean,
+  ): TemplateResult {
     const hasBody = event.detail !== "";
     const tooltipDisabled = !streaming && !hasBody;
     const ticker = streaming ? this.#streamingTicker(event.timestamp) : null;
+    const header = this.#renderHeader(color, streaming, event.agent);
+    const label = parseEventRefs(event.content);
+    const tickerLabel =
+      ticker === null
+        ? nothing
+        : html`
+          <span class="ticker">Took ${ticker}</span>
+        `;
+    const bodyRef = ref(this.#bodyRef);
+    const liveBody = streaming
+      ? html`
+          <pre class="body" ${bodyRef}>${event.detail}</pre>
+        `
+      : nothing;
     return html`
       <div
         class="header"
         @mouseover="${this.#onRefMouseOver}"
         @mouseout="${this.#onRefMouseOut}"
       >
-        ${this.#renderHeader(color, streaming, event.agent)}
+        ${header}
         <button
           type="button"
           class="breadcrumb"
@@ -340,23 +373,15 @@ export class ChatMessage extends LitElement {
           title="${event.content}"
           @click="${this.#onInlineClick}"
         >
-          ${parseEventRefs(event.content)}
+          ${label}
         </button>
-        ${ticker !== null
-          ? html`
-            <span class="ticker">Took ${ticker}</span>
-          `
-          : nothing}
+        ${tickerLabel}
       </div>
-      ${streaming
-        ? html`
-          <pre class="body">${event.detail}</pre>
-        `
-        : nothing}
+      ${liveBody}
     `;
   }
 
-  #onInlineClick(): void {
+  #onInlineClick = (): void => {
     const event = this.event;
     if (event === null) {
       return;
@@ -371,33 +396,33 @@ export class ChatMessage extends LitElement {
         composed: true,
       }),
     );
-  }
+  };
 
-  #onRefMouseOver(e: MouseEvent): void {
-    const target = e.target;
+  #onRefMouseOver = (mouseEvent: MouseEvent): void => {
+    const target = mouseEvent.target;
     if (!(target instanceof Element)) {
       return;
     }
-    const ref = target.closest(".event-ref");
-    if (!(ref instanceof HTMLElement)) {
+    const refElement = target.closest(".event-ref");
+    if (!(refElement instanceof HTMLElement)) {
       return;
     }
-    const id = Number(ref.dataset["refId"]);
+    const id = Number(refElement.dataset["refId"]);
     if (!Number.isFinite(id)) {
       return;
     }
-    this._hoverAnchor = ref;
-    this._hoverRefId = id;
-  }
+    this.hoverAnchor = refElement;
+    this.hoverRefId = id;
+  };
 
-  #onRefMouseOut(e: MouseEvent): void {
-    const related = e.relatedTarget;
+  #onRefMouseOut = (mouseEvent: MouseEvent): void => {
+    const related = mouseEvent.relatedTarget;
     if (related instanceof Element && related.closest(".event-ref") !== null) {
       return;
     }
-    this._hoverRefId = null;
-    this._hoverAnchor = null;
-  }
+    this.hoverRefId = null;
+    this.hoverAnchor = null;
+  };
 
   /** Returns the `Took Ns` text or null if the row started under 3s ago. */
   #streamingTicker(startedAt: string): string | null {
@@ -409,40 +434,45 @@ export class ChatMessage extends LitElement {
   }
 }
 
+/** Whether a one-character string is an ASCII digit. */
+function isAsciiDigit(character: string): boolean {
+  return character >= "0" && character <= "9";
+}
+
 /**
  * Splits `text` on `#N` patterns and returns a mix of plain strings and
  * `<span class="event-ref">` elements. No regex: walks the string once
  * looking for `#` followed by one or more ASCII digits.
  */
 function parseEventRefs(text: string): TemplateResult | string {
-  const parts: Array<TemplateResult | string> = [];
-  let i = 0;
+  const parts: (TemplateResult | string)[] = [];
+  let index = 0;
   let start = 0;
 
-  while (i < text.length) {
-    if (text[i] !== "#") {
-      i++;
+  while (index < text.length) {
+    if (text.charAt(index) !== "#") {
+      index += 1;
       continue;
     }
-    let j = i + 1;
-    while (j < text.length && text[j] >= "0" && text[j] <= "9") {
-      j++;
+    let end = index + 1;
+    while (end < text.length && isAsciiDigit(text.charAt(end))) {
+      end += 1;
     }
-    if (j === i + 1) {
-      i++;
+    if (end === index + 1) {
+      index += 1;
       continue;
     }
-    if (i > start) {
-      parts.push(text.slice(start, i));
+    if (index > start) {
+      parts.push(text.slice(start, index));
     }
-    const id = text.slice(i + 1, j);
+    const id = text.slice(index + 1, end);
     parts.push(
       html`
         <span class="event-ref" data-ref-id="${id}">#${id}</span>
       `,
     );
-    i = j;
-    start = j;
+    index = end;
+    start = end;
   }
 
   if (parts.length === 0) {
@@ -457,11 +487,10 @@ function parseEventRefs(text: string): TemplateResult | string {
 }
 
 /**
- * Stamped onto each `<wa-markdown>` we manage so we attach the
- * MutationObserver exactly once per element instead of leaking a fresh one
- * on every Lit re-render.
+ * Each `<wa-markdown>` we manage, so we attach the MutationObserver exactly
+ * once per element instead of leaking a fresh one on every Lit re-render.
  */
-const ENHANCEMENTS_ATTACHED = Symbol("imageEnhancementsAttached");
+const ENHANCED_MARKDOWN = new WeakSet<Element>();
 
 /**
  * Stamped onto each `<img>` after we wire the lightbox click listener,
@@ -472,59 +501,51 @@ const LIGHTBOX_DATA_ATTR = "data-lightbox-wired";
 /** Custom event a chat-message dispatches when an embedded image is clicked. */
 export const OPEN_IMAGE_EVENT = "te-open-image";
 
-interface ManagedMarkdownEl extends HTMLElement {
-  [ENHANCEMENTS_ATTACHED]?: true;
-  renderMarkdown?: () => void;
-}
-
-function renderMarkdown(content: string) {
+function renderMarkdown(content: string): TemplateResult {
   if (content === "") {
-    return nothing;
+    return html``;
   }
+  const markdownRef = ref((raw): void => {
+    syncMarkdownEl(raw, content);
+  });
   return html`
     <div class="markdown">
-      <wa-markdown ${ref((raw) => syncMarkdownEl(raw, content))}></wa-markdown>
+      <wa-markdown ${markdownRef}></wa-markdown>
     </div>
   `;
 }
 
-function syncMarkdownEl(raw: Element | undefined, content: string): void {
-  if (raw === undefined) {
+function syncMarkdownEl(raw: unknown, content: string): void {
+  if (!(raw instanceof WaMarkdown)) {
     return;
   }
-  const el = raw as ManagedMarkdownEl;
-  let script = el.querySelector('script[type="text/markdown"]');
+  let script = raw.querySelector('script[type="text/markdown"]');
   if (script === null) {
     script = document.createElement("script");
     script.setAttribute("type", "text/markdown");
-    el.appendChild(script);
+    raw.append(script);
   }
   if (script.textContent !== content) {
     script.textContent = content;
-    el.renderMarkdown?.();
+    raw.renderMarkdown();
   }
   attachImageEnhancements(raw);
 }
 
 /**
- * Watches `wa-markdown`'s rendered output and (a) rewrites
- * workspace-relative image `src` attributes (e.g. `raw/foo.png`) to the
- * live raw-file URL when a `base` is available, and (b) wires a click
- * listener on each image so the chat page can show it in a lightbox.
- * Doing this in the rendered DOM lets us delegate Markdown parsing to
- * `wa-markdown` itself and skip writing our own image-syntax matcher.
+ * Watches `wa-markdown`'s rendered output and wires a click listener on each
+ * image so the chat page can show it in a lightbox. Doing this in the
+ * rendered DOM lets us delegate Markdown parsing to `wa-markdown` itself and
+ * skip writing our own image-syntax matcher.
  */
-function attachImageEnhancements(raw: Element | undefined): void {
-  if (raw === undefined) {
+function attachImageEnhancements(target: Element): void {
+  if (ENHANCED_MARKDOWN.has(target)) {
     return;
   }
-  const el = raw as ManagedMarkdownEl;
-  if (el[ENHANCEMENTS_ATTACHED] === true) {
-    return;
-  }
-  el[ENHANCEMENTS_ATTACHED] = true;
-  const target = el;
-  const apply = (): void => processImagesIn(target);
+  ENHANCED_MARKDOWN.add(target);
+  const apply = (): void => {
+    processImagesIn(target);
+  };
   apply();
   const observer = new MutationObserver(apply);
   observer.observe(target, {
@@ -549,7 +570,7 @@ function wireLightbox(img: HTMLImageElement): void {
   img.addEventListener("click", () => {
     img.dispatchEvent(
       new CustomEvent<string>(OPEN_IMAGE_EVENT, {
-        detail: img.currentSrc !== "" ? img.currentSrc : img.src,
+        detail: img.currentSrc === "" ? img.src : img.currentSrc,
         bubbles: true,
         composed: true,
       }),
