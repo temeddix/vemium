@@ -17,6 +17,8 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      TESSERACT_RS_CACHE_DIR: ${{ github.workspace }}/../tesseract-cache
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -38,6 +40,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
+
+      # kreuzberg-tesseract keeps its Leptonica and Tesseract sources in
+      # target/ by default, where rust-cache strips their files on save and
+      # the next build finds empty source directories. Keep them outside.
+      - name: Cache Tesseract build
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../tesseract-cache
+          key: tesseract-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
