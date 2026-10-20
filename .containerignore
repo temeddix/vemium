@@ -1,3 +1,4 @@
+# Keep in sync with Containerfile.dockerignore (read by Docker BuildKit).
 .git
 .gitignore
 .vscode
