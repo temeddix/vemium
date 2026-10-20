@@ -80,11 +80,11 @@ impl RoomStream {
 pub type ReportId = String;
 
 /// One frame of the WebSocket wire format. Variants are tagged with `type`
-/// in the JSON output, e.g. `{"type":"rowDelta","id":42,"contentDelta":"hi"}`.
+/// in the JSON output, e.g. `{"type":"ROW_DELTA","id":42,"contentDelta":"hi"}`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(
   tag = "type",
-  rename_all = "camelCase",
+  rename_all = "SCREAMING_SNAKE_CASE",
   rename_all_fields = "camelCase"
 )]
 pub enum WsEvent {

@@ -1,14 +1,36 @@
-import type { DashboardStore } from "@/app/state";
-import type { Room, UpdateRoomRequest } from "@/app/types";
-import { css, html, LitElement, nothing } from "lit";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
+import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
+import type { DashboardStore } from "#state";
+import type { Room, UpdateRoomRequest } from "#types";
+
 import "./cron-picker.ts";
+import type { CronChoice } from "./cron-picker.ts";
+import {
+  readInputValue,
+  readPositiveInteger,
+  renderLabel,
+  renderNumberField,
+  renderTextArea,
+  renderTextField,
+} from "./form-fields.ts";
+import {
+  CHAT_INTERVAL_FIELD,
+  GOAL_FIELD,
+  INSTRUCTION_FIELD,
+  PYTHON_TIMEOUT_FIELD,
+  REPORT_FIELD,
+  STEERING_INTERVAL_FIELD,
+  TOPIC_FIELD,
+  WAKE_CHECK_FIELD,
+} from "./room-fields.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
-    "te-room-settings-dialog": RoomSettingsDialog;
+    "te-room-settings-dialog": RoomSettingsDialogElement;
   }
 }
 
@@ -29,22 +51,6 @@ interface DialogElement extends HTMLElement {
   open: boolean;
 }
 
-interface CronChangeDetail {
-  cron: string;
-  label: string;
-}
-
-function readInputValue(target: EventTarget | null): string {
-  if (!(target instanceof HTMLElement)) {
-    return "";
-  }
-  if (!("value" in target)) {
-    return "";
-  }
-  const value = (target as Record<string, unknown>)["value"];
-  return typeof value === "string" ? value : "";
-}
-
 /**
  * Modal that edits a single room's settings. Owns its own open state
  * and draft form; the parent calls `show(room)` to open the dialog,
@@ -54,15 +60,15 @@ function readInputValue(target: EventTarget | null): string {
  * banner surfaces the message.
  */
 @customElement("te-room-settings-dialog")
-export class RoomSettingsDialog extends LitElement {
+export class RoomSettingsDialogElement extends LitElement {
   @property({ attribute: false })
   accessor store!: DashboardStore;
 
   @state()
-  private accessor room: Room | null = null;
+  accessor room: Room | null = null;
 
   @state()
-  private accessor form: SettingsForm | null = null;
+  accessor form: SettingsForm | null = null;
 
   #dialogRef: Ref<DialogElement> = createRef();
 
@@ -143,111 +149,54 @@ export class RoomSettingsDialog extends LitElement {
     }
   }
 
-  override render() {
+  override render(): TemplateResult {
     const room = this.room;
     const form = this.form;
+    const dialogRef = ref(this.#dialogRef);
+    const fields =
+      room === null || form === null ? nothing : this.#renderForm(form);
     return html`
-      <wa-dialog ${ref(this.#dialogRef)} label="Room settings">
-        ${room === null || form === null
-          ? nothing
-          : this.#renderForm(room, form)}
+      <wa-dialog ${dialogRef} label="Room settings">
+        ${fields}
         <div slot="footer" class="footer-row">
-          <wa-button
-            size="small"
-            @click="${this.#onResetClick}"
-          >
-            Reset
-          </wa-button>
-          <wa-button
-            size="small"
-            @click="${this.#onSaveClick}"
-          >
-            Save
-          </wa-button>
+          <wa-button size="small" @click="${this.#onResetClick}">Reset</wa-button>
+          <wa-button size="small" @click="${this.#onSaveClick}">Save</wa-button>
         </div>
       </wa-dialog>
     `;
   }
 
-  #renderForm(_room: Room, form: SettingsForm) {
+  #renderForm(form: SettingsForm): TemplateResult {
+    const topic = renderTextField(TOPIC_FIELD, form.topic, this.#onTopicInput);
+    const goal = renderTextField(GOAL_FIELD, form.goal, this.#onGoalInput);
+    const instruction = renderTextArea(
+      INSTRUCTION_FIELD,
+      form.instruction,
+      this.#onInstructionInput,
+    );
+    const numbers = this.#renderNumberRow(form);
+    const wakeCheckLabel = renderLabel(WAKE_CHECK_FIELD);
+    const reportLabel = renderLabel(REPORT_FIELD);
     return html`
       <div class="form-grid">
-        ${this.#renderTextField(
-          "topic",
-          "Topic",
-          form.topic,
-          (v) => this.#patchForm({ topic: v }),
-          "Short subject the debaters argue about. Shown to every persona at the top of every turn and used as the room's display label.",
-        )} ${this.#renderTextField(
-          "goal",
-          "Goal",
-          form.goal,
-          (v) => this.#patchForm({ goal: v }),
-          "What you want the room to produce. Used by the leader to judge whether the discussion is on track.",
-        )} ${this.#renderTextArea(
-          "instruction",
-          "Instruction",
-          form.instruction,
-          (v) => this.#patchForm({ instruction: v }),
-          "Optional. Rules personas must follow plus any background context to treat as already-known facts. Appended to every persona prompt.",
-        )}
-        <div class="number-row">
-          ${this.#renderNumberField(
-            "chat-interval",
-            "Chat interval",
-            form.chatIntervalSeconds,
-            (v) => this.#patchForm({ chatIntervalSeconds: v }),
-            "Pause between consecutive debater turns, in seconds. Lower = faster cadence, higher token spend.",
-            "sec",
-          )} ${this.#renderNumberField(
-            "steering-interval",
-            "Steering interval",
-            form.steeringIntervalSeconds,
-            (v) => this.#patchForm({ steeringIntervalSeconds: v }),
-            "How often the leader steps in to nudge the debate, in seconds. Higher = more autonomy for personas.",
-            "sec",
-          )} ${this.#renderNumberField(
-            "python-timeout",
-            "Python timeout",
-            form.pythonTimeoutSeconds,
-            (v) => this.#patchForm({ pythonTimeoutSeconds: v }),
-            "Hard cap for a single Python script run, in seconds. Scripts that exceed this are killed.",
-            "sec",
-          )}
-        </div>
+        ${topic} ${goal} ${instruction} ${numbers}
         <div class="schedule-grid">
           <div class="form-field">
-            ${this.#renderLabel(
-              "wake-check",
-              "Wake-check schedule",
-              "Times are interpreted in UTC. While the room is paused, the leader checks at this cadence whether to resume the debate.",
-            )}
+            ${wakeCheckLabel}
             <te-cron-picker
               name="wake-check"
               .cron="${form.resumeScheduleCron}"
               .label="${form.resumeScheduleLabel}"
-              @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
-                this.#patchForm({
-                  resumeScheduleCron: e.detail.cron,
-                  resumeScheduleLabel: e.detail.label,
-                })}"
+              @te-change="${this.#onWakeCheckChange}"
             ></te-cron-picker>
           </div>
           <div class="form-field">
-            ${this.#renderLabel(
-              "report",
-              "Report schedule",
-              "Times are interpreted in UTC. The leader writes a long-form report on each firing of this schedule.",
-            )}
+            ${reportLabel}
             <te-cron-picker
               name="report"
               .cron="${form.reportScheduleCron}"
               .label="${form.reportScheduleLabel}"
-              @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
-                this.#patchForm({
-                  reportScheduleCron: e.detail.cron,
-                  reportScheduleLabel: e.detail.label,
-                })}"
+              @te-change="${this.#onReportChange}"
             ></te-cron-picker>
           </div>
         </div>
@@ -255,114 +204,101 @@ export class RoomSettingsDialog extends LitElement {
     `;
   }
 
-  #renderTextField(
-    key: string,
-    label: string,
-    value: string,
-    onChange: (value: string) => void,
-    tooltip?: string,
-  ) {
+  #renderNumberRow(form: SettingsForm): TemplateResult {
+    const chatInterval = renderNumberField(
+      CHAT_INTERVAL_FIELD,
+      form.chatIntervalSeconds,
+      "sec",
+      this.#onChatIntervalInput,
+    );
+    const steeringInterval = renderNumberField(
+      STEERING_INTERVAL_FIELD,
+      form.steeringIntervalSeconds,
+      "sec",
+      this.#onSteeringIntervalInput,
+    );
+    const pythonTimeout = renderNumberField(
+      PYTHON_TIMEOUT_FIELD,
+      form.pythonTimeoutSeconds,
+      "sec",
+      this.#onPythonTimeoutInput,
+    );
     return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-input
-          size="small"
-          .value="${value}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-input>
-      </label>
+      <div class="number-row">
+        ${chatInterval} ${steeringInterval} ${pythonTimeout}
+      </div>
     `;
   }
 
-  #renderTextArea(
-    key: string,
-    label: string,
-    value: string,
-    onChange: (value: string) => void,
-    tooltip?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-textarea
-          size="small"
-          rows="3"
-          .value="${value}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-textarea>
-      </label>
-    `;
-  }
-
-  #renderNumberField(
-    key: string,
-    label: string,
-    value: number,
-    onChange: (value: number) => void,
-    tooltip?: string,
-    suffix?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-input
-          type="number"
-          size="small"
-          min="1"
-          without-spin-buttons
-          .value="${String(value)}"
-          @input="${(e: InputEvent): void => {
-            const parsed = Number.parseInt(readInputValue(e.target), 10);
-            if (Number.isFinite(parsed)) {
-              onChange(Math.max(1, parsed));
-            }
-          }}"
-        >
-          ${suffix === undefined ? nothing : html`
-            <span slot="end" class="input-affix">${suffix}</span>
-          `}
-        </wa-input>
-      </label>
-    `;
-  }
-
-  #renderLabel(key: string, label: string, tooltip?: string) {
-    if (tooltip === undefined || tooltip === "") {
-      return html`
-        <span class="form-label">${label}</span>
-      `;
+  #patchForm(next: SettingsForm | null): void {
+    if (this.form !== null && next !== null) {
+      this.form = next;
     }
-    const anchorId = `tip-${key}`;
-    return html`
-      <span class="form-label">
-        <span>${label}</span>
-        <wa-icon
-          id="${anchorId}"
-          class="help-icon"
-          name="circle-question"
-          tabindex="0"
-        ></wa-icon>
-      </span>
-      <wa-tooltip for="${anchorId}" placement="top">${tooltip}</wa-tooltip>
-    `;
   }
 
-  #patchForm(patch: Partial<SettingsForm>): void {
-    if (this.form === null) {
-      return;
+  #onTopicInput = (event: Event): void => {
+    const topic = readInputValue(event.target);
+    this.#patchForm(this.form && { ...this.form, topic });
+  };
+
+  #onGoalInput = (event: Event): void => {
+    const goal = readInputValue(event.target);
+    this.#patchForm(this.form && { ...this.form, goal });
+  };
+
+  #onInstructionInput = (event: Event): void => {
+    const instruction = readInputValue(event.target);
+    this.#patchForm(this.form && { ...this.form, instruction });
+  };
+
+  #onChatIntervalInput = (event: Event): void => {
+    const chatIntervalSeconds = readPositiveInteger(event.target);
+    if (chatIntervalSeconds !== null) {
+      this.#patchForm(this.form && { ...this.form, chatIntervalSeconds });
     }
-    this.form = { ...this.form, ...patch };
-  }
+  };
 
-  #onResetClick(): void {
+  #onSteeringIntervalInput = (event: Event): void => {
+    const steeringIntervalSeconds = readPositiveInteger(event.target);
+    if (steeringIntervalSeconds !== null) {
+      this.#patchForm(this.form && { ...this.form, steeringIntervalSeconds });
+    }
+  };
+
+  #onPythonTimeoutInput = (event: Event): void => {
+    const pythonTimeoutSeconds = readPositiveInteger(event.target);
+    if (pythonTimeoutSeconds !== null) {
+      this.#patchForm(this.form && { ...this.form, pythonTimeoutSeconds });
+    }
+  };
+
+  #onWakeCheckChange = (event: CustomEvent<CronChoice>): void => {
+    this.#patchForm(
+      this.form && {
+        ...this.form,
+        resumeScheduleCron: event.detail.cron,
+        resumeScheduleLabel: event.detail.label,
+      },
+    );
+  };
+
+  #onReportChange = (event: CustomEvent<CronChoice>): void => {
+    this.#patchForm(
+      this.form && {
+        ...this.form,
+        reportScheduleCron: event.detail.cron,
+        reportScheduleLabel: event.detail.label,
+      },
+    );
+  };
+
+  #onResetClick = (): void => {
     if (this.room !== null) {
       this.form = formFromRoom(this.room);
     }
-  }
+  };
 
-  async #onSaveClick(): Promise<void> {
+  #onSaveClick = async (): Promise<void> => {
     if (this.room === null || this.form === null) {
       return;
     }
@@ -385,7 +321,7 @@ export class RoomSettingsDialog extends LitElement {
         dialog.open = false;
       }
     }
-  }
+  };
 }
 
 function formFromRoom(room: Room): SettingsForm {

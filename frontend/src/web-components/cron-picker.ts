@@ -1,18 +1,28 @@
-import { css, html, LitElement } from "lit";
+import "@awesome.me/webawesome/dist/components/input/input.js";
+import { css, html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
-declare global {
-  interface HTMLElementTagNameMap {
-    "te-cron-picker": CronPicker;
-  }
-}
+import { pad2 } from "#chat";
 
-interface PresetOption {
+/**
+ * A schedule: a cron expression and its label. Presets are these, and a
+ * `te-change` event carries one.
+ */
+export interface CronChoice {
   label: string;
   cron: string;
 }
 
-const PRESETS: PresetOption[] = [
+declare global {
+  interface HTMLElementTagNameMap {
+    "te-cron-picker": CronPickerElement;
+  }
+  interface HTMLElementEventMap {
+    "te-change": CustomEvent<CronChoice>;
+  }
+}
+
+const PRESETS: CronChoice[] = [
   { label: "Every 15 minutes", cron: "*/15 * * * *" },
   { label: "Every 30 minutes", cron: "*/30 * * * *" },
   { label: "Every hour", cron: "0 * * * *" },
@@ -35,7 +45,7 @@ const PRESETS: PresetOption[] = [
  * presentational beyond the validate/describe helpers.
  */
 @customElement("te-cron-picker")
-export class CronPicker extends LitElement {
+export class CronPickerElement extends LitElement {
   /** Current cron expression (5 fields). */
   @property({ type: String })
   accessor cron = "0 * * * *";
@@ -49,7 +59,7 @@ export class CronPicker extends LitElement {
   accessor name = "cron";
 
   @state()
-  private accessor rawInput: string | null = null;
+  accessor rawInput: string | null = null;
 
   static override styles = css`
     .wrapper {
@@ -105,14 +115,16 @@ export class CronPicker extends LitElement {
     }
   `;
 
-  override render() {
+  override render(): TemplateResult {
     const currentValue = this.rawInput ?? this.cron;
     const description = describeCron(currentValue);
+    const chips = PRESETS.map((preset) => this.#renderChip(preset));
+    const descriptionClass = description.ok
+      ? "description"
+      : "description is-invalid";
     return html`
       <div class="wrapper">
-        <div class="chips">
-          ${PRESETS.map((preset) => this.#renderChip(preset))}
-        </div>
+        <div class="chips">${chips}</div>
         <div class="raw-row">
           <wa-input
             id="${this.name}-raw"
@@ -122,35 +134,46 @@ export class CronPicker extends LitElement {
             @input="${this.#onInput}"
             @blur="${this.#onBlur}"
           ></wa-input>
-          <span
-            class="description ${description.ok ? "" : "is-invalid"}"
-          >
-            ${description.text}
-          </span>
+          <span class="${descriptionClass}">${description.text}</span>
         </div>
       </div>
     `;
   }
 
-  #renderChip(preset: PresetOption) {
+  #renderChip(preset: CronChoice): TemplateResult {
     const isActive = (this.rawInput ?? this.cron) === preset.cron;
+    const chipClass = isActive ? "chip is-active" : "chip";
     return html`
       <button
         type="button"
-        class="chip ${isActive ? "is-active" : ""}"
-        @click="${(): void => this.#applyPreset(preset)}"
+        class="${chipClass}"
+        data-cron="${preset.cron}"
+        @click="${this.#onChipClick}"
       >
         ${preset.label}
       </button>
     `;
   }
 
-  #applyPreset(preset: PresetOption): void {
+  #onChipClick = (event: Event): void => {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const preset = PRESETS.find(
+      (candidate) => candidate.cron === target.dataset["cron"],
+    );
+    if (preset !== undefined) {
+      this.#applyPreset(preset);
+    }
+  };
+
+  #applyPreset(preset: CronChoice): void {
     this.rawInput = null;
     this.cron = preset.cron;
     this.label = preset.label;
     this.dispatchEvent(
-      new CustomEvent("te-change", {
+      new CustomEvent<CronChoice>("te-change", {
         detail: { cron: preset.cron, label: preset.label },
         bubbles: true,
         composed: true,
@@ -158,19 +181,18 @@ export class CronPicker extends LitElement {
     );
   }
 
-  #onInput(event: InputEvent): void {
+  #onInput = (event: InputEvent): void => {
     const target = event.target;
-    if (!(target instanceof HTMLElement) || !("value" in target)) {
-      return;
+    if (
+      target instanceof HTMLElement &&
+      "value" in target &&
+      typeof target.value === "string"
+    ) {
+      this.rawInput = target.value;
     }
-    const value = (target as Record<string, unknown>)["value"];
-    if (typeof value !== "string") {
-      return;
-    }
-    this.rawInput = value;
-  }
+  };
 
-  #onBlur(): void {
+  #onBlur = (): void => {
     if (this.rawInput === null) {
       return;
     }
@@ -187,13 +209,45 @@ export class CronPicker extends LitElement {
     this.label = label;
     this.rawInput = null;
     this.dispatchEvent(
-      new CustomEvent("te-change", {
+      new CustomEvent<CronChoice>("te-change", {
         detail: { cron: trimmed, label },
         bubbles: true,
         composed: true,
       }),
     );
+  };
+}
+
+/** The five fields of a cron expression, each parsed. */
+interface ParsedCron {
+  minute: FieldSpec;
+  hour: FieldSpec;
+  dom: FieldSpec;
+  month: FieldSpec;
+  dow: FieldSpec;
+}
+
+/** Splits an expression into its five parsed fields, or explains why not. */
+function parseCron(trimmed: string): ParsedCron | string {
+  const parts = trimmed.split(/\s+/u);
+  if (parts.length !== 5) {
+    return "Expected 5 fields: minute hour day-of-month month day-of-week.";
   }
+  const [minute = "", hour = "", dom = "", month = "", dow = ""] = parts;
+  const parsed: ParsedCron = {
+    minute: parseField(minute, 0, 59),
+    hour: parseField(hour, 0, 23),
+    dom: parseField(dom, 1, 31),
+    month: parseField(month, 1, 12),
+    dow: parseField(dow, 0, 6),
+  };
+  const firstError =
+    parsed.minute.error ??
+    parsed.hour.error ??
+    parsed.dom.error ??
+    parsed.month.error ??
+    parsed.dow.error;
+  return firstError ?? parsed;
 }
 
 /**
@@ -208,25 +262,12 @@ export function nextCronTick(expression: string, now: Date): Date | null {
   if (trimmed === "") {
     return null;
   }
-  const parts = trimmed.split(/\s+/);
-  if (parts.length !== 5) {
-    return null;
-  }
-  const [minute, hour, dom, month, dow] = parts;
-  const minuteSpec = parseField(minute, 0, 59);
-  const hourSpec = parseField(hour, 0, 23);
-  const domSpec = parseField(dom, 1, 31);
-  const monthSpec = parseField(month, 1, 12);
-  const dowSpec = parseField(dow, 0, 6);
-  if (
-    minuteSpec.error !== undefined || hourSpec.error !== undefined ||
-    domSpec.error !== undefined || monthSpec.error !== undefined ||
-    dowSpec.error !== undefined
-  ) {
+  const parsed = parseCron(trimmed);
+  if (typeof parsed === "string") {
     return null;
   }
 
-  const candidate = new Date(now.getTime());
+  const candidate = new Date(now);
   candidate.setUTCSeconds(0, 0);
   candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
 
@@ -234,17 +275,8 @@ export function nextCronTick(expression: string, now: Date): Date | null {
   // emitted by the picker fire at least once a week, so the cap exists to
   // protect against impossible combinations (e.g. `0 0 31 2 *`).
   const MAX_ITERATIONS = 366 * 24 * 60;
-  for (let i = 0; i < MAX_ITERATIONS; i += 1) {
-    if (
-      matchesCron(
-        candidate,
-        minuteSpec,
-        hourSpec,
-        domSpec,
-        monthSpec,
-        dowSpec,
-      )
-    ) {
+  for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
+    if (matchesCron(candidate, parsed)) {
       return candidate;
     }
     candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
@@ -266,37 +298,28 @@ function fieldMatches(
   return spec.values.includes(value);
 }
 
-function matchesCron(
-  date: Date,
-  minute: FieldSpec,
-  hour: FieldSpec,
-  dom: FieldSpec,
-  month: FieldSpec,
-  dow: FieldSpec,
-): boolean {
-  const m = date.getUTCMinutes();
-  const h = date.getUTCHours();
-  const d = date.getUTCDate();
-  const mo = date.getUTCMonth() + 1;
-  const w = date.getUTCDay();
-  if (!fieldMatches(minute, m, 0)) {
+function matchesCron(date: Date, parsed: ParsedCron): boolean {
+  const { minute, hour, dom, month, dow } = parsed;
+  if (!fieldMatches(minute, date.getUTCMinutes(), 0)) {
     return false;
   }
-  if (!fieldMatches(hour, h, 0)) {
+  if (!fieldMatches(hour, date.getUTCHours(), 0)) {
     return false;
   }
-  if (!fieldMatches(month, mo, 1)) {
+  if (!fieldMatches(month, date.getUTCMonth() + 1, 1)) {
     return false;
   }
   // Vixie cron semantics: when both day-of-month and day-of-week are
   // restricted, fire when EITHER matches. When at most one is restricted,
   // both must match (and the unrestricted one matches everything).
+  const dayOfMonth = date.getUTCDate();
+  const dayOfWeek = date.getUTCDay();
   const domRestricted = !dom.star;
   const dowRestricted = !dow.star;
   if (domRestricted && dowRestricted) {
-    return fieldMatches(dom, d, 1) || fieldMatches(dow, w, 0);
+    return fieldMatches(dom, dayOfMonth, 1) || fieldMatches(dow, dayOfWeek, 0);
   }
-  return fieldMatches(dom, d, 1) && fieldMatches(dow, w, 0);
+  return fieldMatches(dom, dayOfMonth, 1) && fieldMatches(dow, dayOfWeek, 0);
 }
 
 interface CronDescription {
@@ -315,34 +338,11 @@ export function describeCron(expression: string): CronDescription {
   if (trimmed === "") {
     return { ok: false, text: "Cron expression is required." };
   }
-  const parts = trimmed.split(/\s+/);
-  if (parts.length !== 5) {
-    return {
-      ok: false,
-      text: "Expected 5 fields: minute hour day-of-month month day-of-week.",
-    };
+  const parsed = parseCron(trimmed);
+  if (typeof parsed === "string") {
+    return { ok: false, text: parsed };
   }
-  const [minute, hour, dom, month, dow] = parts;
-  const minuteSpec = parseField(minute, 0, 59);
-  const hourSpec = parseField(hour, 0, 23);
-  const domSpec = parseField(dom, 1, 31);
-  const monthSpec = parseField(month, 1, 12);
-  const dowSpec = parseField(dow, 0, 6);
-  const firstError = minuteSpec.error ?? hourSpec.error ?? domSpec.error ??
-    monthSpec.error ?? dowSpec.error;
-  if (firstError !== undefined) {
-    return { ok: false, text: firstError };
-  }
-  return {
-    ok: true,
-    text: humanize({
-      minute: minuteSpec,
-      hour: hourSpec,
-      dom: domSpec,
-      month: monthSpec,
-      dow: dowSpec,
-    }),
-  };
+  return { ok: true, text: humanize(parsed) };
 }
 
 interface FieldSpec {
@@ -352,7 +352,51 @@ interface FieldSpec {
   step: number | null;
   // Concrete listed values. Only populated when the field is not a step.
   values: number[];
-  error: string | undefined;
+  error: string | null;
+}
+
+/** A whole number written in decimal digits. */
+const NUMBER_PATTERN = /^\d+$/u;
+
+/** A step field, `*` `/` N. */
+const STEP_PATTERN = /^\*\/(?<step>\d+)$/u;
+
+/** A range, N-M. */
+const RANGE_PATTERN = /^(?<start>\d+)-(?<end>\d+)$/u;
+
+/** The values of one comma-separated piece, or why it is invalid. */
+function parsePiece(
+  piece: string,
+  min: number,
+  max: number,
+): number[] | string {
+  const range = RANGE_PATTERN.exec(piece)?.groups;
+  if (range !== undefined) {
+    const start = Math.trunc(Number(range["start"]));
+    const end = Math.trunc(Number(range["end"]));
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      start < min ||
+      end > max ||
+      start > end
+    ) {
+      return `Invalid range "${piece}" (allowed ${min}-${max}).`;
+    }
+    const values: number[] = [];
+    for (let value = start; value <= end; value += 1) {
+      values.push(value);
+    }
+    return values;
+  }
+  if (!NUMBER_PATTERN.test(piece)) {
+    return `Invalid token "${piece}".`;
+  }
+  const value = Math.trunc(Number(piece));
+  if (!Number.isFinite(value) || value < min || value > max) {
+    return `Out of range "${piece}" (allowed ${min}-${max}).`;
+  }
+  return [value];
 }
 
 function parseField(raw: string, min: number, max: number): FieldSpec {
@@ -361,14 +405,14 @@ function parseField(raw: string, min: number, max: number): FieldSpec {
     star: false,
     step: null,
     values: [],
-    error: undefined,
+    error: null,
   };
   if (raw === "*") {
     return { ...empty, star: true };
   }
-  const stepMatch = raw.match(/^\*\/(\d+)$/);
-  if (stepMatch !== null) {
-    const step = Number.parseInt(stepMatch[1], 10);
+  const stepMatch = STEP_PATTERN.exec(raw)?.groups;
+  if (stepMatch !== undefined) {
+    const step = Math.trunc(Number(stepMatch["step"]));
     if (!Number.isFinite(step) || step <= 0) {
       return {
         ...empty,
@@ -379,77 +423,42 @@ function parseField(raw: string, min: number, max: number): FieldSpec {
   }
   const values: number[] = [];
   for (const piece of raw.split(",")) {
-    const rangeMatch = piece.match(/^(\d+)-(\d+)$/);
-    if (rangeMatch !== null) {
-      const start = Number.parseInt(rangeMatch[1], 10);
-      const end = Number.parseInt(rangeMatch[2], 10);
-      if (
-        !Number.isFinite(start) || !Number.isFinite(end) ||
-        start < min || end > max || start > end
-      ) {
-        return {
-          ...empty,
-          error: `Invalid range "${piece}" (allowed ${min}-${max}).`,
-        };
-      }
-      for (let n = start; n <= end; n += 1) {
-        values.push(n);
-      }
-      continue;
+    const parsed = parsePiece(piece, min, max);
+    if (typeof parsed === "string") {
+      return { ...empty, error: parsed };
     }
-    if (!/^\d+$/.test(piece)) {
-      return {
-        ...empty,
-        error: `Invalid token "${piece}".`,
-      };
-    }
-    const n = Number.parseInt(piece, 10);
-    if (!Number.isFinite(n) || n < min || n > max) {
-      return {
-        ...empty,
-        error: `Out of range "${piece}" (allowed ${min}-${max}).`,
-      };
-    }
-    values.push(n);
+    values.push(...parsed);
   }
   return { ...empty, values };
 }
 
-interface ParsedCron {
-  minute: FieldSpec;
-  hour: FieldSpec;
-  dom: FieldSpec;
-  month: FieldSpec;
-  dow: FieldSpec;
-}
-
 function humanize(parsed: ParsedCron): string {
   const { minute, hour, dom, month, dow } = parsed;
+  const [firstMinute = 0] = minute.values;
+  const [firstHour = 0] = hour.values;
 
   // Common helpers.
   const everyDay = dom.star && month.star && dow.star;
 
   // Minute-stepped cadence: */N * * * *
-  if (
-    minute.step !== null && hour.star && everyDay
-  ) {
-    return everyN("minute", minute.step);
+  if (minute.step !== null && hour.star && everyDay) {
+    return everyN("MINUTE", minute.step);
   }
 
   // Hour-stepped cadence: 0 */N * * * (or other minute literal)
-  if (
-    minute.values.length === 1 && hour.step !== null && everyDay
-  ) {
-    if (minute.values[0] === 0) {
-      return everyN("hour", hour.step);
+  if (minute.values.length === 1 && hour.step !== null && everyDay) {
+    if (firstMinute === 0) {
+      return everyN("HOUR", hour.step);
     }
-    return `Every ${hour.step} hours at minute ${pad2(minute.values[0])}`;
+    return `Every ${hour.step} hours at minute ${pad2(firstMinute)}`;
   }
 
   // Hourly: 0 * * * *
   if (
-    minute.values.length === 1 && minute.values[0] === 0 &&
-    hour.star && everyDay
+    minute.values.length === 1 &&
+    firstMinute === 0 &&
+    hour.star &&
+    everyDay
   ) {
     return "Every hour at :00";
   }
@@ -461,10 +470,12 @@ function humanize(parsed: ParsedCron): string {
 
   // Daily at HH:MM, weekday-restricted optional.
   if (
-    minute.values.length === 1 && hour.values.length === 1 &&
-    dom.star && month.star
+    minute.values.length === 1 &&
+    hour.values.length === 1 &&
+    dom.star &&
+    month.star
   ) {
-    const time = `${pad2(hour.values[0])}:${pad2(minute.values[0])} UTC`;
+    const time = `${pad2(firstHour)}:${pad2(firstMinute)} UTC`;
     if (dow.star) {
       return `Every day at ${time}`;
     }
@@ -475,11 +486,14 @@ function humanize(parsed: ParsedCron): string {
 
   // Multiple times per day: 0 9,18 * * *
   if (
-    minute.values.length === 1 && hour.values.length > 1 &&
-    dom.star && month.star && dow.star
+    minute.values.length === 1 &&
+    hour.values.length > 1 &&
+    dom.star &&
+    month.star &&
+    dow.star
   ) {
     const times = hour.values
-      .map((h) => `${pad2(h)}:${pad2(minute.values[0])}`)
+      .map((hourValue) => `${pad2(hourValue)}:${pad2(firstMinute)}`)
       .join(", ");
     return `Every day at ${times} UTC`;
   }
@@ -488,18 +502,18 @@ function humanize(parsed: ParsedCron): string {
   return `Custom: ${minute.raw} ${hour.raw} ${dom.raw} ${month.raw} ${dow.raw}`;
 }
 
-function everyN(unit: "minute" | "hour", step: number): string {
+/** The unit a stepped cadence counts in. */
+type CadenceUnit = "MINUTE" | "HOUR";
+
+function everyN(unit: CadenceUnit, step: number): string {
+  const unitName = unit === "MINUTE" ? "minute" : "hour";
   if (step === 1) {
-    return unit === "minute" ? "Every minute" : "Every hour";
+    return `Every ${unitName}`;
   }
-  return `Every ${step} ${unit}s`;
+  return `Every ${step} ${unitName}s`;
 }
 
-function pad2(n: number): string {
-  return n < 10 ? `0${n}` : `${n}`;
-}
-
-const WEEKDAYS = [
+const WEEKDAYS: string[] = [
   "Sunday",
   "Monday",
   "Tuesday",
@@ -507,18 +521,23 @@ const WEEKDAYS = [
   "Thursday",
   "Friday",
   "Saturday",
-] as const;
+];
+
+/** The weekday a cron day-of-week number names. */
+function weekdayName(day: number): string {
+  return WEEKDAYS[day % 7] ?? "";
+}
 
 function weekdayList(values: number[]): string {
-  if (values.length === 5 && [1, 2, 3, 4, 5].every((d) => values.includes(d))) {
+  if (
+    values.length === 5 &&
+    [1, 2, 3, 4, 5].every((day) => values.includes(day))
+  ) {
     return "Every weekday";
   }
   if (values.length === 2 && values.includes(0) && values.includes(6)) {
     return "Every weekend";
   }
-  if (values.length === 1) {
-    return `Every ${WEEKDAYS[values[0] % 7]}`;
-  }
-  const names = values.map((d) => WEEKDAYS[d % 7]);
+  const names = values.map((day) => weekdayName(day));
   return `Every ${names.join(", ")}`;
 }

@@ -1,9 +1,20 @@
-import { css, html, LitElement } from "lit";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/icon/icon.js";
+import { css, html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { createRef, type Ref, ref } from "lit/directives/ref.js";
+
+/** What a `te-send` event carries: the trimmed message text. */
+export interface SendDetail {
+  content: string;
+}
 
 declare global {
   interface HTMLElementTagNameMap {
-    "te-chat-composer": ChatComposer;
+    "te-chat-composer": ChatComposerElement;
+  }
+  interface HTMLElementEventMap {
+    "te-send": CustomEvent<SendDetail>;
   }
 }
 
@@ -18,7 +29,7 @@ declare global {
  * - Empty / whitespace-only input is silently ignored
  */
 @customElement("te-chat-composer")
-export class ChatComposer extends LitElement {
+export class ChatComposerElement extends LitElement {
   /**
    * Disables the textarea + button. Used while the parent has an in-flight
    * send so the user can't double-submit; the parent currently fires this
@@ -28,7 +39,9 @@ export class ChatComposer extends LitElement {
   accessor disabled = false;
 
   @state()
-  private accessor draft: string = "";
+  accessor draft: string = "";
+
+  #textareaRef: Ref<HTMLTextAreaElement> = createRef();
 
   static override styles = css`
     :host {
@@ -69,11 +82,14 @@ export class ChatComposer extends LitElement {
     }
   `;
 
-  override render() {
+  override render(): TemplateResult {
     const canSend = this.draft.trim() !== "" && !this.disabled;
+    const sendDisabled = !canSend;
+    const textareaRef = ref(this.#textareaRef);
     return html`
       <div class="composer">
         <textarea
+          ${textareaRef}
           rows="1"
           placeholder="Message..."
           .value="${this.draft}"
@@ -83,7 +99,7 @@ export class ChatComposer extends LitElement {
         ></textarea>
         <wa-button
           size="small"
-          ?disabled="${!canSend}"
+          ?disabled="${sendDisabled}"
           @click="${this.#submit}"
           pill
         >
@@ -93,16 +109,16 @@ export class ChatComposer extends LitElement {
     `;
   }
 
-  #onInput(event: InputEvent): void {
+  #onInput = (event: InputEvent): void => {
     const target = event.target;
     if (!(target instanceof HTMLTextAreaElement)) {
       return;
     }
     this.draft = target.value;
     this.#autoresize(target);
-  }
+  };
 
-  #onKeyDown(event: KeyboardEvent): void {
+  #onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== "Enter") {
       return;
     }
@@ -111,9 +127,9 @@ export class ChatComposer extends LitElement {
     }
     event.preventDefault();
     this.#submit();
-  }
+  };
 
-  #submit(): void {
+  #submit = (): void => {
     const content = this.draft.trim();
     if (content === "" || this.disabled) {
       return;
@@ -127,7 +143,7 @@ export class ChatComposer extends LitElement {
     );
     this.draft = "";
     this.#syncTextareaHeight();
-  }
+  };
 
   #autoresize(textarea: HTMLTextAreaElement): void {
     textarea.style.height = "auto";
@@ -135,8 +151,8 @@ export class ChatComposer extends LitElement {
   }
 
   #syncTextareaHeight(): void {
-    const textarea = this.renderRoot.querySelector("textarea");
-    if (textarea instanceof HTMLTextAreaElement) {
+    const textarea = this.#textareaRef.value;
+    if (textarea !== undefined) {
       textarea.style.height = "auto";
     }
   }

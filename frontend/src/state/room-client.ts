@@ -1,6 +1,6 @@
-import { BACKEND_BASE_URL, RECONNECT_DELAYS_MS } from "@/app/config";
-import type { WsEvent } from "@/app/types";
-import { sleep } from "@/app/utils";
+import { BACKEND_BASE_URL, RECONNECT_DELAYS_MS } from "#config";
+import { isWsEvent, type WsEvent } from "#types";
+import { sleep } from "#utils";
 
 /**
  * WebSocket subscription to one room's event stream.
@@ -55,9 +55,10 @@ export class RoomClient {
     }
     let attempt = 0;
     while (!this.#disposed) {
-      const url = `${
-        BACKEND_BASE_URL.replace("http", "ws")
-      }/v1/rooms/${this.#roomId}/stream`;
+      const url = `${BACKEND_BASE_URL.replace(
+        "http",
+        "ws",
+      )}/v1/rooms/${this.#roomId}/stream`;
       const socket = new WebSocket(url);
       this.#socket = socket;
       const opened = await this.#waitForOpen(socket);
@@ -82,31 +83,46 @@ export class RoomClient {
     }
   }
 
-  #waitForOpen(socket: WebSocket): Promise<boolean> {
-    return new Promise((resolve): void => {
-      socket.onopen = (): void => resolve(true);
-      socket.onerror = (): void => resolve(false);
-      socket.onclose = (): void => resolve(false);
+  async #waitForOpen(socket: WebSocket): Promise<boolean> {
+    const opened = await new Promise<boolean>((resolve): void => {
+      socket.addEventListener("open", (): void => {
+        resolve(true);
+      });
+      socket.addEventListener("error", (): void => {
+        resolve(false);
+      });
+      socket.addEventListener("close", (): void => {
+        resolve(false);
+      });
     });
+    return opened;
   }
 
-  #consumeMessages(socket: WebSocket): Promise<CloseEvent | null> {
-    return new Promise((resolve): void => {
-      socket.onmessage = (event: MessageEvent<string>): void => {
-        try {
-          const parsed = JSON.parse(event.data) as WsEvent;
-          this.#callbacks.onEvent(parsed);
-        } catch {
-          this.#callbacks.onError("Failed to parse event payload.");
-        }
-      };
-      socket.onerror = (): void => {
-        this.#callbacks.onError("WebSocket connection error.");
-      };
-      socket.onclose = (closeEvent: CloseEvent): void => {
-        resolve(closeEvent);
-      };
+  async #consumeMessages(socket: WebSocket): Promise<CloseEvent | null> {
+    socket.addEventListener("message", (event: MessageEvent<unknown>): void => {
+      this.#handleMessage(event.data);
     });
+    socket.addEventListener("error", (): void => {
+      this.#callbacks.onError("WebSocket connection error.");
+    });
+    const closeEvent = await new Promise<CloseEvent>((resolve): void => {
+      socket.addEventListener("close", resolve);
+    });
+    return closeEvent;
+  }
+
+  #handleMessage(data: unknown): void {
+    let parsed: unknown = null;
+    try {
+      parsed = typeof data === "string" ? JSON.parse(data) : null;
+    } catch {
+      parsed = null;
+    }
+    if (isWsEvent(parsed)) {
+      this.#callbacks.onEvent(parsed);
+    } else {
+      this.#callbacks.onError("Failed to parse event payload.");
+    }
   }
 
   async #waitForReconnect(attempt: number): Promise<void> {

@@ -1,14 +1,35 @@
-import type { DashboardState, DashboardStore } from "@/app/state";
-import type { CreateRoomRequest, Room } from "@/app/types";
-import { css, html, LitElement, nothing } from "lit";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
+import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 
+import type { DashboardState, DashboardStore } from "#state";
+import type { CreateRoomRequest, Room, RoomEnvelope } from "#types";
+
 import "./cron-picker.ts";
+import type { CronChoice } from "./cron-picker.ts";
+import {
+  readInputValue,
+  renderLabel,
+  renderTextArea,
+  renderTextField,
+} from "./form-fields.ts";
+import {
+  GOAL_FIELD,
+  INSTRUCTION_FIELD,
+  REPORT_FIELD,
+  TOPIC_FIELD,
+  WAKE_CHECK_FIELD,
+} from "./room-fields.ts";
+import { StoreController } from "./store-controller.ts";
 
 declare global {
   interface HTMLElementTagNameMap {
-    "te-create-room-dialog": CreateRoomDialog;
+    "te-create-room-dialog": CreateRoomDialogElement;
+  }
+  interface HTMLElementEventMap {
+    "te-room-created": CustomEvent<RoomEnvelope>;
   }
 }
 
@@ -36,22 +57,6 @@ interface DialogElement extends HTMLElement {
   open: boolean;
 }
 
-interface CronChangeDetail {
-  cron: string;
-  label: string;
-}
-
-function readInputValue(target: EventTarget | null): string {
-  if (!(target instanceof HTMLElement)) {
-    return "";
-  }
-  if (!("value" in target)) {
-    return "";
-  }
-  const value = (target as Record<string, unknown>)["value"];
-  return typeof value === "string" ? value : "";
-}
-
 /**
  * Modal that captures a brand-new [`Room`]. Owns its own open state and
  * draft form; the parent calls `show()` to open the dialog, which reseeds
@@ -60,19 +65,24 @@ function readInputValue(target: EventTarget | null): string {
  * success so the parent can navigate to `/:code`.
  */
 @customElement("te-create-room-dialog")
-export class CreateRoomDialog extends LitElement {
+export class CreateRoomDialogElement extends LitElement {
   @property({ attribute: false })
   accessor store!: DashboardStore;
 
   @state()
-  private accessor formState: CreateRoomForm = { ...EMPTY_FORM };
+  accessor formState: CreateRoomForm = { ...EMPTY_FORM };
 
   @state()
-  private accessor dashboardState: DashboardState | null = null;
+  accessor dashboardState: DashboardState | null = null;
 
   #dialogRef: Ref<DialogElement> = createRef();
 
-  #unsubscribe: (() => void) | null = null;
+  storeSubscription: StoreController = new StoreController(this).track(
+    (): DashboardStore | null => this.store,
+    (next: DashboardState): void => {
+      this.dashboardState = next;
+    },
+  );
 
   static override styles = css`
     .form-grid {
@@ -132,25 +142,6 @@ export class CreateRoomDialog extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    this.#bindStore();
-  }
-
-  override updated(changed: Map<string, unknown>): void {
-    if (changed.has("store")) {
-      this.#unsubscribe?.();
-      this.#unsubscribe = null;
-      this.#bindStore();
-    }
-  }
-
-  override disconnectedCallback(): void {
-    this.#unsubscribe?.();
-    this.#unsubscribe = null;
-    super.disconnectedCallback();
-  }
-
   /** Resets the draft form and opens the dialog. */
   show(): void {
     this.formState = { ...EMPTY_FORM };
@@ -160,74 +151,21 @@ export class CreateRoomDialog extends LitElement {
     }
   }
 
-  override render() {
+  override render(): TemplateResult {
     const busy = this.dashboardState?.isCreatingRoom ?? false;
     const error = this.dashboardState?.errorMessage ?? null;
-    const form = this.formState;
+    const dialogRef = ref(this.#dialogRef);
+    const errorBanner =
+      error === null || error === ""
+        ? nothing
+        : html`
+          <div class="error-banner">${error}</div>
+        `;
+    const fields = this.#renderFields();
     return html`
-      <wa-dialog ${ref(this.#dialogRef)} label="New room">
-        ${error
-          ? html`
-            <div class="error-banner">${error}</div>
-          `
-          : nothing}
-        <div class="form-grid">
-          ${this.#renderTextField(
-            "topic",
-            "Topic",
-            form.topic,
-            (v) => this.#patchForm({ topic: v }),
-            "Short subject the debaters argue about. Shown to every persona at the top of every turn and used as the room's display label.",
-          )} ${this.#renderTextField(
-            "goal",
-            "Goal",
-            form.goal,
-            (v) => this.#patchForm({ goal: v }),
-            "What you want the room to produce. Used by the leader to judge whether the discussion is on track.",
-          )} ${this.#renderTextArea(
-            "instruction",
-            "Instruction",
-            form.instruction,
-            (v) => this.#patchForm({ instruction: v }),
-            "Optional. Rules personas must follow plus any background context to treat as already-known facts. Appended to every persona prompt.",
-          )}
-          <div class="schedule-grid">
-            <div class="form-field">
-              ${this.#renderLabel(
-                "wake-check",
-                "Wake-check schedule",
-                "Times are interpreted in UTC. While the room is paused, the leader checks at this cadence whether to resume the debate.",
-              )}
-              <te-cron-picker
-                name="wake-check"
-                .cron="${form.resumeScheduleCron}"
-                .label="${form.resumeScheduleLabel}"
-                @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
-                  this.#patchForm({
-                    resumeScheduleCron: e.detail.cron,
-                    resumeScheduleLabel: e.detail.label,
-                  })}"
-              ></te-cron-picker>
-            </div>
-            <div class="form-field">
-              ${this.#renderLabel(
-                "report",
-                "Report schedule",
-                "Times are interpreted in UTC. The leader writes a long-form report on each firing of this schedule.",
-              )}
-              <te-cron-picker
-                name="report"
-                .cron="${form.reportScheduleCron}"
-                .label="${form.reportScheduleLabel}"
-                @te-change="${(e: CustomEvent<CronChangeDetail>): void =>
-                  this.#patchForm({
-                    reportScheduleCron: e.detail.cron,
-                    reportScheduleLabel: e.detail.label,
-                  })}"
-              ></te-cron-picker>
-            </div>
-          </div>
-        </div>
+      <wa-dialog ${dialogRef} label="New room">
+        ${errorBanner}
+        ${fields}
         <div slot="footer" class="footer-row">
           <wa-button
             size="small"
@@ -248,79 +186,87 @@ export class CreateRoomDialog extends LitElement {
     `;
   }
 
-  #renderTextField(
-    key: string,
-    label: string,
-    value: string,
-    onChange: (value: string) => void,
-    tooltip?: string,
-  ) {
+  #renderFields(): TemplateResult {
+    const form = this.formState;
+    const topic = renderTextField(TOPIC_FIELD, form.topic, this.#onTopicInput);
+    const goal = renderTextField(GOAL_FIELD, form.goal, this.#onGoalInput);
+    const instruction = renderTextArea(
+      INSTRUCTION_FIELD,
+      form.instruction,
+      this.#onInstructionInput,
+    );
+    const wakeCheckLabel = renderLabel(WAKE_CHECK_FIELD);
+    const reportLabel = renderLabel(REPORT_FIELD);
     return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-input
-          size="small"
-          .value="${value}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-input>
-      </label>
+      <div class="form-grid">
+        ${topic} ${goal} ${instruction}
+        <div class="schedule-grid">
+          <div class="form-field">
+            ${wakeCheckLabel}
+            <te-cron-picker
+              name="wake-check"
+              .cron="${form.resumeScheduleCron}"
+              .label="${form.resumeScheduleLabel}"
+              @te-change="${this.#onWakeCheckChange}"
+            ></te-cron-picker>
+          </div>
+          <div class="form-field">
+            ${reportLabel}
+            <te-cron-picker
+              name="report"
+              .cron="${form.reportScheduleCron}"
+              .label="${form.reportScheduleLabel}"
+              @te-change="${this.#onReportChange}"
+            ></te-cron-picker>
+          </div>
+        </div>
+      </div>
     `;
   }
 
-  #renderTextArea(
-    key: string,
-    label: string,
-    value: string,
-    onChange: (value: string) => void,
-    tooltip?: string,
-  ) {
-    return html`
-      <label class="form-field">
-        ${this.#renderLabel(key, label, tooltip)}
-        <wa-textarea
-          size="small"
-          rows="3"
-          .value="${value}"
-          @input="${(e: InputEvent): void =>
-            onChange(readInputValue(e.target))}"
-        ></wa-textarea>
-      </label>
-    `;
-  }
+  #onTopicInput = (event: Event): void => {
+    this.formState = {
+      ...this.formState,
+      topic: readInputValue(event.target),
+    };
+  };
 
-  #renderLabel(key: string, label: string, tooltip?: string) {
-    if (tooltip === undefined || tooltip === "") {
-      return html`
-        <span class="form-label">${label}</span>
-      `;
-    }
-    const anchorId = `tip-${key}`;
-    return html`
-      <span class="form-label">
-        <span>${label}</span>
-        <wa-icon
-          id="${anchorId}"
-          class="help-icon"
-          name="circle-question"
-          tabindex="0"
-        ></wa-icon>
-      </span>
-      <wa-tooltip for="${anchorId}" placement="top">${tooltip}</wa-tooltip>
-    `;
-  }
+  #onGoalInput = (event: Event): void => {
+    this.formState = {
+      ...this.formState,
+      goal: readInputValue(event.target),
+    };
+  };
 
-  #patchForm(patch: Partial<CreateRoomForm>): void {
-    this.formState = { ...this.formState, ...patch };
-  }
+  #onInstructionInput = (event: Event): void => {
+    this.formState = {
+      ...this.formState,
+      instruction: readInputValue(event.target),
+    };
+  };
 
-  async #submit(): Promise<void> {
+  #onWakeCheckChange = (event: CustomEvent<CronChoice>): void => {
+    this.formState = {
+      ...this.formState,
+      resumeScheduleCron: event.detail.cron,
+      resumeScheduleLabel: event.detail.label,
+    };
+  };
+
+  #onReportChange = (event: CustomEvent<CronChoice>): void => {
+    this.formState = {
+      ...this.formState,
+      reportScheduleCron: event.detail.cron,
+      reportScheduleLabel: event.detail.label,
+    };
+  };
+
+  #submit = async (): Promise<void> => {
     const request: CreateRoomRequest = {
       topic: this.formState.topic,
       goal: this.formState.goal,
-      instruction: this.formState.instruction === ""
-        ? null
-        : this.formState.instruction,
+      instruction:
+        this.formState.instruction === "" ? null : this.formState.instruction,
       resumeScheduleCron: this.formState.resumeScheduleCron,
       resumeScheduleLabel: this.formState.resumeScheduleLabel,
       reportScheduleCron: this.formState.reportScheduleCron,
@@ -333,29 +279,19 @@ export class CreateRoomDialog extends LitElement {
         dialog.open = false;
       }
       this.dispatchEvent(
-        new CustomEvent("te-room-created", {
+        new CustomEvent<RoomEnvelope>("te-room-created", {
           detail: { room: created },
           bubbles: true,
           composed: true,
         }),
       );
     }
-  }
+  };
 
-  #onCancel(): void {
+  #onCancel = (): void => {
     const dialog = this.#dialogRef.value;
     if (dialog !== undefined) {
       dialog.open = false;
     }
-  }
-
-  #bindStore(): void {
-    if (this.#unsubscribe !== null || this.store === undefined) {
-      return;
-    }
-    this.#unsubscribe = this.store.subscribe((): void => {
-      this.dashboardState = this.store.getState();
-    });
-    this.dashboardState = this.store.getState();
-  }
+  };
 }
